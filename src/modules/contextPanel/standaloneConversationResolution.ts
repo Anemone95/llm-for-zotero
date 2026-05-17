@@ -1,9 +1,11 @@
-export type StandaloneDraftSummary = {
+export type ConversationDraftSummary = {
   conversationKey?: number | null;
   kind?: "global" | "paper" | string | null;
   libraryID?: number | null;
   userTurnCount?: number | null;
 };
+
+export type StandaloneDraftSummary = ConversationDraftSummary;
 
 function normalizePositiveInt(value: unknown): number | null {
   const parsed = Number(value);
@@ -11,19 +13,20 @@ function normalizePositiveInt(value: unknown): number | null {
   return Math.floor(parsed);
 }
 
-function hasNoUserTurns(summary: StandaloneDraftSummary): boolean {
+function hasNoUserTurns(summary: ConversationDraftSummary): boolean {
   return (Number(summary.userTurnCount || 0) || 0) === 0;
 }
 
-export function isReusableStandaloneDraft(params: {
+export function isReusableConversationDraft(params: {
   forceFresh?: boolean;
-  summary: StandaloneDraftSummary | null | undefined;
-  kind: "global" | "paper";
+  summary: ConversationDraftSummary | null | undefined;
+  kind?: "global" | "paper";
   libraryID?: number | null;
 }): boolean {
+  if (params.forceFresh) return false;
   const summary = params.summary;
   if (!summary) return false;
-  if (summary.kind !== params.kind) return false;
+  if (params.kind && summary.kind !== params.kind) return false;
   if (params.kind === "global") {
     const expectedLibraryID = normalizePositiveInt(params.libraryID);
     const summaryLibraryID = normalizePositiveInt(summary.libraryID);
@@ -34,8 +37,43 @@ export function isReusableStandaloneDraft(params: {
   return hasNoUserTurns(summary);
 }
 
+export function findReusableConversationDraft<
+  T extends ConversationDraftSummary,
+>(params: {
+  forceFresh?: boolean;
+  summaries: readonly T[];
+  kind?: "global" | "paper";
+  libraryID?: number | null;
+}): T | null {
+  if (params.forceFresh) return null;
+  return (
+    params.summaries.find((summary) =>
+      isReusableConversationDraft({
+        forceFresh: params.forceFresh,
+        summary,
+        kind: params.kind,
+        libraryID: params.libraryID,
+      }),
+    ) || null
+  );
+}
+
+export function isReusableStandaloneDraft(params: {
+  forceFresh?: boolean;
+  summary: StandaloneDraftSummary | null | undefined;
+  kind: "global" | "paper";
+  libraryID?: number | null;
+}): boolean {
+  return isReusableConversationDraft(params);
+}
+
 export function findReusableStandaloneDraft<
   T extends StandaloneDraftSummary,
->(params: { forceFresh?: boolean; summaries: readonly T[] }): T | null {
-  return params.summaries.find((summary) => hasNoUserTurns(summary)) || null;
+>(params: {
+  forceFresh?: boolean;
+  summaries: readonly T[];
+  kind?: "global" | "paper";
+  libraryID?: number | null;
+}): T | null {
+  return findReusableConversationDraft(params);
 }

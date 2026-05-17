@@ -194,6 +194,10 @@ import {
   type HistorySearchDocument,
   type HistorySearchResult,
 } from "./historySearchController";
+import {
+  findReusableConversationDraft,
+  isReusableConversationDraft,
+} from "../../standaloneConversationResolution";
 
 type StatusLevel = "ready" | "warning" | "error";
 type PendingTurnDeletion = {
@@ -495,7 +499,7 @@ export function createHistoryLifecycleController(
   };
   const isCodexConversationDraft = async (conversationKey: number) => {
     const summary = await getCodexConversationSummary(conversationKey);
-    return !summary || (summary.userTurnCount || 0) <= 0;
+    return Boolean(summary && (summary.userTurnCount || 0) <= 0);
   };
   const touchEmptyDraftActivity = async (
     conversationKey: number,
@@ -3358,7 +3362,7 @@ export function createHistoryLifecycleController(
       setStatus(status, t("Conversation deleted. Undo available."), "ready");
   };
 
-  const createAndSwitchGlobalConversation = async (_forceFresh = false) => {
+  const createAndSwitchGlobalConversation = async (forceFresh = false) => {
     if (!item || isNoteSession()) return;
     closeHistoryNewMenu();
     const libraryID = getCurrentLibraryID();
@@ -3387,12 +3391,19 @@ export function createHistoryLifecycleController(
       const normalizedCurrentCandidate = Number.isFinite(currentCandidate)
         ? Math.floor(currentCandidate)
         : 0;
-      if (normalizedCurrentCandidate > 0) {
+      if (!forceFresh && normalizedCurrentCandidate > 0) {
         try {
           const currentSummary = await getClaudeConversationSummary(
             normalizedCurrentCandidate,
           );
-          if (currentSummary && (currentSummary.userTurnCount || 0) === 0) {
+          if (
+            isReusableConversationDraft({
+              forceFresh,
+              summary: currentSummary,
+              kind: "global",
+              libraryID,
+            })
+          ) {
             targetConversationKey = normalizedCurrentCandidate;
             reuseReason = "active-draft";
           }
@@ -3403,15 +3414,18 @@ export function createHistoryLifecycleController(
           );
         }
       }
-      if (targetConversationKey <= 0) {
+      if (!forceFresh && targetConversationKey <= 0) {
         try {
           const summaries = await listClaudeGlobalConversations(
             libraryID,
             GLOBAL_HISTORY_LIMIT,
           );
-          const latestEmpty = summaries.find(
-            (summary) => (summary.userTurnCount || 0) === 0,
-          );
+          const latestEmpty = findReusableConversationDraft({
+            forceFresh,
+            summaries,
+            kind: "global",
+            libraryID,
+          });
           const latestEmptyKey = Number(latestEmpty?.conversationKey || 0);
           if (Number.isFinite(latestEmptyKey) && latestEmptyKey > 0) {
             targetConversationKey = Math.floor(latestEmptyKey);
@@ -3458,7 +3472,7 @@ export function createHistoryLifecycleController(
       const normalizedCurrentCandidate = Number.isFinite(currentCandidate)
         ? Math.floor(currentCandidate)
         : 0;
-      if (normalizedCurrentCandidate > 0) {
+      if (!forceFresh && normalizedCurrentCandidate > 0) {
         try {
           if (await isCodexConversationDraft(normalizedCurrentCandidate)) {
             targetConversationKey = normalizedCurrentCandidate;
@@ -3471,15 +3485,18 @@ export function createHistoryLifecycleController(
           );
         }
       }
-      if (targetConversationKey <= 0) {
+      if (!forceFresh && targetConversationKey <= 0) {
         try {
           const summaries = await listCodexGlobalConversations(
             libraryID,
             GLOBAL_HISTORY_LIMIT,
           );
-          const latestEmpty = summaries.find(
-            (summary) => (summary.userTurnCount || 0) === 0,
-          );
+          const latestEmpty = findReusableConversationDraft({
+            forceFresh,
+            summaries,
+            kind: "global",
+            libraryID,
+          });
           const latestEmptyKey = Number(latestEmpty?.conversationKey || 0);
           if (Number.isFinite(latestEmptyKey) && latestEmptyKey > 0) {
             targetConversationKey = Math.floor(latestEmptyKey);
@@ -3525,7 +3542,7 @@ export function createHistoryLifecycleController(
       const normalizedCurrentCandidate = Number.isFinite(currentCandidate)
         ? Math.floor(currentCandidate)
         : 0;
-      if (normalizedCurrentCandidate > 0) {
+      if (!forceFresh && normalizedCurrentCandidate > 0) {
         try {
           const turnCount = await getGlobalConversationUserTurnCount(
             normalizedCurrentCandidate,
@@ -3542,7 +3559,7 @@ export function createHistoryLifecycleController(
         }
       }
 
-      if (targetConversationKey <= 0) {
+      if (!forceFresh && targetConversationKey <= 0) {
         try {
           const latestEmpty = await getLatestEmptyGlobalConversation(libraryID);
           const latestEmptyKey = Number(latestEmpty?.conversationKey || 0);
@@ -3596,7 +3613,7 @@ export function createHistoryLifecycleController(
     inputBox.focus({ preventScroll: true });
   };
 
-  const createAndSwitchPaperConversation = async (_forceFresh = false) => {
+  const createAndSwitchPaperConversation = async (forceFresh = false) => {
     if (!item || isNoteSession()) return;
     closeHistoryNewMenu();
     const paperItem = resolveCurrentPaperBaseItem();
@@ -3621,13 +3638,15 @@ export function createHistoryLifecycleController(
 
     if (isClaudeConversationSystem()) {
       const currentKey = Number(getConversationKey(item) || 0);
-      if (Number.isFinite(currentKey) && currentKey > 0) {
+      if (!forceFresh && Number.isFinite(currentKey) && currentKey > 0) {
         try {
           const currentSummary = await getClaudeConversationSummary(currentKey);
           if (
-            currentSummary &&
-            currentSummary.kind === "paper" &&
-            (currentSummary.userTurnCount || 0) === 0
+            isReusableConversationDraft({
+              forceFresh,
+              summary: currentSummary,
+              kind: "paper",
+            })
           ) {
             targetConversationKey = currentKey;
             reuseReason = "active-draft";
@@ -3639,16 +3658,18 @@ export function createHistoryLifecycleController(
           );
         }
       }
-      if (targetConversationKey <= 0) {
+      if (!forceFresh && targetConversationKey <= 0) {
         try {
           const summaries = await listClaudePaperConversations(
             libraryID,
             paperItemID,
             50,
           );
-          const emptyEntry = summaries.find(
-            (s) => (s.userTurnCount || 0) === 0,
-          );
+          const emptyEntry = findReusableConversationDraft({
+            forceFresh,
+            summaries,
+            kind: "paper",
+          });
           if (emptyEntry?.conversationKey) {
             targetConversationKey = emptyEntry.conversationKey;
             reuseReason = "existing-draft";
@@ -3685,13 +3706,15 @@ export function createHistoryLifecycleController(
       }
     } else if (isCodexConversationSystem()) {
       const currentKey = Number(getConversationKey(item) || 0);
-      if (Number.isFinite(currentKey) && currentKey > 0) {
+      if (!forceFresh && Number.isFinite(currentKey) && currentKey > 0) {
         try {
           const currentSummary = await getCodexConversationSummary(currentKey);
           if (
-            currentSummary &&
-            currentSummary.kind === "paper" &&
-            (currentSummary.userTurnCount || 0) === 0
+            isReusableConversationDraft({
+              forceFresh,
+              summary: currentSummary,
+              kind: "paper",
+            })
           ) {
             targetConversationKey = currentKey;
             reuseReason = "active-draft";
@@ -3703,16 +3726,18 @@ export function createHistoryLifecycleController(
           );
         }
       }
-      if (targetConversationKey <= 0) {
+      if (!forceFresh && targetConversationKey <= 0) {
         try {
           const summaries = await listCodexPaperConversations(
             libraryID,
             paperItemID,
             50,
           );
-          const emptyEntry = summaries.find(
-            (s) => (s.userTurnCount || 0) === 0,
-          );
+          const emptyEntry = findReusableConversationDraft({
+            forceFresh,
+            summaries,
+            kind: "paper",
+          });
           if (emptyEntry?.conversationKey) {
             targetConversationKey = emptyEntry.conversationKey;
             reuseReason = "existing-draft";
@@ -3749,7 +3774,7 @@ export function createHistoryLifecycleController(
       }
     } else {
       const currentKey = Number(getConversationKey(item) || 0);
-      if (Number.isFinite(currentKey) && currentKey > 0) {
+      if (!forceFresh && Number.isFinite(currentKey) && currentKey > 0) {
         try {
           const currentSummary = await getPaperConversation(currentKey);
           if (currentSummary && currentSummary.userTurnCount === 0) {
@@ -3764,7 +3789,7 @@ export function createHistoryLifecycleController(
         }
       }
 
-      if (targetConversationKey <= 0) {
+      if (!forceFresh && targetConversationKey <= 0) {
         try {
           const summaries = await listPaperConversations(
             libraryID,

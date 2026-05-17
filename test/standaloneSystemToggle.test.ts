@@ -1,7 +1,9 @@
 import { assert } from "chai";
 import { describe, it } from "mocha";
 import {
+  findReusableConversationDraft,
   findReusableStandaloneDraft,
+  isReusableConversationDraft,
   isReusableStandaloneDraft,
 } from "../src/modules/contextPanel/standaloneConversationResolution";
 import type { ConversationSystem } from "../src/shared/types";
@@ -21,7 +23,7 @@ describe("standalone system toggle", function () {
     assert.deepEqual(calls, ["codex"]);
   });
 
-  it("reuses an active empty Codex global draft even when forced fresh", function () {
+  it("does not reuse an active empty Codex global draft when forced fresh", function () {
     const draft = {
       conversationKey: 5_000_000_001,
       kind: "global",
@@ -29,7 +31,7 @@ describe("standalone system toggle", function () {
       userTurnCount: 0,
     };
 
-    assert.isTrue(
+    assert.isFalse(
       isReusableStandaloneDraft({
         forceFresh: true,
         summary: draft,
@@ -47,7 +49,7 @@ describe("standalone system toggle", function () {
     );
   });
 
-  it("reuses an active empty Codex paper draft even when forced fresh", function () {
+  it("does not reuse an active empty Codex paper draft when forced fresh", function () {
     const draft = {
       conversationKey: 6_000_000_001,
       kind: "paper",
@@ -55,7 +57,7 @@ describe("standalone system toggle", function () {
       userTurnCount: 0,
     };
 
-    assert.isTrue(
+    assert.isFalse(
       isReusableStandaloneDraft({
         forceFresh: true,
         summary: draft,
@@ -71,7 +73,7 @@ describe("standalone system toggle", function () {
     );
   });
 
-  it("reuses listed empty drafts even when forced fresh", function () {
+  it("does not reuse listed empty drafts when forced fresh", function () {
     const drafts = [
       {
         conversationKey: 5_000_000_010,
@@ -87,12 +89,11 @@ describe("standalone system toggle", function () {
       },
     ];
 
-    assert.equal(
+    assert.isNull(
       findReusableStandaloneDraft({
         forceFresh: true,
         summaries: drafts,
-      })?.conversationKey,
-      5_000_000_011,
+      }),
     );
     assert.equal(
       findReusableStandaloneDraft({
@@ -100,6 +101,72 @@ describe("standalone system toggle", function () {
         summaries: drafts,
       })?.conversationKey,
       5_000_000_011,
+    );
+  });
+
+  it("keeps implicit side-panel Codex global draft reuse scoped to the current library", function () {
+    const drafts = [
+      {
+        conversationKey: 5_000_000_010,
+        kind: "global",
+        libraryID: 2,
+        userTurnCount: 0,
+      },
+      {
+        conversationKey: 5_000_000_011,
+        kind: "global",
+        libraryID: 1,
+        userTurnCount: 0,
+      },
+    ];
+
+    assert.isNull(
+      findReusableConversationDraft({
+        forceFresh: true,
+        summaries: drafts,
+        kind: "global",
+        libraryID: 1,
+      }),
+    );
+    assert.equal(
+      findReusableConversationDraft({
+        forceFresh: false,
+        summaries: drafts,
+        kind: "global",
+        libraryID: 1,
+      })?.conversationKey,
+      5_000_000_011,
+    );
+  });
+
+  it("prevents side-panel forced fresh from reusing Codex paper draft catalog rows", function () {
+    const draft = {
+      conversationKey: 6_000_000_011,
+      kind: "paper",
+      libraryID: 1,
+      userTurnCount: 0,
+    };
+
+    assert.isFalse(
+      isReusableConversationDraft({
+        forceFresh: true,
+        summary: draft,
+        kind: "paper",
+      }),
+    );
+    assert.isTrue(
+      isReusableConversationDraft({
+        forceFresh: false,
+        summary: draft,
+        kind: "paper",
+      }),
+    );
+    assert.isFalse(
+      isReusableConversationDraft({
+        forceFresh: false,
+        summary: null,
+        kind: "paper",
+      }),
     );
   });
 });
