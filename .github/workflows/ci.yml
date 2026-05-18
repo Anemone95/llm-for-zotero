@@ -3,10 +3,11 @@ name: CI
 on:
   push:
     branches:
-      - main
+      - "**"
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   lint:
@@ -31,8 +32,9 @@ jobs:
       - name: Upload build result
         uses: actions/upload-artifact@v4
         with:
-          name: build-result
-          path: .scaffold/build
+          name: llm-for-zotero-xpi-${{ github.sha }}
+          path: .scaffold/build/*.xpi
+          if-no-files-found: error
 
   test:
     runs-on: ubuntu-latest
