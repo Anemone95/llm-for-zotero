@@ -3,11 +3,15 @@ import { sanitizeText } from "../../textUtils";
 import { resolvePaperContextDisplayMetadata as resolvePaperContextDisplayMetadataShared } from "../../paperAttribution";
 import type { PaperContextRef, PaperContentSourceMode } from "../../types";
 
-export function normalizePaperContextEntries(value: unknown): PaperContextRef[] {
+export function normalizePaperContextEntries(
+  value: unknown,
+): PaperContextRef[] {
   return normalizePaperContextRefs(value, { sanitizeText });
 }
 
-export function resolvePaperContextDisplayMetadata(paperContext: PaperContextRef): {
+export function resolvePaperContextDisplayMetadata(
+  paperContext: PaperContextRef,
+): {
   firstCreator?: string;
   year?: string;
 } {
@@ -18,10 +22,30 @@ function extractPaperYear(paperContext: PaperContextRef): string | null {
   return resolvePaperContextDisplayMetadata(paperContext).year || null;
 }
 
+function normalizeAttachmentText(value: unknown): string {
+  return sanitizeText(String(value || ""))
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getZoteroItemsApi(): {
+  get?: (itemId: number) => Zotero.Item | null | undefined;
+} | null {
+  if (typeof Zotero === "undefined") return null;
+  return (
+    (
+      Zotero as unknown as {
+        Items?: { get?: (itemId: number) => Zotero.Item | null | undefined };
+      }
+    ).Items || null
+  );
+}
+
 function resolvePaperContextAttachmentItem(
   paperContext: PaperContextRef,
 ): Zotero.Item | null {
-  const attachment = Zotero.Items.get(paperContext.contextItemId) || null;
+  const attachment =
+    getZoteroItemsApi()?.get?.(paperContext.contextItemId) || null;
   if (!attachment?.isAttachment?.()) return null;
   return attachment;
 }
@@ -29,11 +53,12 @@ function resolvePaperContextAttachmentItem(
 function resolvePaperContextParentItem(
   paperContext: PaperContextRef,
 ): Zotero.Item | null {
-  const item = Zotero.Items.get(paperContext.itemId) || null;
+  const items = getZoteroItemsApi();
+  const item = items?.get?.(paperContext.itemId) || null;
   if (item?.isRegularItem?.()) return item;
   const contextAttachment = resolvePaperContextAttachmentItem(paperContext);
   if (contextAttachment?.parentID) {
-    const parent = Zotero.Items.get(contextAttachment.parentID) || null;
+    const parent = items?.get?.(contextAttachment.parentID) || null;
     if (parent?.isRegularItem?.()) return parent;
   }
   return null;
@@ -41,11 +66,40 @@ function resolvePaperContextParentItem(
 
 /** Returns the attachment title for any paper context (always, not just multi-PDF). */
 export function resolveAttachmentTitle(paperContext: PaperContextRef): string {
+  return (
+    resolveLiveAttachmentTitle(paperContext) ||
+    normalizeAttachmentText(paperContext.attachmentTitle || "")
+  );
+}
+
+function resolveLiveAttachmentTitle(paperContext: PaperContextRef): string {
+  const contextAttachment = resolvePaperContextAttachmentItem(paperContext);
+  if (contextAttachment) {
+    const title = normalizeAttachmentText(contextAttachment.getField("title"));
+    if (title) return title;
+  }
+  return "";
+}
+
+function resolveAttachmentFilename(paperContext: PaperContextRef): string {
   const contextAttachment = resolvePaperContextAttachmentItem(paperContext);
   if (!contextAttachment) return "";
-  return sanitizeText(String(contextAttachment.getField("title") || ""))
-    .replace(/\s+/g, " ")
-    .trim();
+  return normalizeAttachmentText(
+    (contextAttachment as unknown as { attachmentFilename?: unknown })
+      .attachmentFilename,
+  );
+}
+
+export function resolvePaperContextAttachmentLabel(
+  paperContext: PaperContextRef,
+  options?: { fallback?: string },
+): string {
+  return (
+    resolveLiveAttachmentTitle(paperContext) ||
+    resolveAttachmentFilename(paperContext) ||
+    normalizeAttachmentText(paperContext.attachmentTitle || "") ||
+    normalizeAttachmentText(options?.fallback || "")
+  );
 }
 
 function resolveMultiPdfAttachmentTitle(paperContext: PaperContextRef): string {
@@ -54,7 +108,7 @@ function resolveMultiPdfAttachmentTitle(paperContext: PaperContextRef): string {
   const attachmentIds = parentItem.getAttachments?.() || [];
   let pdfCount = 0;
   for (const attachmentId of attachmentIds) {
-    const attachment = Zotero.Items.get(attachmentId);
+    const attachment = getZoteroItemsApi()?.get?.(attachmentId);
     if (
       attachment?.isAttachment?.() &&
       attachment.attachmentContentType === "application/pdf"
@@ -70,9 +124,7 @@ function buildCreatorYearBase(paperContext: PaperContextRef): string {
   const metadata = resolvePaperContextDisplayMetadata(paperContext);
   const creator = sanitizeText(metadata.firstCreator || "").trim();
   const year = extractPaperYear(paperContext);
-  const label = creator
-    ? (year ? `${creator}, ${year}` : creator)
-    : "Paper";
+  const label = creator ? (year ? `${creator}, ${year}` : creator) : "Paper";
   return `📚 ${label}`;
 }
 
@@ -89,6 +141,21 @@ export function formatPaperContextChipLabel(
   return attachmentTitle ? `${base} - ${attachmentTitle}` : base;
 }
 
+export function formatPaperContextCardAttachmentLine(
+  paperContext: PaperContextRef,
+  contentSourceMode?: PaperContentSourceMode,
+): string {
+  if (contentSourceMode === "pdf") {
+    return resolvePaperContextAttachmentLabel(paperContext);
+  }
+  if (contentSourceMode === "mineru") {
+    return resolvePaperContextAttachmentLabel(paperContext, {
+      fallback: "full.md",
+    });
+  }
+  return "";
+}
+
 export function formatPaperContextChipTitle(
   paperContext: PaperContextRef,
   contentSourceMode?: PaperContentSourceMode,
@@ -97,18 +164,18 @@ export function formatPaperContextChipTitle(
   const meta = [metadata.firstCreator || "", metadata.year || ""]
     .filter(Boolean)
     .join(" · ");
-  const modeLabel = contentSourceMode === "text"
-    ? "Source: Extracted text"
-    : contentSourceMode === "mineru"
-      ? "Source: MinerU (enhanced markdown)"
-      : contentSourceMode === "pdf"
-        ? "Source: PDF file"
-        : "";
-  const attachmentTitle = contentSourceMode === "pdf"
-    ? resolveAttachmentTitle(paperContext)
-    : contentSourceMode === "mineru"
-      ? "full.md"
-      : "";
+  const modeLabel =
+    contentSourceMode === "text"
+      ? "Source: Extracted text"
+      : contentSourceMode === "mineru"
+        ? "Source: MinerU (enhanced markdown)"
+        : contentSourceMode === "pdf"
+          ? "Source: PDF file"
+          : "";
+  const attachmentTitle = formatPaperContextCardAttachmentLine(
+    paperContext,
+    contentSourceMode,
+  );
   return [
     paperContext.title,
     meta,

@@ -335,11 +335,11 @@ import {
   type HistorySearchResult,
 } from "./setupHandlers/controllers/historySearchController";
 import {
+  formatPaperContextCardAttachmentLine,
   formatPaperContextChipLabel,
   formatPaperContextChipTitle,
   normalizePaperContextEntries,
   resolvePaperContextDisplayMetadata,
-  resolveAttachmentTitle,
 } from "./setupHandlers/controllers/composeContextController";
 import {
   isPinnedFile,
@@ -2155,16 +2155,6 @@ export function setupHandlers(
     paperChipMenuTarget = null;
     paperChipMenuSticky = false;
   };
-  const buildPaperChipAttachmentText = (
-    paperContext: PaperContextRef,
-  ): string => {
-    const attachmentTitle = sanitizeText(
-      paperContext.attachmentTitle || "",
-    ).trim();
-    const paperTitle = sanitizeText(paperContext.title || "").trim();
-    if (!attachmentTitle || attachmentTitle === paperTitle) return "";
-    return attachmentTitle;
-  };
   const buildPaperMetaText = (paper: {
     citationKey?: string;
     firstCreator?: string;
@@ -2232,14 +2222,10 @@ export function setupHandlers(
         }),
       );
     }
-    // Attachment line: PDF shows real title, MinerU shows "full.md", Text has none
-    const displayAttachmentText =
-      mode === "pdf"
-        ? buildPaperChipAttachmentText(paperContext) ||
-          resolveAttachmentTitle(paperContext)
-        : mode === "mineru"
-          ? "full.md"
-          : ""; // text mode: no attachment line
+    const displayAttachmentText = formatPaperContextCardAttachmentLine(
+      paperContext,
+      mode,
+    );
     if (displayAttachmentText) {
       rowMain.appendChild(
         createElement(
