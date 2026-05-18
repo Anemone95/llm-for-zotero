@@ -2,6 +2,7 @@ import { assert } from "chai";
 import {
   normalizeBlockBoundaries,
   renderMarkdown,
+  renderMarkdownForNote,
 } from "../src/utils/markdown";
 
 describe("normalizeBlockBoundaries", function () {
@@ -139,6 +140,25 @@ describe("normalizeBlockBoundaries", function () {
       const result = normalizeBlockBoundaries(input);
       assert.equal(result, input);
     });
+  });
+});
+
+describe("renderMarkdown code fences", function () {
+  it("renders code fences with non-word language info", function () {
+    const html = renderMarkdown("```c++\nint main() { return 0; }\n```");
+
+    assert.include(html, '<pre class="lang-c"><code>');
+    assert.include(html, "int main() { return 0; }");
+  });
+
+  it("renders Zotero note code blocks without nested code tags", function () {
+    const html = renderMarkdownForNote(
+      '```objective-c file.m\nNSLog(@"hi");\n```',
+    );
+
+    assert.include(html, '<pre class="lang-objective-c">');
+    assert.notInclude(html, "<code>");
+    assert.include(html, "NSLog");
   });
 });
 

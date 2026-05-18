@@ -1,6 +1,4 @@
 import { AgentToolRegistry } from "./tools/registry";
-import { readAttachmentBytes } from "../modules/contextPanel/attachmentStorage";
-import { encodeBytesBase64 } from "./model/shared";
 import { recordAgentTurn } from "./store/conversationMemory";
 import {
   appendAgentTranscriptMessages,
@@ -11,7 +9,6 @@ import {
 import type {
   AgentInheritedApproval,
   AgentModelCapabilities,
-  AgentModelContentPart,
   AgentConfirmationResolution,
   AgentEvent,
   AgentModelMessage,
@@ -86,58 +83,49 @@ function createConfirmationRequestId(): string {
   return `confirm-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-async function toDataUrl(
-  storedPath: string,
-  mimeType: string,
-): Promise<string> {
-  const bytes = await readAttachmentBytes(storedPath);
-  return `data:${mimeType};base64,${encodeBytesBase64(bytes)}`;
-}
-
 function summarizeArtifacts(artifacts: AgentToolArtifact[]): string {
-  const imagePages = artifacts
-    .filter(
-      (artifact): artifact is Extract<AgentToolArtifact, { kind: "image" }> => {
-        return artifact.kind === "image";
-      },
-    )
-    .map(
-      (artifact) =>
-        artifact.pageLabel ||
-        (Number.isFinite(artifact.pageIndex)
-          ? `${artifact.pageIndex! + 1}`
-          : ""),
-    );
-  const fileTitles = artifacts
-    .filter(
-      (
-        artifact,
-      ): artifact is Extract<AgentToolArtifact, { kind: "file_ref" }> => {
-        return artifact.kind === "file_ref";
-      },
-    )
-    .map((artifact) => artifact.title || artifact.name);
+  const imageArtifacts = artifacts.filter(
+    (artifact): artifact is Extract<AgentToolArtifact, { kind: "image" }> => {
+      return artifact.kind === "image";
+    },
+  );
+  const fileArtifacts = artifacts.filter(
+    (
+      artifact,
+    ): artifact is Extract<AgentToolArtifact, { kind: "file_ref" }> => {
+      return artifact.kind === "file_ref";
+    },
+  );
   const parts: string[] = [];
-  if (imagePages.length) {
+  if (imageArtifacts.length) {
     parts.push(
-      `Prepared PDF page image${imagePages.length === 1 ? "" : "s"} (${
-        imagePages
-          .filter(Boolean)
-          .map((entry) => `p${entry}`)
-          .join(", ") ||
-        `${imagePages.length} page${imagePages.length === 1 ? "" : "s"}`
-      }) for visual inspection.`,
+      [
+        `Prepared PDF page image path${imageArtifacts.length === 1 ? "" : "s"}:`,
+        ...imageArtifacts.map((artifact, index) => {
+          const pageLabel =
+            artifact.pageLabel ||
+            (Number.isFinite(artifact.pageIndex)
+              ? `${artifact.pageIndex! + 1}`
+              : "");
+          const label = pageLabel ? `page ${pageLabel}` : `image ${index + 1}`;
+          return `- ${label}: ${artifact.storedPath}`;
+        }),
+      ].join("\n"),
     );
   }
-  if (fileTitles.length) {
+  if (fileArtifacts.length) {
     parts.push(
-      `Prepared the PDF file${fileTitles.length === 1 ? "" : "s"} ${fileTitles
-        .map((entry) => `"${entry}"`)
-        .join(", ")} for direct reading.`,
+      [
+        `Prepared PDF file path${fileArtifacts.length === 1 ? "" : "s"}:`,
+        ...fileArtifacts.map((artifact) => {
+          const title = artifact.title || artifact.name;
+          return `- ${title}: ${artifact.storedPath}`;
+        }),
+      ].join("\n"),
     );
   }
   parts.push(
-    "Use the attached pages or PDF directly when answering. Do not ask the user to re-upload them.",
+    "Use these local paths when direct file access is needed. Do not inline-upload images or PDFs in the model input.",
   );
   return parts.join(" ");
 }
@@ -178,59 +166,14 @@ function summarizeTextOnlyOmittedParts(
 
 async function buildArtifactFollowupMessage(
   result: AgentToolResult,
-  options: { multimodal?: boolean; modelName?: string } = {},
+  _options: { multimodal?: boolean; modelName?: string } = {},
 ): Promise<AgentModelMessage | null> {
   const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
   if (!artifacts.length || !result.ok) return null;
-  if (options.multimodal === false) {
-    return {
-      role: "user",
-      content: summarizeTextOnlyArtifacts(artifacts, options.modelName),
-    };
-  }
-  const parts: AgentModelContentPart[] = [
-    {
-      type: "text",
-      text: summarizeArtifacts(artifacts),
-    },
-  ];
-  for (const artifact of artifacts) {
-    if (artifact.kind === "image") {
-      if (!artifact.storedPath || !artifact.mimeType) continue;
-      try {
-        const url = await toDataUrl(artifact.storedPath, artifact.mimeType);
-        parts.push({
-          type: "image_url",
-          image_url: {
-            url,
-            detail: "high",
-          },
-        });
-      } catch (error) {
-        ztoolkit.log(
-          "LLM Agent: Failed to load image artifact",
-          artifact,
-          error,
-        );
-      }
-      continue;
-    }
-    parts.push({
-      type: "file_ref",
-      file_ref: {
-        name: artifact.name,
-        mimeType: artifact.mimeType,
-        storedPath: artifact.storedPath,
-        contentHash: artifact.contentHash,
-      },
-    });
-  }
-  return parts.length > 1
-    ? {
-        role: "user",
-        content: parts,
-      }
-    : null;
+  return {
+    role: "user",
+    content: summarizeArtifacts(artifacts),
+  };
 }
 
 function filterFollowupMessageForCapabilities(

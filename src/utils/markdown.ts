@@ -120,7 +120,11 @@ function escapeRegex(str: string): string {
 }
 
 function hasUnescapedPipe(text: string, start: number, end: number): boolean {
-  for (let index = Math.max(0, start); index < Math.min(text.length, end); index++) {
+  for (
+    let index = Math.max(0, start);
+    index < Math.min(text.length, end);
+    index++
+  ) {
     if (text[index] !== "|") continue;
     let slashCount = 0;
     for (let prev = index - 1; prev >= 0 && text[prev] === "\\"; prev--) {
@@ -271,10 +275,7 @@ function buildWrappedDisplayMath(math: string): string | null {
 
   const terms = splitTopLevelAdditiveTerms(math);
   if (terms.length < 3) return null;
-  const lines = [
-    `& ${terms[0]}`,
-    ...terms.slice(1).map((term) => `& ${term}`),
-  ];
+  const lines = [`& ${terms[0]}`, ...terms.slice(1).map((term) => `& ${term}`)];
   return `\\begin{aligned}${lines.join(" \\\\ ")}\\end{aligned}`;
 }
 
@@ -357,7 +358,7 @@ function splitIntoBlocks(text: string): TextBlock[] {
   const remaining = text;
 
   // First, extract fenced code blocks (they're atomic)
-  const codeBlockRegex = /```(\w*)\n?([\s\S]*?)```/g;
+  const codeBlockRegex = /```([^\r\n`]*)\r?\n?([\s\S]*?)```/g;
   const codeBlockMatches: {
     match: string;
     index: number;
@@ -803,11 +804,14 @@ function renderBlock(block: TextBlock): string {
 /** Render fenced code block */
 function renderCodeBlock(code: string, raw: string): string {
   // Extract language from raw if present
-  const langMatch = raw.match(/^```(\w*)/);
-  const lang = langMatch?.[1] || "";
+  const infoMatch = raw.match(/^```([^\r\n`]*)/);
+  const info = (infoMatch?.[1] || "").trim();
+  const lang = (info.match(/^[^\s]+/)?.[0] || "").replace(/[^\w-]/g, "");
   const langClass = lang ? ` class="lang-${lang}"` : "";
+  if (zoteroNoteMode) {
+    return `<pre${langClass}>${escapeHtml(code.trim())}</pre>`;
+  }
   const html = `<pre${langClass}><code>${escapeHtml(code.trim())}</code></pre>`;
-  if (zoteroNoteMode) return html;
   return wrapCopyable(html, raw.trim(), "code");
 }
 
@@ -830,7 +834,11 @@ function renderMathBlock(content: string): string {
   }
 
   const rendered = renderDisplayLatex(math);
-  return wrapCopyable(`<div class="math-display">${rendered}</div>`, copySource, "math");
+  return wrapCopyable(
+    `<div class="math-display">${rendered}</div>`,
+    copySource,
+    "math",
+  );
 }
 
 /** Render header */
@@ -928,13 +936,15 @@ function renderBlockquote(content: string): string {
   // constructs (display math, code blocks, etc.) inside blockquotes work.
   const innerText = innerLines.join("\n");
   const innerBlocks = splitTextBlocks(innerText);
-  const innerHtml = innerBlocks.map((block) => {
-    try {
-      return renderBlock(block);
-    } catch {
-      return `<div class="render-fallback">${escapeHtml(block.raw)}</div>`;
-    }
-  }).join("\n");
+  const innerHtml = innerBlocks
+    .map((block) => {
+      try {
+        return renderBlock(block);
+      } catch {
+        return `<div class="render-fallback">${escapeHtml(block.raw)}</div>`;
+      }
+    })
+    .join("\n");
   return `<blockquote>${innerHtml}</blockquote>`;
 }
 

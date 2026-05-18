@@ -220,7 +220,7 @@ describe("codexAppServerInput", function () {
     ]);
   });
 
-  it("keeps the latest user message images in agent mode", async function () {
+  it("omits latest user message images in agent mode", async function () {
     const messages: AgentModelMessage[] = [
       {
         role: "assistant",
@@ -261,11 +261,13 @@ describe("codexAppServerInput", function () {
     (globalThis as typeof globalThis & { IOUtils?: unknown }).IOUtils =
       originalIOUtils;
 
-    assert.deepEqual(input[0], {
-      type: "text",
-      text: "summarize",
-    });
-    assert.equal(input[1]?.type, "localImage");
+    assert.equal(input[0]?.type, "text");
+    assert.include(input[0]?.type === "text" ? input[0].text : "", "summarize");
+    assert.isUndefined(input[1]);
+    assert.include(
+      input[0].type === "text" ? input[0].text : "",
+      "Image omitted in agent mode",
+    );
   });
 
   it("maps the system prompt to developer instructions and injects only seeded history", async function () {
@@ -315,12 +317,11 @@ describe("codexAppServerInput", function () {
     ]);
     assert.deepEqual(prepared.turnInput[0], {
       type: "text",
-      text: "Summarize this figure.",
+      text:
+        "Summarize this figure.\n\n" +
+        "[Image omitted in agent mode; use the available local PDF/file path or Zotero tools instead.]",
     });
-    assert.deepEqual(prepared.turnInput[1], {
-      type: "localImage",
-      path: "C:\\Users\\alice\\figure.png",
-    });
+    assert.isUndefined(prepared.turnInput[1]);
   });
 
   it("builds legacy flattened chat input for older app-server binaries", async function () {

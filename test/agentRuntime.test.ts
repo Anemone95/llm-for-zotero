@@ -330,7 +330,7 @@ describe("AgentRuntime", function () {
     }
   });
 
-  it("passes image artifacts back into the next model step", async function () {
+  it("passes image artifact paths back into the next model step", async function () {
     const restoreDb = installMockDb();
     const restoreIOUtils = (
       globalThis as typeof globalThis & {
@@ -385,7 +385,7 @@ describe("AgentRuntime", function () {
         }),
       });
 
-      let sawArtifactUserMessage = false;
+      let sawArtifactPathMessage = false;
       const runtime = new AgentRuntime({
         registry,
         adapterFactory: () => ({
@@ -396,18 +396,15 @@ describe("AgentRuntime", function () {
           }),
           supportsTools: () => true,
           async runStep(params: AgentStepParams): Promise<AgentModelStep> {
-            if (!sawArtifactUserMessage) {
-              sawArtifactUserMessage = params.messages.some(
+            if (!sawArtifactPathMessage) {
+              sawArtifactPathMessage = params.messages.some(
                 (message) =>
                   message.role === "user" &&
-                  Array.isArray(message.content) &&
-                  message.content.some(
-                    (part) =>
-                      part.type === "image_url" &&
-                      part.image_url.url.startsWith("data:image/png;base64,"),
-                  ),
+                  typeof message.content === "string" &&
+                  message.content.includes("Prepared PDF page image path") &&
+                  message.content.includes(imagePath),
               );
-              if (!sawArtifactUserMessage) {
+              if (!sawArtifactPathMessage) {
                 return {
                   kind: "tool_calls",
                   calls: [
@@ -455,7 +452,7 @@ describe("AgentRuntime", function () {
       });
 
       assert.equal(outcome.kind, "completed");
-      assert.isTrue(sawArtifactUserMessage);
+      assert.isTrue(sawArtifactPathMessage);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
       (
@@ -562,7 +559,8 @@ describe("AgentRuntime", function () {
       const serialized = JSON.stringify(continuationMessages);
       assert.notInclude(serialized, "image_url");
       assert.notInclude(serialized, "file_ref");
-      assert.include(serialized, "does not support image or file input");
+      assert.include(serialized, "Prepared PDF page image path");
+      assert.include(serialized, "Prepared PDF file path");
       assert.include(serialized, "Extracted text");
     } finally {
       restoreDb();

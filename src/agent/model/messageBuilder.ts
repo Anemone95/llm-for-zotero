@@ -147,6 +147,18 @@ function buildFullUserMessage(
       typeof a.storedPath === "string" &&
       a.storedPath.trim(),
   );
+  if (pdfAttachments.length) {
+    contextLines.push(
+      [
+        "Current PDF file location(s):",
+        ...pdfAttachments.map((attachment, index) => {
+          const title = attachment.name?.trim() || `PDF ${index + 1}`;
+          return `- ${title}: ${attachment.storedPath}`;
+        }),
+        "Use these local file paths when direct PDF access is needed. Do not inline-upload the PDF or convert it to page images in the model input.",
+      ].join("\n"),
+    );
+  }
   const nonPdfAttachments = (request.attachments || []).filter(
     (a) => a.category !== "pdf",
   );
@@ -174,36 +186,11 @@ function buildFullUserMessage(
   const screenshots = Array.isArray(request.screenshots)
     ? request.screenshots.filter((entry) => Boolean(entry))
     : [];
-  const hasInlineMedia = screenshots.length > 0 || pdfAttachments.length > 0;
-  if (!hasInlineMedia || !isMultimodalRequestSupported(request)) {
-    return {
-      role: "user",
-      content: promptText,
-    };
-  }
   return {
     role: "user",
-    content: [
-      {
-        type: "text",
-        text: promptText,
-      },
-      ...screenshots.map((url) => ({
-        type: "image_url" as const,
-        image_url: {
-          url,
-        },
-      })),
-      ...pdfAttachments.map((a) => ({
-        type: "file_ref" as const,
-        file_ref: {
-          name: a.name,
-          mimeType: a.mimeType || "application/pdf",
-          storedPath: a.storedPath as string,
-          contentHash: a.contentHash,
-        },
-      })),
-    ],
+    content: screenshots.length
+      ? `${promptText}\n\n${screenshots.length} screenshot image(s) were selected in Zotero, but agent mode does not inline-send images. Use Zotero tools or the local file/PDF paths shown above when file access is needed.`
+      : promptText,
   };
 }
 
@@ -306,22 +293,11 @@ function buildAutoReadInstruction(
       "Call paper_read({ mode:'targeted', query:'...' }) only if the follow-up asks for evidence that has not already been read."
     );
   }
-  const allHaveMineruCache = fullTextPapers.every((entry) =>
-    Boolean(entry.mineruCacheDir),
-  );
-  if (allHaveMineruCache) {
-    return (
-      "TURN RULE: Because the user marked specific paper(s) for full-text use on this turn, " +
-      "your very first action MUST be to call `paper_read({ mode:'overview' })` targeting only those full-text papers. " +
-      "The paper_read facade dispatches to the available MinerU or PDF text path; use `paper_read({ mode:'targeted', query:'...' })` only for a specific missing claim. " +
-      "Do this before answering, even if the answer seems obvious."
-    );
-  }
   return (
-    "TURN RULE: Because the user marked specific paper(s) for full-text use on this turn, " +
-    "your very first action MUST be to call `paper_read({ mode:'overview' })` targeting only those full-text papers. " +
-    "Do this before answering, even if the answer seems obvious. " +
-    "Do not include retrieval-only papers in that mandatory first read."
+    "TURN RULE: Specific paper PDF resources are in scope for this turn. " +
+    "Use the local PDF file path provided in the user message as the primary direct-PDF handle. " +
+    "Do not eagerly preload the paper by sending PDF page images or extracted PDF text. " +
+    "Call `paper_read` only when the user's request requires Zotero-side extraction or targeted evidence that cannot be answered from the path-aware environment."
   );
 }
 

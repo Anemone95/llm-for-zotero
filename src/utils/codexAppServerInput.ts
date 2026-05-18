@@ -476,10 +476,14 @@ function splitAgentContent(content: AgentModelMessage["content"]): {
       continue;
     }
     if (part.type === "image_url") {
-      imageUrls.push(part.image_url.url);
+      lines.push(
+        "[Image omitted in agent mode; use the available local PDF/file path or Zotero tools instead.]",
+      );
       continue;
     }
-    lines.push(`[Prepared file: ${part.file_ref.name}]`);
+    lines.push(
+      `[Prepared file path: ${part.file_ref.name}]\n${part.file_ref.storedPath}`,
+    );
   }
 
   return {
