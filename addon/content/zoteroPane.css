@@ -438,8 +438,23 @@
 .llm-codex-system-toggle-icon {
   display: inline-block;
   flex: none;
+  position: relative;
   width: 16px;
   height: 16px;
+}
+
+.llm-codex-system-toggle-icon::before,
+.llm-codex-system-toggle-icon::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
+  transition: opacity 0.15s;
+}
+
+.llm-codex-system-toggle-icon::before {
   background-color: var(--fill-primary, #0d0d0d);
   mask-image: url("icons/codex-app-server.svg");
   mask-repeat: no-repeat;
@@ -450,14 +465,22 @@
   -webkit-mask-position: center;
   -webkit-mask-size: contain;
   opacity: 0.62;
-  transition:
-    background-color 0.15s,
-    opacity 0.15s;
 }
 
-.llm-claude-system-toggle[data-active="true"] .llm-codex-system-toggle-icon,
-.llm-standalone-claude-toggle[data-active="true"] .llm-codex-system-toggle-icon {
-  background-color: var(--fill-primary, #0d0d0d);
+.llm-codex-system-toggle-icon::after {
+  background-image: url("icons/codex-logo.svg");
+  opacity: 0;
+}
+
+.llm-claude-system-toggle[data-active="true"] .llm-codex-system-toggle-icon::before,
+.llm-standalone-claude-toggle[data-active="true"]
+  .llm-codex-system-toggle-icon::before {
+  opacity: 0;
+}
+
+.llm-claude-system-toggle[data-active="true"] .llm-codex-system-toggle-icon::after,
+.llm-standalone-claude-toggle[data-active="true"]
+  .llm-codex-system-toggle-icon::after {
   opacity: 1;
 }
 
@@ -1652,6 +1675,25 @@
 
 .llm-start-page-rec-list li strong {
   color: var(--fill-secondary);
+}
+
+.llm-webchat-start-page .llm-start-page-subtitle {
+  max-width: 560px;
+  margin-bottom: 20px;
+  font-style: normal;
+}
+
+.llm-webchat-start-page .llm-start-page-recommendations {
+  max-width: 560px;
+}
+
+.llm-webchat-rec-title-spaced {
+  margin-top: 18px;
+}
+
+.llm-webchat-warning-title {
+  margin-top: 18px;
+  color: #b45309;
 }
 
 .llm-rec-reason {
@@ -5041,10 +5083,13 @@ label.llm-search-results-item:hover {
 }
 
 .llm-context-previews {
+  --llm-context-preview-row-gap: 8px;
+  --llm-context-preview-column-gap: 4px;
   display: flex;
   flex-wrap: wrap;
   align-items: flex-start;
-  gap: 8px;
+  gap: var(--llm-context-preview-row-gap)
+    var(--llm-context-preview-column-gap);
   width: 100%;
   container-type: inline-size;
   position: relative;
