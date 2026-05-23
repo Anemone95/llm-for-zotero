@@ -136,6 +136,10 @@ export function formatPaperContextChipLabel(
   if (contentSourceMode === "text") return `${base} - Text`;
   if (contentSourceMode === "mineru") return `${base} - MD`;
   if (contentSourceMode === "pdf") return `${base} - PDF`;
+  if (contentSourceMode === "markdown") return `${base} - MD`;
+  if (contentSourceMode === "html") return `${base} - HTML`;
+  if (contentSourceMode === "txt") return `${base} - TXT`;
+  if (contentSourceMode === "docx") return `${base} - DOCX`;
   // Fallback (no mode specified) — legacy behavior
   const attachmentTitle = resolveMultiPdfAttachmentTitle(paperContext);
   return attachmentTitle ? `${base} - ${attachmentTitle}` : base;
@@ -152,6 +156,14 @@ export function formatPaperContextCardAttachmentLine(
     return resolvePaperContextAttachmentLabel(paperContext, {
       fallback: "full.md",
     });
+  }
+  if (
+    contentSourceMode === "markdown" ||
+    contentSourceMode === "html" ||
+    contentSourceMode === "txt" ||
+    contentSourceMode === "docx"
+  ) {
+    return resolvePaperContextAttachmentLabel(paperContext);
   }
   return "";
 }
@@ -171,7 +183,15 @@ export function formatPaperContextChipTitle(
         ? "Source: MinerU (enhanced markdown)"
         : contentSourceMode === "pdf"
           ? "Source: PDF file"
-          : "";
+          : contentSourceMode === "markdown"
+            ? "Source: Markdown attachment"
+            : contentSourceMode === "html"
+              ? "Source: HTML attachment"
+              : contentSourceMode === "txt"
+                ? "Source: TXT attachment"
+                : contentSourceMode === "docx"
+                  ? "Source: Word attachment"
+                  : "";
   const attachmentTitle = formatPaperContextCardAttachmentLine(
     paperContext,
     contentSourceMode,

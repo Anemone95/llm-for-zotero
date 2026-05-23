@@ -1,5 +1,6 @@
 import {
   ensurePDFTextCached,
+  resolveTextAttachmentSourceMode,
 } from "../../modules/contextPanel/pdfContext";
 import { pdfTextCache } from "../../modules/contextPanel/state";
 import {
@@ -14,7 +15,10 @@ function getFirstPdfChildAttachment(
   item: Zotero.Item | null | undefined,
 ): Zotero.Item | null {
   if (!item) return null;
-  if (item.isAttachment?.() && item.attachmentContentType === "application/pdf") {
+  if (
+    item.isAttachment?.() &&
+    item.attachmentContentType === "application/pdf"
+  ) {
     return item;
   }
   if (!item.isRegularItem?.()) return null;
@@ -38,7 +42,8 @@ export function resolveContextItemFromPaperContext(
   if (
     direct &&
     direct.isAttachment?.() &&
-    direct.attachmentContentType === "application/pdf"
+    (direct.attachmentContentType === "application/pdf" ||
+      resolveTextAttachmentSourceMode(direct))
   ) {
     return direct;
   }
@@ -56,7 +61,9 @@ export class PdfService {
   ): Promise<PdfContext | undefined> {
     const contextItem = resolveContextItemFromPaperContext(paperContext);
     if (!contextItem) return undefined;
-    await ensurePDFTextCached(contextItem);
+    await ensurePDFTextCached(contextItem, {
+      sourceMode: paperContext.contentSourceMode,
+    });
     return pdfTextCache.get(contextItem.id);
   }
 
@@ -178,9 +185,14 @@ export class PdfService {
         selected.set(next, pdfContext.chunks[next]);
       }
     } else if (pdfContext.chunks.length > 4) {
-      selected.set(pdfContext.chunks.length - 1, pdfContext.chunks[pdfContext.chunks.length - 1]);
+      selected.set(
+        pdfContext.chunks.length - 1,
+        pdfContext.chunks[pdfContext.chunks.length - 1],
+      );
     }
-    const ordered = Array.from(selected.entries()).sort((left, right) => left[0] - right[0]);
+    const ordered = Array.from(selected.entries()).sort(
+      (left, right) => left[0] - right[0],
+    );
     const text = ordered
       .map(([index, chunk]) => `[chunk ${index}]\n${chunk.trim()}`)
       .join("\n\n")
@@ -197,7 +209,9 @@ export class PdfService {
     };
   }
 
-  getPaperContextForItem(item: Zotero.Item | null | undefined): PaperContextRef | null {
+  getPaperContextForItem(
+    item: Zotero.Item | null | undefined,
+  ): PaperContextRef | null {
     const attachment = getFirstPdfChildAttachment(item);
     return resolvePaperContextRefFromAttachment(attachment);
   }

@@ -2,6 +2,7 @@ import { assert } from "chai";
 import type { PaperContextRef } from "../src/modules/contextPanel/types";
 import {
   formatPaperContextCardAttachmentLine,
+  formatPaperContextChipLabel,
   formatPaperContextChipTitle,
   resolvePaperContextAttachmentLabel,
 } from "../src/modules/contextPanel/setupHandlers/controllers/composeContextController";
@@ -89,6 +90,27 @@ describe("composeContextController paper card attachment labels", function () {
     const tooltip = formatPaperContextChipTitle(paperContext, "mineru");
     assert.include(tooltip, "Attachment: Supplementary Material");
     assert.notInclude(tooltip, "full.md");
+  });
+
+  it("formats named source badges for text-like child attachments", function () {
+    const paperContext = makePaperContext({
+      contextItemId: 101,
+      attachmentTitle: "notes.docx",
+    });
+
+    assert.equal(
+      formatPaperContextChipLabel(paperContext, "html"),
+      "📚 Liu et al., 2026 - HTML",
+    );
+    assert.equal(
+      formatPaperContextChipLabel(paperContext, "txt"),
+      "📚 Liu et al., 2026 - TXT",
+    );
+    assert.equal(
+      formatPaperContextChipLabel(paperContext, "docx"),
+      "📚 Liu et al., 2026 - DOCX",
+    );
+    assert.include(formatPaperContextChipTitle(paperContext, "docx"), "Word");
   });
 
   it("falls back to filename before stale stored attachment title", function () {

@@ -1,4 +1,5 @@
 import { assert } from "chai";
+import { strToU8, zipSync } from "fflate";
 import {
   buildChunkMetadata,
   buildEvidencePack,
@@ -145,6 +146,23 @@ function mockPdfAttachment(id: number): Zotero.Item {
   } as unknown as Zotero.Item;
 }
 
+function mockTextAttachment(options: {
+  id: number;
+  filename: string;
+  contentType: string;
+  path: string;
+}): Zotero.Item {
+  return {
+    id: options.id,
+    parentID: 100,
+    attachmentContentType: options.contentType,
+    attachmentFilename: options.filename,
+    isAttachment: () => true,
+    getFilePath: () => options.path,
+    getField: (field: string) => (field === "title" ? options.filename : ""),
+  } as unknown as Zotero.Item;
+}
+
 function fullPaperRef(contextItemId: number): PaperContextRef {
   return {
     itemId: 100,
@@ -232,6 +250,51 @@ describe("pdfContext multi-context helpers", function () {
       (globalThis as unknown as { ztoolkit?: unknown }).ztoolkit =
         originalZtoolkit;
     }
+  });
+
+  it("caches TXT child attachments as paper text", async function () {
+    const io = setupMemoryIO();
+    io.files.set(
+      "/tmp/zotero/note.txt",
+      bytes("Plain attachment text for retrieval."),
+    );
+    const attachment = mockTextAttachment({
+      id: 321,
+      filename: "note.txt",
+      contentType: "text/plain",
+      path: "/tmp/zotero/note.txt",
+    });
+
+    await ensurePDFTextCached(attachment, { sourceMode: "txt" });
+
+    const cached = pdfTextCache.get(321);
+    assert.equal(cached?.sourceType, "attachment-txt");
+    assert.deepEqual(cached?.chunks, ["Plain attachment text for retrieval."]);
+  });
+
+  it("caches DOCX child attachments as plain text", async function () {
+    const io = setupMemoryIO();
+    io.files.set(
+      "/tmp/zotero/notes.docx",
+      zipSync({
+        "word/document.xml": strToU8(
+          '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Docx paragraph</w:t></w:r></w:p></w:body></w:document>',
+        ),
+      }),
+    );
+    const attachment = mockTextAttachment({
+      id: 322,
+      filename: "notes.docx",
+      contentType:
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      path: "/tmp/zotero/notes.docx",
+    });
+
+    await ensurePDFTextCached(attachment, { sourceMode: "docx" });
+
+    const cached = pdfTextCache.get(322);
+    assert.equal(cached?.sourceType, "attachment-docx");
+    assert.deepEqual(cached?.chunks, ["Docx paragraph"]);
   });
 
   it("builds retrieval candidates with scores and metadata", async function () {

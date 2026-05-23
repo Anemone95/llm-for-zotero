@@ -33,6 +33,7 @@ import {
   mergeQuoteCitations,
 } from "./quoteCitations";
 import { readNoteSnapshot } from "./notes";
+import { readAttachmentBytes } from "./attachmentStorage";
 import { pdfTextCache, pdfTextLoadingTasks } from "./state";
 import {
   buildAndWriteManifest,
@@ -45,12 +46,17 @@ import { isMineruEnabled } from "../../utils/mineruConfig";
 import type {
   PdfContext,
   ChunkStat,
+  PaperContentSourceMode,
   PaperContextRef,
   PaperContextCandidate,
   PdfChunkMeta,
   PdfChunkKind,
   QuoteCitation,
 } from "./types";
+import {
+  extractTextAttachmentContent,
+  type TextAttachmentSourceMode,
+} from "./textAttachmentExtraction";
 import { config } from "./constants";
 
 const prefKey = (key: string) => `${config.prefsPrefix}.${key}`;
@@ -169,14 +175,16 @@ function decodeFileContents(data: unknown): string {
 }
 
 async function readLocalTextFile(source: string | nsIFile): Promise<string> {
-  const zoteroFile = (Zotero as unknown as {
-    File?: {
-      getContentsAsync?: (
-        source: string | nsIFile,
-        charset?: string,
-      ) => Promise<unknown> | unknown;
-    };
-  }).File;
+  const zoteroFile = (
+    Zotero as unknown as {
+      File?: {
+        getContentsAsync?: (
+          source: string | nsIFile,
+          charset?: string,
+        ) => Promise<unknown> | unknown;
+      };
+    }
+  ).File;
   if (zoteroFile?.getContentsAsync) {
     try {
       const data = await zoteroFile.getContentsAsync(source, "utf-8");
@@ -191,22 +199,26 @@ async function readLocalTextFile(source: string | nsIFile): Promise<string> {
   }
 
   const path = typeof source === "string" ? source : source.path;
-  const IOUtils = (globalThis as unknown as {
-    IOUtils?: {
-      read?: (path: string) => Promise<Uint8Array | ArrayBuffer>;
-    };
-  }).IOUtils;
+  const IOUtils = (
+    globalThis as unknown as {
+      IOUtils?: {
+        read?: (path: string) => Promise<Uint8Array | ArrayBuffer>;
+      };
+    }
+  ).IOUtils;
   if (IOUtils?.read) {
     return decodeFileContents(await IOUtils.read(path));
   }
 
-  const OS = (globalThis as unknown as {
-    OS?: {
-      File?: {
-        read?: (path: string) => Promise<Uint8Array | ArrayBuffer>;
+  const OS = (
+    globalThis as unknown as {
+      OS?: {
+        File?: {
+          read?: (path: string) => Promise<Uint8Array | ArrayBuffer>;
+        };
       };
-    };
-  }).OS;
+    }
+  ).OS;
   if (OS?.File?.read) {
     return decodeFileContents(await OS.File.read(path));
   }
@@ -214,16 +226,20 @@ async function readLocalTextFile(source: string | nsIFile): Promise<string> {
   return "";
 }
 
-async function readZoteroFulltextCache(
-  item: Zotero.Item,
-): Promise<string> {
+async function readZoteroFulltextCache(item: Zotero.Item): Promise<string> {
   try {
-    const fulltext = (Zotero as unknown as {
-      Fulltext?: { getItemCacheFile?: (item: Zotero.Item) => nsIFile };
-      FullText?: { getItemCacheFile?: (item: Zotero.Item) => nsIFile };
-    }).Fulltext || (Zotero as unknown as {
-      FullText?: { getItemCacheFile?: (item: Zotero.Item) => nsIFile };
-    }).FullText;
+    const fulltext =
+      (
+        Zotero as unknown as {
+          Fulltext?: { getItemCacheFile?: (item: Zotero.Item) => nsIFile };
+          FullText?: { getItemCacheFile?: (item: Zotero.Item) => nsIFile };
+        }
+      ).Fulltext ||
+      (
+        Zotero as unknown as {
+          FullText?: { getItemCacheFile?: (item: Zotero.Item) => nsIFile };
+        }
+      ).FullText;
     const cacheFile = fulltext?.getItemCacheFile?.(item);
     if (!cacheFile) return "";
     if (typeof cacheFile.exists === "function" && !cacheFile.exists()) {
@@ -239,10 +255,181 @@ async function readZoteroFulltextCache(
   }
 }
 
-async function cachePDFText(item: Zotero.Item) {
+function getAttachmentFilename(item: Zotero.Item): string {
+  return sanitizePdfText(
+    String(
+      (item as unknown as { attachmentFilename?: unknown })
+        .attachmentFilename || "",
+    ),
+  );
+}
+
+function getAttachmentContentType(item: Zotero.Item): string {
+  return sanitizePdfText(
+    String(
+      (item as unknown as { attachmentContentType?: unknown })
+        .attachmentContentType || "",
+    ),
+  ).toLowerCase();
+}
+
+function getAttachmentTitle(item: Zotero.Item): string {
+  return sanitizePdfText(
+    String(item.getField("title") || getAttachmentFilename(item) || ""),
+  );
+}
+
+export function resolveTextAttachmentSourceMode(
+  item: Zotero.Item | null | undefined,
+): TextAttachmentSourceMode | null {
+  if (!item?.isAttachment?.()) return null;
+  const contentType = getAttachmentContentType(item);
+  const filename = getAttachmentFilename(item).toLowerCase();
+  if (
+    contentType === "text/markdown" ||
+    contentType === "text/x-markdown" ||
+    /\.(md|markdown)$/i.test(filename)
+  ) {
+    return "markdown";
+  }
+  if (
+    contentType === "text/html" ||
+    contentType === "application/xhtml+xml" ||
+    /\.html?$/i.test(filename)
+  ) {
+    return "html";
+  }
+  if (contentType === "text/plain" || /\.txt$/i.test(filename)) {
+    return "txt";
+  }
+  if (
+    contentType ===
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+    /\.docx$/i.test(filename)
+  ) {
+    return "docx";
+  }
+  return null;
+}
+
+function sourceTypeForTextAttachment(
+  mode: TextAttachmentSourceMode,
+): PdfContext["sourceType"] {
+  return `attachment-${mode}` as PdfContext["sourceType"];
+}
+
+function cachedContextMatchesSourceMode(
+  cached: PdfContext,
+  sourceMode?: PaperContentSourceMode,
+): boolean {
+  if (!sourceMode) return true;
+  if (sourceMode === "pdf") return true;
+  if (sourceMode === "mineru") return cached.sourceType === "mineru";
+  if (sourceMode === "text") return cached.sourceType !== "mineru";
+  if (
+    sourceMode === "markdown" ||
+    sourceMode === "html" ||
+    sourceMode === "txt" ||
+    sourceMode === "docx"
+  ) {
+    return cached.sourceType === sourceTypeForTextAttachment(sourceMode);
+  }
+  return true;
+}
+
+async function cacheTextAttachment(
+  item: Zotero.Item,
+  sourceMode: TextAttachmentSourceMode,
+): Promise<void> {
+  const title = getAttachmentTitle(item) || `Attachment ${item.id}`;
+  try {
+    const filePath: string | undefined =
+      (
+        item as unknown as { getFilePath?: () => string | undefined }
+      ).getFilePath?.() || undefined;
+    if (!filePath) {
+      pdfTextCache.set(item.id, {
+        title,
+        chunks: [],
+        chunkMeta: [],
+        chunkStats: [],
+        docFreq: {},
+        avgChunkLength: 0,
+        fullLength: 0,
+        sourceType: sourceTypeForTextAttachment(sourceMode),
+      });
+      return;
+    }
+    const bytes = await readAttachmentBytes(filePath);
+    const text = sanitizePdfText(
+      extractTextAttachmentContent(bytes, sourceMode),
+    );
+    if (text) {
+      const chunks = splitIntoChunks(text, CHUNK_TARGET_LENGTH);
+      const chunkMeta = buildChunkMetadata(
+        chunks,
+        sourceTypeForTextAttachment(sourceMode),
+      );
+      const { chunkStats, docFreq, avgChunkLength } = buildChunkIndex(chunks);
+      pdfTextCache.set(item.id, {
+        title,
+        chunks,
+        chunkMeta,
+        chunkStats,
+        docFreq,
+        avgChunkLength,
+        fullLength: text.length,
+        sourceType: sourceTypeForTextAttachment(sourceMode),
+      });
+    } else {
+      pdfTextCache.set(item.id, {
+        title,
+        chunks: [],
+        chunkMeta: [],
+        chunkStats: [],
+        docFreq: {},
+        avgChunkLength: 0,
+        fullLength: 0,
+        sourceType: sourceTypeForTextAttachment(sourceMode),
+      });
+    }
+  } catch (error) {
+    ztoolkit.log("Error caching text attachment:", error);
+    pdfTextCache.set(item.id, {
+      title,
+      chunks: [],
+      chunkMeta: [],
+      chunkStats: [],
+      docFreq: {},
+      avgChunkLength: 0,
+      fullLength: 0,
+      sourceType: sourceTypeForTextAttachment(sourceMode),
+    });
+  }
+}
+
+async function cachePDFText(
+  item: Zotero.Item,
+  options?: { sourceMode?: PaperContentSourceMode },
+) {
   if (pdfTextCache.has(item.id)) return;
 
   try {
+    const requestedTextAttachmentMode =
+      options?.sourceMode === "markdown" ||
+      options?.sourceMode === "html" ||
+      options?.sourceMode === "txt" ||
+      options?.sourceMode === "docx"
+        ? options.sourceMode
+        : null;
+    const inferredTextAttachmentMode = resolveTextAttachmentSourceMode(item);
+    const textAttachmentMode =
+      requestedTextAttachmentMode || inferredTextAttachmentMode;
+    if (textAttachmentMode) {
+      await cacheTextAttachment(item, textAttachmentMode);
+      return;
+    }
+
     let pdfText = "";
     let sourceType: PdfContext["sourceType"];
     const mainItem =
@@ -258,16 +445,18 @@ async function cachePDFText(item: Zotero.Item) {
         : null;
 
     // 1. Try MinerU disk cache (only if MinerU is enabled)
-    if (isMineruEnabled() && pdfItem) {
+    const allowMineru = options?.sourceMode !== "text";
+    if (allowMineru && isMineruEnabled() && pdfItem) {
       try {
         await ensureMineruRuntimeCacheForAttachment(pdfItem);
       } catch (error) {
         ztoolkit.log("LLM: MinerU sync restore failed", error);
       }
     }
-    const cachedMd = isMineruEnabled()
-      ? await readCachedMineruMd(item.id)
-      : null;
+    const cachedMd =
+      allowMineru && isMineruEnabled()
+        ? await readCachedMineruMd(item.id)
+        : null;
     if (cachedMd) {
       pdfText = convertHtmlTablesToMarkdown(cachedMd);
       sourceType = "mineru";
@@ -408,16 +597,34 @@ async function cachePDFText(item: Zotero.Item) {
   }
 }
 
-export async function ensurePDFTextCached(item: Zotero.Item): Promise<void> {
-  if (pdfTextCache.has(item.id)) return;
+export async function ensurePDFTextCached(
+  item: Zotero.Item,
+  options?: { sourceMode?: PaperContentSourceMode },
+): Promise<void> {
+  const cached = pdfTextCache.get(item.id);
+  if (cached && cachedContextMatchesSourceMode(cached, options?.sourceMode)) {
+    return;
+  }
+  if (cached) {
+    pdfTextCache.delete(item.id);
+  }
   const existingTask = pdfTextLoadingTasks.get(item.id);
   if (existingTask) {
     await existingTask;
+    const latest = pdfTextCache.get(item.id);
+    if (latest && cachedContextMatchesSourceMode(latest, options?.sourceMode)) {
+      return;
+    }
+    if (latest) {
+      pdfTextCache.delete(item.id);
+    }
+  }
+  if (pdfTextCache.has(item.id)) {
     return;
   }
   const task = (async () => {
     try {
-      await cachePDFText(item);
+      await cachePDFText(item, options);
     } finally {
       pdfTextLoadingTasks.delete(item.id);
     }

@@ -25,6 +25,15 @@ export type ChatAttachment = {
   contentHash?: string;
 };
 
+export type PaperContentSourceMode =
+  | "text"
+  | "mineru"
+  | "pdf"
+  | "markdown"
+  | "html"
+  | "txt"
+  | "docx";
+
 export type AdvancedModelParams = {
   temperature: number;
   maxTokens: number;
@@ -34,6 +43,7 @@ export type AdvancedModelParams = {
 export type PaperContextRef = {
   itemId: number;
   contextItemId: number;
+  contentSourceMode?: PaperContentSourceMode;
   citationKey?: string;
   title: string;
   attachmentTitle?: string;

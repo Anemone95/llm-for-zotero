@@ -172,7 +172,8 @@ import {
   shouldRenderDynamicSlashMenu,
   shouldRenderSkillSlashMenu,
 } from "./slashMenuBehavior";
-import { buildPaperKey } from "./pdfContext";
+import { FULL_PDF_UNSUPPORTED_MESSAGE } from "./pdfSupportMessages";
+import { buildPaperKey, resolveTextAttachmentSourceMode } from "./pdfContext";
 import {
   getPaperModeOverride,
   setPaperModeOverride,
@@ -181,7 +182,6 @@ import {
   getPaperContentSourceOverride,
   setPaperContentSourceOverride,
   clearPaperContentSourceOverrides,
-  getNextContentSourceMode,
   clearSelectedPaperState,
   clearAllRefContextState,
 } from "./contexts/paperContextState";
@@ -1826,10 +1826,20 @@ export function setupHandlers(
     // [webchat] Always use PDF content source — webchat sends raw PDF via drag-and-drop
     if (isWebChatMode()) return "pdf";
     const explicit = getPaperContentSourceOverride(itemId, paperContext);
-    return explicit || (isPaperContextMineru(paperContext) ? "mineru" : "text");
+    return (
+      explicit ||
+      paperContext.contentSourceMode ||
+      (isPaperContextMineru(paperContext) ? "mineru" : "text")
+    );
   };
 
-  // getNextContentSourceMode → imported from ./contexts/paperContextState
+  const withResolvedPaperContentSourceMode = (
+    itemId: number,
+    paperContext: PaperContextRef,
+  ): PaperContextRef => ({
+    ...paperContext,
+    contentSourceMode: resolvePaperContentSourceMode(itemId, paperContext),
+  });
 
   // Lightweight sync cache: once checkAndApplyMineruChipStyle confirms MinerU
   // exists on disk, the contextItemId is added here so isPaperContextMineru
@@ -1957,23 +1967,25 @@ export function setupHandlers(
     return normalizePaperContextEntries([
       ...(autoLoadedPaperContext ? [autoLoadedPaperContext] : []),
       ...selectedPapers,
-    ]);
+    ]).map((paperContext) =>
+      withResolvedPaperContentSourceMode(currentItem.id, paperContext),
+    );
   };
 
   const getEffectiveFullTextPaperContexts = (
     currentItem: Zotero.Item,
     selectedPaperContexts?: PaperContextRef[],
   ): PaperContextRef[] => {
-    return getAllEffectivePaperContexts(
-      currentItem,
-      selectedPaperContexts,
-    ).filter(
-      (paperContext) =>
-        resolvePaperContentSourceMode(currentItem.id, paperContext) !== "pdf" &&
-        isPaperContextFullTextMode(
-          resolvePaperContextNextSendMode(currentItem.id, paperContext),
-        ),
-    ).slice(0, MAX_FULL_TEXT_PAPER_CONTEXTS);
+    return getAllEffectivePaperContexts(currentItem, selectedPaperContexts)
+      .filter(
+        (paperContext) =>
+          resolvePaperContentSourceMode(currentItem.id, paperContext) !==
+            "pdf" &&
+          isPaperContextFullTextMode(
+            resolvePaperContextNextSendMode(currentItem.id, paperContext),
+          ),
+      )
+      .slice(0, MAX_FULL_TEXT_PAPER_CONTEXTS);
   };
 
   const getEffectivePdfModePaperContexts = (
@@ -2193,7 +2205,7 @@ export function setupHandlers(
     async (): Promise<Zotero.Item | null> => {
       await resolveAutoLoadedPaperContextAsync();
       return autoLoadedContextSourceItemSnapshot ?? null;
-  };
+    };
 
   let paperChipMenu: HTMLDivElement | null = null;
   let paperChipMenuAnchor: HTMLDivElement | null = null;
@@ -2217,6 +2229,7 @@ export function setupHandlers(
     if (paperChipMenu) {
       paperChipMenu.style.display = "none";
     }
+    paperChipMenuAnchor?.classList.remove("llm-paper-context-chip-menu-open");
     paperChipMenuAnchor = null;
     paperChipMenuTarget = null;
     paperChipMenuSticky = false;
@@ -2233,20 +2246,270 @@ export function setupHandlers(
     ].filter(Boolean);
     return parts.join(" · ");
   };
+
+  type PaperSourceOption = {
+    mode: PaperContentSourceMode;
+    badge: string;
+    paperContext: PaperContextRef;
+    title: string;
+    description: string;
+    disabledReason?: string;
+  };
+
+  const getAttachmentFilename = (attachment: Zotero.Item): string =>
+    sanitizeText(
+      String(
+        (attachment as unknown as { attachmentFilename?: unknown })
+          .attachmentFilename || "",
+      ),
+    ).trim();
+
+  const getAttachmentContentType = (attachment: Zotero.Item): string =>
+    sanitizeText(String(attachment.attachmentContentType || ""))
+      .trim()
+      .toLowerCase();
+
+  const getAttachmentCardTitle = (attachment: Zotero.Item): string =>
+    sanitizeText(
+      String(
+        attachment.getField("title") ||
+          getAttachmentFilename(attachment) ||
+          `Attachment ${attachment.id}`,
+      ),
+    ).trim();
+
+  const resolveParentItemForSourcePicker = (
+    paperContext: PaperContextRef,
+  ): Zotero.Item | null => {
+    const parent = Zotero.Items.get(paperContext.itemId) || null;
+    if (parent?.isRegularItem?.()) return parent;
+    const attachment = Zotero.Items.get(paperContext.contextItemId) || null;
+    if (attachment?.isAttachment?.() && attachment.parentID) {
+      const attachmentParent = Zotero.Items.get(attachment.parentID) || null;
+      if (attachmentParent?.isRegularItem?.()) return attachmentParent;
+    }
+    return null;
+  };
+
+  const buildPaperContextForChildAttachment = (
+    parentItem: Zotero.Item,
+    attachment: Zotero.Item,
+    mode: PaperContentSourceMode,
+  ): PaperContextRef | null => {
+    const normalizedParentId = Math.floor(Number(parentItem.id));
+    const normalizedAttachmentId = Math.floor(Number(attachment.id));
+    if (
+      !Number.isFinite(normalizedParentId) ||
+      normalizedParentId <= 0 ||
+      !Number.isFinite(normalizedAttachmentId) ||
+      normalizedAttachmentId <= 0
+    ) {
+      return null;
+    }
+    const title = sanitizeText(
+      String(parentItem.getField("title") || `Paper ${normalizedParentId}`),
+    ).trim();
+    const firstCreator = sanitizeText(
+      String(
+        parentItem.getField("firstCreator") ||
+          (parentItem as Zotero.Item).firstCreator ||
+          "",
+      ),
+    ).trim();
+    const year = sanitizeText(
+      String(
+        parentItem.getField("year") ||
+          parentItem.getField("date") ||
+          parentItem.getField("issued") ||
+          "",
+      ),
+    ).trim();
+    const citationKey = sanitizeText(
+      String(parentItem.getField("citationKey") || ""),
+    ).trim();
+    return {
+      itemId: normalizedParentId,
+      contextItemId: normalizedAttachmentId,
+      contentSourceMode: mode,
+      title: title || `Paper ${normalizedParentId}`,
+      attachmentTitle: getAttachmentCardTitle(attachment) || undefined,
+      citationKey: citationKey || undefined,
+      firstCreator: firstCreator || undefined,
+      year: year || undefined,
+    };
+  };
+
+  const resolveCurrentPdfSupport = () => {
+    const selectedProfile = getSelectedProfile();
+    const modelName = (
+      selectedProfile?.model ||
+      getSelectedModelInfo().currentModel ||
+      ""
+    ).trim();
+    return getModelPdfSupport(
+      modelName,
+      selectedProfile?.providerProtocol,
+      selectedProfile?.authMode,
+      selectedProfile?.apiBase,
+    );
+  };
+
+  const isPdfAttachmentForPicker = (attachment: Zotero.Item): boolean => {
+    const filename = getAttachmentFilename(attachment).toLowerCase();
+    return (
+      getAttachmentContentType(attachment) === "application/pdf" ||
+      filename.endsWith(".pdf")
+    );
+  };
+
+  const buildPaperSourceOptions = (
+    paperContext: PaperContextRef,
+  ): PaperSourceOption[] => {
+    const parentItem = resolveParentItemForSourcePicker(paperContext);
+    if (!parentItem) {
+      const fallbackMode = paperContext.contentSourceMode || "text";
+      return [
+        {
+          mode: fallbackMode,
+          badge:
+            fallbackMode === "mineru"
+              ? "MD"
+              : fallbackMode === "pdf"
+                ? "PDF"
+                : "Text",
+          paperContext: { ...paperContext, contentSourceMode: fallbackMode },
+          title: paperContext.title,
+          description: formatPaperContextCardAttachmentLine(
+            paperContext,
+            fallbackMode,
+          ),
+        },
+      ];
+    }
+
+    const pdfSupport = resolveCurrentPdfSupport();
+    const attachmentIds = parentItem.getAttachments?.() || [];
+    const options: PaperSourceOption[] = [];
+    for (const attachmentId of attachmentIds) {
+      const attachment = Zotero.Items.get(attachmentId) || null;
+      if (!attachment?.isAttachment?.()) continue;
+      const attachmentTitle = getAttachmentCardTitle(attachment);
+      if (isPdfAttachmentForPicker(attachment)) {
+        const baseContext = buildPaperContextForChildAttachment(
+          parentItem,
+          attachment,
+          "text",
+        );
+        if (!baseContext) continue;
+        if (isPaperContextMineru(baseContext)) {
+          options.push({
+            mode: "mineru",
+            badge: "MD",
+            paperContext: { ...baseContext, contentSourceMode: "mineru" },
+            title: baseContext.title,
+            description: `${attachmentTitle} · MinerU`,
+          });
+        }
+        options.push({
+          mode: "text",
+          badge: "Text",
+          paperContext: { ...baseContext, contentSourceMode: "text" },
+          title: baseContext.title,
+          description: `${attachmentTitle} · extracted text`,
+        });
+        options.push({
+          mode: "pdf",
+          badge: "PDF",
+          paperContext: { ...baseContext, contentSourceMode: "pdf" },
+          title: baseContext.title,
+          description: `${attachmentTitle} · PDF`,
+          disabledReason:
+            pdfSupport === "native" || isWebChatMode()
+              ? undefined
+              : FULL_PDF_UNSUPPORTED_MESSAGE,
+        });
+        continue;
+      }
+      const textSourceMode = resolveTextAttachmentSourceMode(attachment);
+      if (!textSourceMode) continue;
+      const context = buildPaperContextForChildAttachment(
+        parentItem,
+        attachment,
+        textSourceMode,
+      );
+      if (!context) continue;
+      const badge =
+        textSourceMode === "markdown"
+          ? "MD"
+          : textSourceMode === "html"
+            ? "HTML"
+            : textSourceMode === "txt"
+              ? "TXT"
+              : "DOCX";
+      const label =
+        textSourceMode === "markdown"
+          ? "Markdown attachment"
+          : textSourceMode === "html"
+            ? "HTML attachment"
+            : textSourceMode === "txt"
+              ? "TXT attachment"
+              : "Word attachment";
+      options.push({
+        mode: textSourceMode,
+        badge,
+        paperContext: { ...context, contentSourceMode: textSourceMode },
+        title: attachmentTitle,
+        description: `${attachmentTitle} · ${label}`,
+      });
+    }
+    return options;
+  };
+
+  const paperSourceClassName = (mode?: PaperContentSourceMode): string => {
+    if (mode === "mineru" || mode === "markdown") {
+      return "llm-paper-context-chip-mineru";
+    }
+    if (mode === "pdf") return "llm-paper-context-chip-pdf";
+    if (mode === "html") return "llm-paper-context-chip-html";
+    return "llm-paper-context-chip-text";
+  };
+
   const buildPaperChipMenuCard = (
     ownerDoc: Document,
     paperContext: PaperContextRef,
-    options?: { contentSourceMode?: PaperContentSourceMode },
+    options?: {
+      contentSourceMode?: PaperContentSourceMode;
+      badge?: string;
+      title?: string;
+      description?: string;
+      disabledReason?: string;
+      selected?: boolean;
+      sourceOption?: boolean;
+    },
   ): HTMLButtonElement => {
     const card = createElement(
       ownerDoc,
       "button",
-      "llm-paper-picker-item llm-paper-picker-group-row llm-paper-chip-menu-row",
+      `llm-paper-picker-item llm-paper-picker-group-row llm-paper-chip-menu-row ${paperSourceClassName(options?.contentSourceMode)}`,
       {
         type: "button",
         title: `Jump to ${paperContext.title}`,
       },
     ) as HTMLButtonElement;
+    if (options?.sourceOption) {
+      card.dataset.sourceMode = options.contentSourceMode || "";
+      card.dataset.contextItemId = `${paperContext.contextItemId}`;
+      card.dataset.paperItemId = `${paperContext.itemId}`;
+    }
+    if (options?.disabledReason) {
+      card.disabled = true;
+      card.setAttribute("aria-disabled", "true");
+      card.classList.add("llm-paper-chip-menu-row-disabled");
+      card.title = options.disabledReason;
+    }
+    if (options?.selected) {
+      card.setAttribute("aria-selected", "true");
+    }
     const rowMain = createElement(
       ownerDoc,
       "div",
@@ -2258,19 +2521,26 @@ export function setupHandlers(
       "llm-paper-picker-group-title-line",
     );
     const title = createElement(ownerDoc, "span", "llm-paper-picker-title", {
-      textContent: paperContext.title,
-      title: paperContext.title,
+      textContent: options?.title || paperContext.title,
+      title: options?.title || paperContext.title,
     });
     titleLine.appendChild(title);
     const mode = options?.contentSourceMode;
     const badgeText =
-      mode === "mineru"
+      options?.badge ||
+      (mode === "mineru" || mode === "markdown"
         ? "MD"
         : mode === "pdf"
           ? "PDF"
           : mode === "text"
             ? "Text"
-            : null;
+            : mode === "html"
+              ? "HTML"
+              : mode === "txt"
+                ? "TXT"
+                : mode === "docx"
+                  ? "DOCX"
+                  : null);
     if (badgeText) {
       titleLine.appendChild(
         createElement(ownerDoc, "span", "llm-paper-picker-badge", {
@@ -2288,10 +2558,9 @@ export function setupHandlers(
         }),
       );
     }
-    const displayAttachmentText = formatPaperContextCardAttachmentLine(
-      paperContext,
-      mode,
-    );
+    const displayAttachmentText =
+      options?.description ||
+      formatPaperContextCardAttachmentLine(paperContext, mode);
     if (displayAttachmentText) {
       rowMain.appendChild(
         createElement(
@@ -2301,6 +2570,19 @@ export function setupHandlers(
           {
             textContent: displayAttachmentText,
             title: displayAttachmentText,
+          },
+        ),
+      );
+    }
+    if (options?.disabledReason) {
+      rowMain.appendChild(
+        createElement(
+          ownerDoc,
+          "span",
+          "llm-paper-picker-meta llm-paper-chip-disabled-reason",
+          {
+            textContent: options.disabledReason,
+            title: options.disabledReason,
           },
         ),
       );
@@ -2343,18 +2625,62 @@ export function setupHandlers(
       if (!card || !paperChipMenuTarget) return;
       e.preventDefault();
       e.stopPropagation();
-      void focusPaperContextInActiveTab(paperChipMenuTarget)
-        .then((focused) => {
-          if (!focused && status) {
-            setStatus(status, t("Could not focus this paper"), "error");
-          }
-        })
-        .catch((err) => {
-          ztoolkit.log("LLM: Failed to focus paper context from menu", err);
-          if (status) {
-            setStatus(status, t("Could not focus this paper"), "error");
-          }
-        });
+      if (card.disabled || card.getAttribute("aria-disabled") === "true") {
+        if (status && card.title) setStatus(status, card.title, "error");
+        return;
+      }
+      const mode = card.dataset.sourceMode as PaperContentSourceMode | "";
+      const contextItemId = Number.parseInt(
+        card.dataset.contextItemId || "",
+        10,
+      );
+      const paperItemId = Number.parseInt(card.dataset.paperItemId || "", 10);
+      if (!mode || !Number.isFinite(contextItemId) || contextItemId <= 0) {
+        return;
+      }
+      const option = buildPaperSourceOptions(paperChipMenuTarget).find(
+        (candidate) =>
+          candidate.mode === mode &&
+          candidate.paperContext.contextItemId === contextItemId &&
+          candidate.paperContext.itemId === paperItemId,
+      );
+      if (!option || option.disabledReason) {
+        if (status && option?.disabledReason) {
+          setStatus(status, option.disabledReason, "error");
+        }
+        return;
+      }
+      const currentItem = item;
+      if (!currentItem) return;
+      const selectedContext = option.paperContext;
+      if (paperChipMenuAnchor?.dataset.autoLoaded === "true") {
+        const contextItem =
+          Zotero.Items.get(selectedContext.contextItemId) || null;
+        setAutoLoadedContextSnapshot(contextItem, selectedContext);
+      } else {
+        const selectedPapers = getManualPaperContextsForItem(
+          currentItem.id,
+          resolveAutoLoadedPaperContext(),
+        );
+        const currentIndex = selectedPapers.findIndex(
+          (paper) =>
+            paper.itemId === paperChipMenuTarget?.itemId &&
+            paper.contextItemId === paperChipMenuTarget?.contextItemId,
+        );
+        const nextPapers =
+          currentIndex >= 0
+            ? selectedPapers.map((paper, index) =>
+                index === currentIndex ? selectedContext : paper,
+              )
+            : [...selectedPapers, selectedContext];
+        selectedPaperContextCache.set(currentItem.id, nextPapers);
+      }
+      setPaperContentSourceOverride(currentItem.id, selectedContext, mode);
+      closePaperChipMenu();
+      updatePaperPreviewPreservingScroll();
+      if (status) {
+        setStatus(status, `${t("Content source:")} ${option.badge}`, "ready");
+      }
     });
     body.appendChild(menu);
     paperChipMenu = menu;
@@ -2432,16 +2758,47 @@ export function setupHandlers(
     const ownerDoc = body.ownerDocument;
     if (!menu || !ownerDoc) return;
     clearPaperChipMenuHideTimer();
+    if (paperChipMenuAnchor && paperChipMenuAnchor !== chip) {
+      paperChipMenuAnchor.classList.remove("llm-paper-context-chip-menu-open");
+    }
     paperChipMenuAnchor = chip;
+    chip.classList.add("llm-paper-context-chip-menu-open");
+    chip.classList.remove("expanded");
+    chip.classList.add("collapsed");
+    if (item) {
+      selectedPaperPreviewExpandedCache.delete(item.id);
+    }
     paperChipMenuSticky = options?.sticky === true;
     paperChipMenuTarget = paperContext;
     menu.innerHTML = "";
-    menu.appendChild(
-      buildPaperChipMenuCard(ownerDoc, paperContext, {
-        contentSourceMode:
-          (chip.dataset.contentSource as PaperContentSourceMode) || "text",
-      }),
-    );
+    const currentMode =
+      (chip.dataset.contentSource as PaperContentSourceMode) ||
+      paperContext.contentSourceMode ||
+      "text";
+    const sourceOptions = buildPaperSourceOptions(paperContext);
+    for (const sourceOption of sourceOptions) {
+      menu.appendChild(
+        buildPaperChipMenuCard(ownerDoc, sourceOption.paperContext, {
+          contentSourceMode: sourceOption.mode,
+          badge: sourceOption.badge,
+          title: sourceOption.title,
+          description: sourceOption.description,
+          disabledReason: sourceOption.disabledReason,
+          selected:
+            sourceOption.mode === currentMode &&
+            sourceOption.paperContext.contextItemId ===
+              paperContext.contextItemId,
+          sourceOption: true,
+        }),
+      );
+    }
+    if (!menu.childElementCount) {
+      menu.appendChild(
+        buildPaperChipMenuCard(ownerDoc, paperContext, {
+          contentSourceMode: currentMode,
+        }),
+      );
+    }
     positionPaperChipMenuAboveAnchor(menu, chip);
     menu.style.display = "grid";
   };
@@ -2592,12 +2949,18 @@ export function setupHandlers(
       contentSourceMode === "pdf" && (!isWebChatMode() || fullText);
     const showTextChipStyle =
       contentSourceMode === "text" ||
+      contentSourceMode === "txt" ||
+      contentSourceMode === "docx" ||
       (isWebChatMode() && contentSourceMode === "pdf" && !fullText);
     chip.classList.toggle(
       "llm-paper-context-chip-mineru",
-      contentSourceMode === "mineru",
+      contentSourceMode === "mineru" || contentSourceMode === "markdown",
     );
     chip.classList.toggle("llm-paper-context-chip-pdf", showPdfChipStyle);
+    chip.classList.toggle(
+      "llm-paper-context-chip-html",
+      contentSourceMode === "html",
+    );
     chip.classList.toggle("llm-paper-context-chip-text", showTextChipStyle);
     chip.classList.add("collapsed");
 
@@ -5102,6 +5465,8 @@ export function setupHandlers(
       getManualPaperContextsForItem(
         itemId,
         item && item.id === itemId ? resolveAutoLoadedPaperContext() : null,
+      ).map((paperContext) =>
+        withResolvedPaperContentSourceMode(itemId, paperContext),
       ),
     getSelectedCollectionContexts: (itemId) =>
       selectedCollectionContextCache.get(itemId) || [],
@@ -5840,15 +6205,12 @@ export function setupHandlers(
     getManualPaperContextsForItem,
     resolvePaperContentSourceMode,
     resolvePaperContextNextSendMode,
-    isPaperContextMineru,
     isWebChatMode,
-    getCurrentRuntimeMode,
-    getSelectedProfile,
-    getSelectedModelInfo,
     resolveCurrentPaperBaseItem,
     clearSelectedImageState,
     clearSelectedFileState,
     closePaperChipMenu,
+    openPaperChipMenu,
     resolvePaperContextFromChipElement,
     focusPaperContextInActiveTab,
     updatePaperPreviewPreservingScroll,

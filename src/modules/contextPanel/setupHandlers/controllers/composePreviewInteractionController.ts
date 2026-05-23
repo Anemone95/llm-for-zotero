@@ -23,10 +23,8 @@ import {
 } from "../../attachmentStorage";
 import { buildPaperKey } from "../../pdfContext";
 import {
-  getNextContentSourceMode,
   clearSelectedPaperState,
   isPaperContextFullTextMode,
-  setPaperContentSourceOverride,
   setPaperModeOverride,
 } from "../../contexts/paperContextState";
 import {
@@ -49,8 +47,6 @@ import type {
   PaperContextRef,
   SelectedTextContext,
 } from "../../types";
-import { FULL_PDF_UNSUPPORTED_MESSAGE } from "../../pdfSupportMessages";
-import { getModelPdfSupport } from "./modelReasoningController";
 import {
   removePinnedSelectedText,
   togglePinnedFile,
@@ -87,20 +83,16 @@ type ComposePreviewInteractionControllerDeps = {
     itemId: number,
     paperContext: PaperContextRef,
   ) => string;
-  isPaperContextMineru: (paperContext: PaperContextRef) => boolean;
   isWebChatMode: () => boolean;
-  getCurrentRuntimeMode: () => string;
-  getSelectedProfile: () => {
-    model?: string;
-    providerProtocol?: string;
-    authMode?: string;
-    apiBase?: string;
-  } | null;
-  getSelectedModelInfo: () => { currentModel: string };
   resolveCurrentPaperBaseItem: () => Zotero.Item | null;
   clearSelectedImageState: (itemId: number) => void;
   clearSelectedFileState: (itemId: number) => void;
   closePaperChipMenu: () => void;
+  openPaperChipMenu: (
+    chip: HTMLDivElement,
+    paperContext: PaperContextRef,
+    options?: { sticky?: boolean },
+  ) => void;
   resolvePaperContextFromChipElement: (
     chip: HTMLElement,
   ) => PaperContextRef | null;
@@ -527,64 +519,7 @@ export function attachComposePreviewInteractionController(
         void openPaperContextInReader(paperContext);
         return;
       }
-      if (deps.isWebChatMode()) {
-        setStatus(
-          t("WebChat mode always uses PDF. Right-click to toggle send/skip."),
-          "ready",
-        );
-        return;
-      }
-      const currentSource = deps.resolvePaperContentSourceMode(
-        item.id,
-        paperContext,
-      );
-      const mineruAvailable = deps.isPaperContextMineru(paperContext);
-      const nextSource = getNextContentSourceMode(
-        currentSource,
-        mineruAvailable,
-      );
-      if (nextSource === "pdf" && deps.getCurrentRuntimeMode() === "agent") {
-        setStatus(
-          t(
-            "Agent mode normally reads PDF pages on demand. Forcing full PDF mode.",
-          ),
-          "warning",
-        );
-      }
-      if (nextSource === "pdf") {
-        const selectedProfile = deps.getSelectedProfile();
-        const modelName = (
-          selectedProfile?.model ||
-          deps.getSelectedModelInfo().currentModel ||
-          ""
-        ).trim();
-        const pdfSupport = getModelPdfSupport(
-          modelName,
-          selectedProfile?.providerProtocol,
-          selectedProfile?.authMode,
-          selectedProfile?.apiBase,
-        );
-        if (pdfSupport !== "native") {
-          setStatus(t(FULL_PDF_UNSUPPORTED_MESSAGE), "error");
-          return;
-        }
-      }
-      setPaperContentSourceOverride(item.id, paperContext, nextSource);
-      deps.updatePaperPreviewPreservingScroll();
-      const modeLabel =
-        nextSource === "text"
-          ? "Text"
-          : nextSource === "mineru"
-            ? "MinerU"
-            : "PDF";
-      if (nextSource === "pdf") {
-        setStatus(
-          `${t("Content source:")} ${modeLabel}. ${t("Full file will be sent. Right-click retrieval is not available.")}`,
-          "ready",
-        );
-      } else {
-        setStatus(`${t("Content source:")} ${modeLabel}`, "ready");
-      }
+      deps.openPaperChipMenu(paperChip, paperContext, { sticky: true });
     });
   }
 

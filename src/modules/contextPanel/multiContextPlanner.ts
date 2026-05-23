@@ -31,6 +31,7 @@ import {
   ensurePDFTextCached,
   ensureNoteTextCached,
   buildEvidencePack,
+  resolveTextAttachmentSourceMode,
 } from "./pdfContext";
 import { mergeQuoteCitations } from "./quoteCitations";
 import { pdfTextCache } from "./state";
@@ -170,7 +171,8 @@ function resolveContextItem(ref: PaperContextRef): Zotero.Item | null {
   if (
     direct &&
     direct.isAttachment() &&
-    direct.attachmentContentType === "application/pdf"
+    (direct.attachmentContentType === "application/pdf" ||
+      resolveTextAttachmentSourceMode(direct))
   ) {
     return direct;
   }
@@ -200,7 +202,52 @@ function buildPaperRefFromContextItem(
   if ((contextItem as any)?.isNote?.()) {
     return resolvePaperContextRefFromNote(contextItem);
   }
-  return resolvePaperContextRefFromAttachment(contextItem);
+  const pdfRef = resolvePaperContextRefFromAttachment(contextItem);
+  if (pdfRef) return pdfRef;
+  const textMode = resolveTextAttachmentSourceMode(contextItem);
+  if (!contextItem?.isAttachment?.() || !textMode) return null;
+  const parentItem = contextItem.parentID
+    ? Zotero.Items.get(contextItem.parentID) || null
+    : null;
+  if (!parentItem?.isRegularItem?.()) return null;
+  const attachmentTitle =
+    sanitizeText(
+      String(
+        contextItem.getField("title") ||
+          (contextItem as unknown as { attachmentFilename?: string })
+            .attachmentFilename ||
+          "",
+      ),
+    ) || undefined;
+  return {
+    itemId: Math.floor(Number(parentItem.id)),
+    contextItemId: Math.floor(Number(contextItem.id)),
+    contentSourceMode: textMode,
+    title:
+      sanitizeText(String(parentItem.getField("title") || "")) ||
+      `Paper ${parentItem.id}`,
+    attachmentTitle,
+    citationKey:
+      sanitizeText(String(parentItem.getField("citationKey") || "")) ||
+      undefined,
+    firstCreator:
+      sanitizeText(
+        String(
+          parentItem.getField("firstCreator") ||
+            (parentItem as Zotero.Item).firstCreator ||
+            "",
+        ),
+      ) || undefined,
+    year:
+      sanitizeText(
+        String(
+          parentItem.getField("year") ||
+            parentItem.getField("date") ||
+            parentItem.getField("issued") ||
+            "",
+        ),
+      ) || undefined,
+  };
 }
 
 function buildMetadataOnlyFallback(papers: PaperContextRef[]): string {
@@ -547,7 +594,9 @@ async function resolveCollectionScopePapers(params: {
   for (const [index, candidate] of shortlisted.entries()) {
     const contextItem = resolveContextItem(candidate.paperContext);
     if (contextItem) {
-      await ensurePDFTextCached(contextItem);
+      await ensurePDFTextCached(contextItem, {
+        sourceMode: candidate.paperContext.contentSourceMode,
+      });
     }
     papers.push({
       order: params.orderStart + index,
@@ -1008,7 +1057,9 @@ export async function assembleRetrievedMultiPaperContext(params: {
           new Set(selectedCandidates.map((candidate) => candidate.paperKey)),
         )
       : mergePlannerCitationPaperContexts(papers),
-    quoteCitations: selectedCandidates.length ? evidencePack.quoteCitations : [],
+    quoteCitations: selectedCandidates.length
+      ? evidencePack.quoteCitations
+      : [],
   };
 }
 
@@ -1102,7 +1153,19 @@ async function resolvePlannerPaperEntries(params: {
 
   const pushRef = (paper: PaperContextRef) => {
     const key = buildPaperKey(paper);
-    if (seen.has(key)) return;
+    if (seen.has(key)) {
+      const existingIndex = orderedRefs.findIndex(
+        (entry) => buildPaperKey(entry) === key,
+      );
+      if (
+        existingIndex >= 0 &&
+        !orderedRefs[existingIndex].contentSourceMode &&
+        paper.contentSourceMode
+      ) {
+        orderedRefs[existingIndex] = paper;
+      }
+      return;
+    }
     seen.add(key);
     orderedRefs.push(paper);
   };
@@ -1131,7 +1194,9 @@ async function resolvePlannerPaperEntries(params: {
       if ((contextItem as any).isNote?.()) {
         await ensureNoteTextCached(contextItem);
       } else {
-        await ensurePDFTextCached(contextItem);
+        await ensurePDFTextCached(contextItem, {
+          sourceMode: paperContext.contentSourceMode,
+        });
       }
     }
     const isActive = Boolean(activeKey && paperKey === activeKey);

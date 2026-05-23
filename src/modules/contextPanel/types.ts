@@ -3,6 +3,7 @@ import type {
   SelectedTextSource,
   ChatAttachmentCategory,
   ChatAttachment,
+  PaperContentSourceMode,
   AdvancedModelParams,
   ActiveNoteSession,
   PaperContextRef,
@@ -18,6 +19,7 @@ export type {
   SelectedTextSource,
   ChatAttachmentCategory,
   ChatAttachment,
+  PaperContentSourceMode,
   AdvancedModelParams,
   ActiveNoteSession,
   PaperContextRef,
@@ -78,7 +80,12 @@ export interface Message {
   reasoningDetails?: string;
   reasoningOpen?: boolean;
   webchatRunState?: "done" | "incomplete" | "error";
-  webchatCompletionReason?: "settled" | "forced_cancel" | "timeout" | "error" | null;
+  webchatCompletionReason?:
+    | "settled"
+    | "forced_cancel"
+    | "timeout"
+    | "error"
+    | null;
   webchatChatUrl?: string;
   webchatChatId?: string;
   compactMarker?: boolean;
@@ -87,12 +94,7 @@ export interface Message {
 }
 
 export type ChatRuntimeMode = "chat" | "agent";
-export type PaperContextSendMode =
-  | "retrieval"
-  | "full-next"
-  | "full-sticky";
-
-export type PaperContentSourceMode = "text" | "mineru" | "pdf";
+export type PaperContextSendMode = "retrieval" | "full-next" | "full-sticky";
 
 export type ReasoningProviderKind =
   | "openai"
@@ -151,7 +153,14 @@ export type PdfContext = {
   embeddingPromiseKey?: string;
   /** Last embedding attempt that failed; suppresses retry storms for the same config. */
   embeddingFailureKey?: string;
-  sourceType?: "mineru" | "zotero-worker" | "zotero-fulltext-cache";
+  sourceType?:
+    | "mineru"
+    | "zotero-worker"
+    | "zotero-fulltext-cache"
+    | "attachment-markdown"
+    | "attachment-html"
+    | "attachment-txt"
+    | "attachment-docx";
 };
 
 export type PdfChunkKind =
@@ -340,7 +349,12 @@ export type SendQuestionOptions = {
   model?: string;
   apiBase?: string;
   apiKey?: string;
-  authMode?: "api_key" | "codex_auth" | "codex_app_server" | "copilot_auth" | "webchat";
+  authMode?:
+    | "api_key"
+    | "codex_auth"
+    | "codex_app_server"
+    | "copilot_auth"
+    | "webchat";
   providerProtocol?: import("../../utils/providerProtocol").ProviderProtocol;
   modelEntryId?: string;
   modelProviderLabel?: string;
@@ -393,11 +407,20 @@ export type EditRetryOptions = {
   modelAttachments?: ChatAttachment[];
   pdfUploadSystemMessages?: string[];
   targetRuntimeMode?: ChatRuntimeMode;
-  expected?: { conversationKey: number; userTimestamp: number; assistantTimestamp: number };
+  expected?: {
+    conversationKey: number;
+    userTimestamp: number;
+    assistantTimestamp: number;
+  };
   model?: string;
   apiBase?: string;
   apiKey?: string;
-  authMode?: "api_key" | "codex_auth" | "codex_app_server" | "copilot_auth" | "webchat";
+  authMode?:
+    | "api_key"
+    | "codex_auth"
+    | "codex_app_server"
+    | "copilot_auth"
+    | "webchat";
   providerProtocol?: import("../../utils/providerProtocol").ProviderProtocol;
   modelEntryId?: string;
   modelProviderLabel?: string;
