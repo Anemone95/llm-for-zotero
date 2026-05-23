@@ -6284,6 +6284,65 @@ label.llm-search-results-item:hover {
   color: #f97316;
 }
 
+.llm-paper-chip-menu-row-mineru-idle {
+  opacity: 0.68;
+}
+
+.llm-paper-chip-menu-row-mineru-idle:hover {
+  opacity: 1;
+}
+
+.llm-paper-chip-menu-row-mineru-idle .llm-paper-picker-badge {
+  background: color-mix(in srgb, var(--fill-secondary, #888) 16%, transparent);
+  color: var(--fill-secondary, #888);
+}
+
+.llm-paper-chip-menu-row-mineru-idle:hover .llm-paper-picker-badge {
+  background: color-mix(in srgb, #10b981 18%, transparent);
+  color: #10b981;
+}
+
+.llm-paper-chip-menu-row-mineru-processing .llm-paper-picker-badge {
+  gap: 4px;
+  background: color-mix(in srgb, #f59e0b 18%, transparent);
+  color: #f59e0b;
+}
+
+.llm-paper-chip-menu-row-mineru-processing .llm-paper-picker-badge::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: llm-compact-spin 900ms linear infinite;
+}
+
+.llm-paper-chip-menu-row-mineru-failed .llm-paper-picker-badge {
+  gap: 4px;
+  background: color-mix(in srgb, #ef4444 18%, transparent);
+  color: #ef4444;
+}
+
+.llm-paper-chip-menu-row-mineru-failed .llm-paper-picker-badge::before {
+  content: "";
+  flex: 0 0 auto;
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: currentColor;
+  mask:
+    linear-gradient(#000 0 0) center / 8px 1.6px no-repeat,
+    linear-gradient(#000 0 0) center / 1.6px 8px no-repeat;
+  transform: rotate(45deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .llm-paper-chip-menu-row-mineru-processing .llm-paper-picker-badge::before {
+    animation: none;
+  }
+}
+
 .llm-paper-picker-group-chevron {
   flex: 0 0 auto;
   display: inline-block;

@@ -161,7 +161,10 @@ import {
   setSelectedTextContextEntries,
   setSelectedTextExpandedIndex,
 } from "./contextResolution";
-import { resolvePaperContextRefFromAttachment } from "./paperAttribution";
+import {
+  isTextLikeAttachmentSourceMode,
+  resolvePaperContextRefFromAttachment,
+} from "./paperAttribution";
 import {
   filterManualPaperContextsAgainstAutoLoaded,
   isSamePaperContextRef,
@@ -185,6 +188,18 @@ import {
   clearSelectedPaperState,
   clearAllRefContextState,
 } from "./contexts/paperContextState";
+import {
+  getMineruBatchState,
+  onBatchStateChange,
+  pauseBatchProcessing,
+  processSelectedItems,
+} from "../mineruBatchProcessor";
+import { getAutoWatchStatus, pauseAutoWatch } from "../mineruAutoWatch";
+import {
+  getItemStatus,
+  onProcessingStatusChange,
+} from "../mineruProcessingStatus";
+import { isMineruEnabled } from "../../utils/mineruConfig";
 import {
   clearSelectedImageState as clearSelectedImageState_,
   retainPinnedImageState as retainPinnedImageState_,
@@ -378,6 +393,11 @@ import {
   createCoalescedFrameScheduler,
   getOrCreateKeyedInFlightTask,
 } from "./setupHandlers/controllers/uiSchedulingController";
+import {
+  resolveMineruSourceOptionState,
+  type MineruSourceAction,
+  type MineruSourceUiState,
+} from "./setupHandlers/controllers/paperSourceOptionsController";
 import { clearAllAgentToolCaches } from "../../agent/tools";
 import { clearAgentMemory } from "../../agent/store/conversationMemory";
 import { clearAgentTranscript } from "../../agent/store/transcriptStore";
@@ -1387,6 +1407,7 @@ export function setupHandlers(
   // Keep the agent mode toggle in sync when the preference is changed in the
   // Preferences window (which runs in a separate window context).
   let cleanupPrefObservers: (() => void) | null = null;
+  let cleanupMineruPaperSourceObservers: (() => void) | null = null;
   {
     const agentPrefKey = `${config.prefsPrefix}.enableAgentMode`;
     const claudeModePrefKey = `${config.prefsPrefix}.enableClaudeCodeMode`;
@@ -1848,17 +1869,12 @@ export function setupHandlers(
   const pendingMineruAvailabilityChecks = new Map<number, Promise<void>>();
   let mineruChipStyleDepsPromise: Promise<{
     getMineruAvailabilityForAttachmentId: typeof import("./mineruSync").getMineruAvailabilityForAttachmentId;
-    isMineruEnabled: typeof import("../../utils/mineruConfig").isMineruEnabled;
   }> | null = null;
   const loadMineruChipStyleDeps = () => {
     if (!mineruChipStyleDepsPromise) {
-      mineruChipStyleDepsPromise = Promise.all([
-        import("./mineruSync"),
-        import("../../utils/mineruConfig"),
-      ]).then(([mineruSync, mineruConfig]) => ({
+      mineruChipStyleDepsPromise = import("./mineruSync").then((mineruSync) => ({
         getMineruAvailabilityForAttachmentId:
           mineruSync.getMineruAvailabilityForAttachmentId,
-        isMineruEnabled: mineruConfig.isMineruEnabled,
       }));
     }
     return mineruChipStyleDepsPromise;
@@ -1889,9 +1905,8 @@ export function setupHandlers(
       async () => {
         try {
           if (mineruAvailableIds.has(contextItemId)) return;
-          const { getMineruAvailabilityForAttachmentId, isMineruEnabled } =
+          const { getMineruAvailabilityForAttachmentId } =
             await loadMineruChipStyleDeps();
-          if (!isMineruEnabled()) return;
           const availability = await getMineruAvailabilityForAttachmentId(
             contextItemId,
             {
@@ -1900,8 +1915,10 @@ export function setupHandlers(
           );
           if (availability.status === "missing") return;
           mineruAvailableIds.add(contextItemId);
+          upgradePaperContextsToMineruForAttachment(contextItemId);
           // MinerU is now available; re-render chips so the default mode flips.
           schedulePanelStateRefresh();
+          refreshOpenPaperChipMenu();
         } catch {
           /* ignore */
         }
@@ -2212,6 +2229,7 @@ export function setupHandlers(
   let paperChipMenuSticky = false;
   let paperChipMenuTarget: PaperContextRef | null = null;
   let paperChipMenuHideTimer: number | null = null;
+  let refreshOpenPaperChipMenu = () => {};
   const clearPaperChipMenuHideTimer = () => {
     if (paperChipMenuHideTimer === null) return;
     const win = body.ownerDocument?.defaultView;
@@ -2235,15 +2253,10 @@ export function setupHandlers(
     paperChipMenuSticky = false;
   };
   const buildPaperMetaText = (paper: {
-    citationKey?: string;
     firstCreator?: string;
     year?: string;
   }): string => {
-    const parts = [
-      paper.firstCreator || "",
-      paper.year || "",
-      paper.citationKey || "",
-    ].filter(Boolean);
+    const parts = [paper.firstCreator || "", paper.year || ""].filter(Boolean);
     return parts.join(" · ");
   };
 
@@ -2254,6 +2267,10 @@ export function setupHandlers(
     title: string;
     description: string;
     disabledReason?: string;
+    mineruState?: MineruSourceUiState;
+    mineruAction?: MineruSourceAction;
+    mineruActionTitle?: string;
+    hideTextSource?: boolean;
   };
 
   const getAttachmentFilename = (attachment: Zotero.Item): string =>
@@ -2362,6 +2379,50 @@ export function setupHandlers(
     );
   };
 
+  const getMineruSourceDescription = (
+    attachmentTitle: string,
+    state: MineruSourceUiState,
+  ): string => {
+    if (state === "processing") {
+      return `${attachmentTitle} · ${t("MinerU parsing…")}`;
+    }
+    if (state === "failed") {
+      return `${attachmentTitle} · ${t("MinerU parsing failed. Click to retry")}`;
+    }
+    if (state === "idle") {
+      return `${attachmentTitle} · ${t("Click to do MinerU parsing")}`;
+    }
+    return `${attachmentTitle} · MinerU`;
+  };
+
+  const getMineruActionTitle = (state: MineruSourceUiState): string => {
+    if (state === "processing") return t("Click to stop MinerU parsing");
+    if (state === "failed") return t("MinerU parsing failed. Click to retry");
+    if (state === "idle" && !isMineruEnabled()) {
+      return t("Enable MinerU PDF Parsing first.");
+    }
+    if (state === "idle") return t("Click to do MinerU parsing");
+    return "MinerU";
+  };
+
+  const resolveMineruOptionState = (
+    paperContext: PaperContextRef,
+  ): ReturnType<typeof resolveMineruSourceOptionState> => {
+    const itemStatus = getItemStatus(paperContext.contextItemId);
+    const hasUsableMineru =
+      mineruAvailableIds.has(paperContext.contextItemId) ||
+      itemStatus?.status === "cached" ||
+      isPaperContextMineru(paperContext);
+    const state = resolveMineruSourceOptionState({
+      hasUsableMineru,
+      itemStatus,
+    });
+    if (state.hideTextSource) {
+      mineruAvailableIds.add(paperContext.contextItemId);
+    }
+    return state;
+  };
+
   const buildPaperSourceOptions = (
     paperContext: PaperContextRef,
   ): PaperSourceOption[] => {
@@ -2401,22 +2462,30 @@ export function setupHandlers(
           "text",
         );
         if (!baseContext) continue;
-        if (isPaperContextMineru(baseContext)) {
+        const mineruOptionState = resolveMineruOptionState(baseContext);
+        options.push({
+          mode: "mineru",
+          badge: "MD",
+          paperContext: { ...baseContext, contentSourceMode: "mineru" },
+          title: baseContext.title,
+          description: getMineruSourceDescription(
+            attachmentTitle,
+            mineruOptionState.state,
+          ),
+          mineruState: mineruOptionState.state,
+          mineruAction: mineruOptionState.action,
+          mineruActionTitle: getMineruActionTitle(mineruOptionState.state),
+          hideTextSource: mineruOptionState.hideTextSource,
+        });
+        if (!mineruOptionState.hideTextSource) {
           options.push({
-            mode: "mineru",
-            badge: "MD",
-            paperContext: { ...baseContext, contentSourceMode: "mineru" },
+            mode: "text",
+            badge: "Text",
+            paperContext: { ...baseContext, contentSourceMode: "text" },
             title: baseContext.title,
-            description: `${attachmentTitle} · MinerU`,
+            description: `${attachmentTitle} · extracted text`,
           });
         }
-        options.push({
-          mode: "text",
-          badge: "Text",
-          paperContext: { ...baseContext, contentSourceMode: "text" },
-          title: baseContext.title,
-          description: `${attachmentTitle} · extracted text`,
-        });
         options.push({
           mode: "pdf",
           badge: "PDF",
@@ -2485,6 +2554,9 @@ export function setupHandlers(
       disabledReason?: string;
       selected?: boolean;
       sourceOption?: boolean;
+      mineruState?: MineruSourceUiState;
+      mineruAction?: MineruSourceAction;
+      mineruActionTitle?: string;
     },
   ): HTMLButtonElement => {
     const card = createElement(
@@ -2500,6 +2572,18 @@ export function setupHandlers(
       card.dataset.sourceMode = options.contentSourceMode || "";
       card.dataset.contextItemId = `${paperContext.contextItemId}`;
       card.dataset.paperItemId = `${paperContext.itemId}`;
+    }
+    if (options?.mineruState) {
+      card.dataset.mineruState = options.mineruState;
+      card.classList.add(
+        `llm-paper-chip-menu-row-mineru-${options.mineruState}`,
+      );
+      if (options.mineruAction && options.mineruAction !== "select") {
+        card.dataset.mineruAction = options.mineruAction;
+      }
+      if (options.mineruActionTitle) {
+        card.title = options.mineruActionTitle;
+      }
     }
     if (options?.disabledReason) {
       card.disabled = true;
@@ -2542,14 +2626,21 @@ export function setupHandlers(
                   ? "DOCX"
                   : null);
     if (badgeText) {
-      titleLine.appendChild(
-        createElement(ownerDoc, "span", "llm-paper-picker-badge", {
+      const badge = createElement(
+        ownerDoc,
+        "span",
+        "llm-paper-picker-badge",
+        {
           textContent: badgeText,
-        }),
+          title: options?.mineruActionTitle,
+        },
       );
+      titleLine.appendChild(badge);
     }
     rowMain.appendChild(titleLine);
-    const metaText = buildPaperMetaText(paperContext);
+    const metaText = isTextLikeAttachmentSourceMode(mode)
+      ? ""
+      : buildPaperMetaText(paperContext);
     if (metaText) {
       rowMain.appendChild(
         createElement(ownerDoc, "span", "llm-paper-picker-meta", {
@@ -2590,6 +2681,128 @@ export function setupHandlers(
     card.appendChild(rowMain);
     return card;
   };
+
+  const upgradePaperContextsToMineruForAttachment = (
+    contextItemId: number,
+  ): boolean => {
+    if (!item || !Number.isFinite(contextItemId) || contextItemId <= 0) {
+      return false;
+    }
+    const currentItem = item;
+    let didUpgrade = false;
+    const autoLoadedPaperContext = resolveAutoLoadedPaperContext();
+
+    if (autoLoadedPaperContext?.contextItemId === contextItemId) {
+      const currentMode = resolvePaperContentSourceMode(
+        currentItem.id,
+        autoLoadedPaperContext,
+      );
+      if (currentMode !== "pdf" && currentMode !== "mineru") {
+        setPaperContentSourceOverride(
+          currentItem.id,
+          autoLoadedPaperContext,
+          "mineru",
+        );
+        didUpgrade = true;
+      }
+    }
+
+    const selectedPapers = getManualPaperContextsForItem(
+      currentItem.id,
+      autoLoadedPaperContext,
+    );
+    if (!selectedPapers.length) return didUpgrade;
+
+    const nextPapers = selectedPapers.map((paperContext) => {
+      if (paperContext.contextItemId !== contextItemId) return paperContext;
+      const currentMode = resolvePaperContentSourceMode(
+        currentItem.id,
+        paperContext,
+      );
+      if (currentMode === "pdf" || currentMode === "mineru") {
+        return paperContext;
+      }
+      didUpgrade = true;
+      const nextContext: PaperContextRef = {
+        ...paperContext,
+        contentSourceMode: "mineru",
+      };
+      setPaperContentSourceOverride(currentItem.id, nextContext, "mineru");
+      return nextContext;
+    });
+
+    if (didUpgrade) {
+      selectedPaperContextCache.set(currentItem.id, nextPapers);
+    }
+    return didUpgrade;
+  };
+
+  const syncMineruPaperSourceState = (): void => {
+    if (!item) return;
+    const autoLoadedPaperContext = resolveAutoLoadedPaperContext();
+    const selectedPapers = getManualPaperContextsForItem(
+      item.id,
+      autoLoadedPaperContext,
+    );
+    const paperContexts = [
+      ...(autoLoadedPaperContext ? [autoLoadedPaperContext] : []),
+      ...selectedPapers,
+    ];
+    let didRefresh = false;
+    for (const paperContext of paperContexts) {
+      const status = getItemStatus(paperContext.contextItemId);
+      if (status?.status !== "cached") continue;
+      mineruAvailableIds.add(paperContext.contextItemId);
+      if (
+        upgradePaperContextsToMineruForAttachment(paperContext.contextItemId)
+      ) {
+        didRefresh = true;
+      }
+    }
+    if (didRefresh) {
+      updatePaperPreviewPreservingScroll();
+    }
+  };
+
+  const handleMineruSourceAction = async (
+    sourceOption: PaperSourceOption,
+  ): Promise<void> => {
+    const action = sourceOption.mineruAction;
+    if (!action || action === "select") return;
+    const attachmentId = sourceOption.paperContext.contextItemId;
+
+    if (action === "pause") {
+      const batchState = getMineruBatchState();
+      if (batchState.running && !batchState.paused) {
+        pauseBatchProcessing();
+      } else {
+        const autoWatchStatus = getAutoWatchStatus();
+        if (autoWatchStatus.isProcessing && !autoWatchStatus.isPaused) {
+          pauseAutoWatch();
+        }
+      }
+      if (status) setStatus(status, t("Click to do MinerU parsing"), "ready");
+      return;
+    }
+
+    if (!isMineruEnabled()) {
+      if (status) {
+        setStatus(status, t("Enable MinerU PDF Parsing first."), "warning");
+      }
+      return;
+    }
+
+    const batchState = getMineruBatchState();
+    if (batchState.running) {
+      if (status) setStatus(status, t("MinerU parsing…"), "warning");
+      return;
+    }
+
+    if (status) setStatus(status, t("MinerU parsing…"), "ready");
+    await processSelectedItems([attachmentId], { overrideEligibility: true });
+    refreshOpenPaperChipMenu();
+  };
+
   const ensurePaperChipMenu = (): HTMLDivElement | null => {
     if (paperChipMenu?.isConnected) return paperChipMenu;
     const ownerDoc = body.ownerDocument;
@@ -2648,6 +2861,10 @@ export function setupHandlers(
         if (status && option?.disabledReason) {
           setStatus(status, option.disabledReason, "error");
         }
+        return;
+      }
+      if (option.mineruAction && option.mineruAction !== "select") {
+        void handleMineruSourceAction(option);
         return;
       }
       const currentItem = item;
@@ -2784,6 +3001,9 @@ export function setupHandlers(
           title: sourceOption.title,
           description: sourceOption.description,
           disabledReason: sourceOption.disabledReason,
+          mineruState: sourceOption.mineruState,
+          mineruAction: sourceOption.mineruAction,
+          mineruActionTitle: sourceOption.mineruActionTitle,
           selected:
             sourceOption.mode === currentMode &&
             sourceOption.paperContext.contextItemId ===
@@ -2801,6 +3021,19 @@ export function setupHandlers(
     }
     positionPaperChipMenuAboveAnchor(menu, chip);
     menu.style.display = "grid";
+  };
+  refreshOpenPaperChipMenu = () => {
+    if (
+      !paperChipMenu ||
+      !paperChipMenuAnchor ||
+      !paperChipMenuTarget ||
+      paperChipMenu.style.display === "none"
+    ) {
+      return;
+    }
+    openPaperChipMenu(paperChipMenuAnchor, paperChipMenuTarget, {
+      sticky: paperChipMenuSticky,
+    });
   };
   const schedulePaperChipMenuClose = () => {
     if (paperChipMenuSticky) return;
@@ -3528,6 +3761,20 @@ export function setupHandlers(
   const updateSelectedTextPreviewPreservingScroll = () => {
     schedulePanelStateRefresh();
   };
+  cleanupMineruPaperSourceObservers = (() => {
+    const unsubscribeProcessing = onProcessingStatusChange(() => {
+      syncMineruPaperSourceState();
+      updatePaperPreviewPreservingScroll();
+      refreshOpenPaperChipMenu();
+    });
+    const unsubscribeBatch = onBatchStateChange(() => {
+      refreshOpenPaperChipMenu();
+    });
+    return () => {
+      unsubscribeProcessing();
+      unsubscribeBatch();
+    };
+  })();
   const refreshChatPreservingScroll = () => {
     if (!item) {
       runWithChatScrollGuard(() => {
@@ -3898,7 +4145,7 @@ export function setupHandlers(
                 setStatus(
                   status,
                   t(
-                    "Full PDF mode is only available for native PDF providers. Switched to Text/MinerU mode.",
+                    "Your current model provider doesn't support direct PDF upload.",
                   ),
                   "warning",
                 );
@@ -6344,6 +6591,7 @@ export function setupHandlers(
     cleanupBody.__llmQueuedFollowUpDisconnectCleanup =
       observeElementDisconnected(body, () => {
         cleanupPrefObservers?.();
+        cleanupMineruPaperSourceObservers?.();
         unregisterQueuedFollowUpBody(registeredQueuedFollowUpThreadKey, body);
         queuedFollowUpBody.__llmQueuedFollowUpRegisteredThreadKey = null;
         activeContextPanelStateSync.delete(body);

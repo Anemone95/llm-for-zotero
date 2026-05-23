@@ -184,15 +184,10 @@ export function createPaperPickerController(deps: PaperPickerControllerDeps): {
   };
 
   function buildPaperMetaText(paper: {
-    citationKey?: string;
     firstCreator?: string;
     year?: string;
   }): string {
-    const parts = [
-      paper.firstCreator || "",
-      paper.year || "",
-      paper.citationKey || "",
-    ].filter(Boolean);
+    const parts = [paper.firstCreator || "", paper.year || ""].filter(Boolean);
     return parts.join(" · ");
   }
 
