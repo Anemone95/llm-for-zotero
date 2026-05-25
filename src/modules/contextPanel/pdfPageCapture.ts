@@ -875,7 +875,7 @@ async function capturePageByNavigation(
   await new Promise((resolve) => setTimeout(resolve, 120));
   const retryScale =
     Number.isFinite(options.scale) && (options.scale as number) > 1
-      ? Math.max(1, Math.min(options.scale as number, (options.scale as number) - 0.35))
+      ? Math.max(1, (options.scale as number) - 0.35)
       : 1;
   const retry = await renderPdfPageToDataUrl(app, reader, pageNumber, {
     scale: retryScale,

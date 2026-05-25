@@ -324,13 +324,15 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         return;
       }
 
+      const hasNonImageAttachments =
+        selectedFiles.length > 0 ||
+        selectedPaperContexts.length > 0 ||
+        selectedCollectionContexts.length > 0;
+
       const promptText = deps.resolvePromptText(
         text,
         primarySelectedText,
-        selectedFiles.length > 0 ||
-          selectedPaperContexts.length > 0 ||
-          selectedCollectionContexts.length > 0 ||
-          hasImageInputs,
+        hasNonImageAttachments,
       );
       let resolvedPromptText = promptText;
       if (!resolvedPromptText && hasImageInputs) {
