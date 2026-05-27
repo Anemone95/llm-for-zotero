@@ -1,6 +1,7 @@
 import { clearAllAgentToolCaches } from "../../agent/tools";
 import { clearAgentMemory } from "../../agent/store/conversationMemory";
 import { clearAgentTranscript } from "../../agent/store/transcriptStore";
+import { clearPersistedAgentToolResultHandles } from "../../agent/store/toolResultHandles";
 import { clearPersistedAgentEvidence } from "../../agent/context/cacheManagement";
 import { clearPersistedAgentCoverage } from "../../agent/context/coverageLedger";
 import { clearAgentResourceLifecycleState } from "../../agent/context/resourceLifecycle";
@@ -17,6 +18,7 @@ export async function clearAgentConversationState(
   await Promise.all([
     clearAgentMemory(conversationKey),
     clearAgentTranscript(conversationKey),
+    clearPersistedAgentToolResultHandles(conversationKey),
     clearPersistedAgentEvidence(conversationKey),
     clearPersistedAgentCoverage(conversationKey),
   ]);

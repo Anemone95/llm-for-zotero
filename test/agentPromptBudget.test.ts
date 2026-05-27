@@ -112,6 +112,7 @@ describe("agent prompt budget", function () {
     assert.isFalse(result.changed);
     assert.deepEqual(result.messages, messages);
     assert.deepEqual(result.reductions, []);
+    assert.deepEqual(result.handleRecords, []);
   });
 
   it("keeps a full large tool result when the complete prompt fits a 200k budget", function () {
@@ -137,6 +138,7 @@ describe("agent prompt budget", function () {
       inputTokenCap: 200_000,
     });
     assert.isFalse(result.changed);
+    assert.deepEqual(result.handleRecords, []);
     const serialized = JSON.stringify(result.messages);
     assert.include(serialized, "A".repeat(300));
     assert.notInclude(serialized, "modelContextCompacted");
@@ -163,6 +165,8 @@ describe("agent prompt budget", function () {
       messages,
       model: "claude-haiku-4-5",
       inputTokenCap: 8_000,
+      conversationKey: 1,
+      resourceSignature: "scope-a",
     });
     assert.isTrue(result.changed);
     assert.isAtMost(result.estimatedAfterTokens, result.softLimitTokens);
@@ -177,6 +181,15 @@ describe("agent prompt budget", function () {
     assert.equal(modelFacing.totalCount, 160);
     assert.equal(modelFacing.filters.collectionId, 42);
     assert.isBelow(modelFacing.results.length, 160);
+    assert.match(modelFacing.toolResultHandle, /^trh_/);
+    assert.lengthOf(result.handleRecords, 1);
+    assert.equal(result.handleRecords[0].handle, modelFacing.toolResultHandle);
+    assert.equal(result.handleRecords[0].conversationKey, 1);
+    assert.equal(result.handleRecords[0].toolName, "query_library");
+    assert.lengthOf(
+      (result.handleRecords[0].content as { results: unknown[] }).results,
+      160,
+    );
     assert.notInclude(JSON.stringify(modelFacing), "A".repeat(200));
   });
 
@@ -275,6 +288,8 @@ describe("agent prompt budget", function () {
       messages,
       model: "claude-haiku-4-5",
       inputTokenCap: 10_000,
+      conversationKey: 2,
+      resourceSignature: "scope-a",
     });
     assert.isTrue(result.changed);
     assert.isAtMost(result.estimatedAfterTokens, result.softLimitTokens);
@@ -286,6 +301,9 @@ describe("agent prompt budget", function () {
     assert.equal(tool?.role, "tool");
     const modelFacing = JSON.parse((tool as { content: string }).content);
     assert.isTrue(modelFacing.modelContextCompacted);
+    assert.match(modelFacing.toolResultHandle, /^trh_/);
+    assert.lengthOf(result.handleRecords, 1);
+    assert.equal(result.handleRecords[0].handle, modelFacing.toolResultHandle);
     assert.include(JSON.stringify(modelFacing), "queryCoverage");
     assert.include(modelFacing.snippets[0].text, "Evidence snippet 0");
     assert.equal(modelFacing.snippets[0].itemId, "20000");
@@ -293,6 +311,47 @@ describe("agent prompt budget", function () {
     assert.equal(modelFacing.snippets[0].matchMethod, "bm25");
     assert.equal(modelFacing.snippets[0].paperContext.itemId, "20000");
     assert.equal(modelFacing.snippets[0].paperContext.contextItemId, "30000");
+  });
+
+  it("adds handles to history checkpoints for dropped older tool results", function () {
+    const messages: AgentModelMessage[] = [
+      { role: "system", content: "Use tools." },
+      { role: "user", content: "Earlier catalog request." },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: "old-call",
+            name: "query_library",
+            arguments: { entity: "items", mode: "list" },
+          },
+        ],
+      },
+      {
+        ...buildCatalogToolMessage(80),
+        tool_call_id: "old-call",
+      } as AgentModelMessage,
+      { role: "assistant", content: "Earlier synthesis." },
+      { role: "user", content: "Current request." },
+    ];
+    const result = enforceAgentPromptBudget({
+      messages,
+      model: "claude-haiku-4-5",
+      inputTokenCap: 4_000,
+      conversationKey: 3,
+      resourceSignature: "scope-a",
+    });
+    assert.isTrue(result.changed);
+    assert.lengthOf(result.handleRecords, 1);
+    assert.include(
+      String(result.messages[1].content),
+      result.handleRecords[0].handle,
+    );
+    assert.lengthOf(
+      (result.handleRecords[0].content as { results: unknown[] }).results,
+      80,
+    );
   });
 
   it("throws a graceful local over-budget error when protected context cannot fit", function () {

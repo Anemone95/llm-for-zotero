@@ -7,6 +7,7 @@ import { RetrievalService } from "./services/retrievalService";
 import { initAgentTraceStore, getAgentRunTrace } from "./store/traceStore";
 import { initConversationMemoryStore } from "./store/conversationMemory";
 import { initAgentTranscriptStore } from "./store/transcriptStore";
+import { initAgentToolResultHandleStore } from "./store/toolResultHandles";
 import { initAgentEvidenceStore } from "./context/cacheManagement";
 import { initAgentCoverageStore } from "./context/coverageLedger";
 import { createAgentModelAdapter } from "./model/factory";
@@ -54,6 +55,7 @@ export async function initAgentSubsystem(): Promise<AgentRuntime> {
   await initAgentTraceStore();
   await initConversationMemoryStore();
   await initAgentTranscriptStore();
+  await initAgentToolResultHandleStore();
   await initAgentEvidenceStore();
   await initAgentCoverageStore();
   _toolRegistry = createToolRegistry();

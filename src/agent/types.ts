@@ -572,6 +572,7 @@ export type AgentToolContext = {
   currentAnswerText: string;
   modelName: string;
   modelProviderLabel?: string;
+  resourceSignature?: string;
 };
 
 export type AgentToolInputValidation<T> =

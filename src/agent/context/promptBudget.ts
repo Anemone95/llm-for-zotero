@@ -4,6 +4,10 @@ import type {
   AgentToolMessage,
 } from "../types";
 import {
+  createAgentToolResultHandleRecord,
+  type AgentToolResultHandleRecord,
+} from "../store/toolResultHandles";
+import {
   estimateContextMessagesTokens,
   estimateTextTokens,
   resolveContextWindowTokens,
@@ -55,6 +59,7 @@ export type AgentPromptBudgetResult = {
   estimatedBeforeTokens: number;
   estimatedAfterTokens: number;
   reductions: AgentPromptReduction[];
+  handleRecords: AgentToolResultHandleRecord[];
 };
 
 export function resolveAgentPromptBudgetLimits(params: {
@@ -232,6 +237,46 @@ function buildToolCallArgumentDigestById(
     }
   }
   return digests;
+}
+
+function buildPromptToolResultHandle(params: {
+  conversationKey?: number;
+  resourceSignature?: string;
+  message: AgentToolMessage;
+  content: unknown;
+  argumentDigest?: string;
+}): AgentToolResultHandleRecord | null {
+  return createAgentToolResultHandleRecord({
+    conversationKey: params.conversationKey,
+    toolName: params.message.name,
+    toolCallId: params.message.tool_call_id,
+    inputDigest: params.argumentDigest,
+    resourceSignature: params.resourceSignature,
+    content: params.content,
+  });
+}
+
+function attachToolResultHandle<T>(params: {
+  content: T;
+  handleRecord?: AgentToolResultHandleRecord | null;
+}): T {
+  if (!params.handleRecord) return params.content;
+  const handleFields = {
+    toolResultHandle: params.handleRecord.handle,
+    toolResultHandleNotice:
+      "Use tool_result_read with this handle to retrieve omitted rows, snippets, or sections from the exact stored tool result if needed.",
+  };
+  if (params.content && typeof params.content === "object") {
+    return {
+      ...(params.content as Record<string, unknown>),
+      ...handleFields,
+    } as T;
+  }
+  return {
+    modelContextCompacted: true,
+    compactedValue: params.content,
+    ...handleFields,
+  } as T;
 }
 
 function compactLibraryRecord(record: unknown): Record<string, unknown> {
@@ -621,7 +666,7 @@ function buildToolResultHandle(params: {
       ),
     warnings: compactMetadataValue(content.warnings),
     notice:
-      "Older tool output was cleared under context pressure. The full result remains in the trace/internal records; call the tool again or retrieve the cited source if exact details are needed.",
+      "Older tool output was cleared under context pressure. If this message includes toolResultHandle, call tool_result_read to retrieve omitted sections from the exact stored result.",
   };
 }
 
@@ -638,18 +683,33 @@ function contentStringForMessage(
     .join("\n");
 }
 
-function buildHistoryCheckpoint(
-  messages: AgentModelMessage[],
-): AgentModelMessage {
+function buildHistoryCheckpoint(params: {
+  messages: AgentModelMessage[];
+  conversationKey?: number;
+  resourceSignature?: string;
+  argumentDigestById: Map<string, string>;
+  handleRecords: AgentToolResultHandleRecord[];
+}): AgentModelMessage {
   const userLines: string[] = [];
   const assistantLines: string[] = [];
   const toolLines: string[] = [];
-  for (const message of messages) {
+  for (const message of params.messages) {
     if (message.role === "tool") {
+      const parsed = parseToolContent(message);
+      const handleRecord = buildPromptToolResultHandle({
+        conversationKey: params.conversationKey,
+        resourceSignature: params.resourceSignature,
+        message,
+        content: parsed,
+        argumentDigest: params.argumentDigestById.get(message.tool_call_id),
+      });
+      if (handleRecord) params.handleRecords.push(handleRecord);
       toolLines.push(
         `- ${message.name} (${message.tool_call_id}, ${estimateMessageTokens(
           message,
-        )} estimated tokens cleared from raw history)`,
+        )} estimated tokens cleared from raw history${
+          handleRecord ? `, handle=${handleRecord.handle}` : ""
+        })`,
       );
       continue;
     }
@@ -699,10 +759,17 @@ function findLatestRootUserIndex(messages: AgentModelMessage[]): number {
   return fallbackUserIndex;
 }
 
-function compactOlderHistory(messages: AgentModelMessage[]): {
+function compactOlderHistory(params: {
+  messages: AgentModelMessage[];
+  conversationKey?: number;
+  resourceSignature?: string;
+  argumentDigestById: Map<string, string>;
+  handleRecords: AgentToolResultHandleRecord[];
+}): {
   messages: AgentModelMessage[];
   changed: boolean;
 } {
+  const messages = params.messages;
   const latestUserIndex = findLatestRootUserIndex(messages);
   if (latestUserIndex <= 0) return { messages, changed: false };
   const systemMessages = messages
@@ -716,7 +783,17 @@ function compactOlderHistory(messages: AgentModelMessage[]): {
     .filter((message) => message.role !== "system");
   if (!older.length) return { messages, changed: false };
   return {
-    messages: [...systemMessages, buildHistoryCheckpoint(older), ...tail],
+    messages: [
+      ...systemMessages,
+      buildHistoryCheckpoint({
+        messages: older,
+        conversationKey: params.conversationKey,
+        resourceSignature: params.resourceSignature,
+        argumentDigestById: params.argumentDigestById,
+        handleRecords: params.handleRecords,
+      }),
+      ...tail,
+    ],
     changed: true,
   };
 }
@@ -738,29 +815,48 @@ function compactToolMessageToTokens(params: {
   message: AgentToolMessage;
   maxTokens: number;
   argumentsDigestById: Map<string, string>;
+  conversationKey?: number;
+  resourceSignature?: string;
   clearToHandle?: boolean;
-}): AgentToolMessage | null {
+}): {
+  message: AgentToolMessage;
+  handleRecord?: AgentToolResultHandleRecord;
+} | null {
   const beforeTokens = estimateMessageTokens(params.message);
   if (beforeTokens <= params.maxTokens && !params.clearToHandle) return null;
   const parsed = parseToolContent(params.message);
-  const content = params.clearToHandle
+  const argumentDigest = params.argumentsDigestById.get(
+    params.message.tool_call_id,
+  );
+  const handleRecord = buildPromptToolResultHandle({
+    conversationKey: params.conversationKey,
+    resourceSignature: params.resourceSignature,
+    message: params.message,
+    content: parsed,
+    argumentDigest,
+  });
+  const compactedContent = params.clearToHandle
     ? buildToolResultHandle({
         message: params.message,
         content: parsed,
-        argumentDigest: params.argumentsDigestById.get(
-          params.message.tool_call_id,
-        ),
+        argumentDigest,
       })
     : compactToolContent({
         toolName: params.message.name,
         content: parsed,
         maxTokens: params.maxTokens,
       });
+  const content = attachToolResultHandle({
+    content: compactedContent,
+    handleRecord,
+  });
   const next: AgentToolMessage = {
     ...params.message,
     content: stableStringify(content),
   };
-  return estimateMessageTokens(next) < beforeTokens ? next : null;
+  return estimateMessageTokens(next) < beforeTokens
+    ? { message: next, handleRecord: handleRecord || undefined }
+    : null;
 }
 
 function addReduction(
@@ -782,6 +878,9 @@ function reduceToolMessages(params: {
   predicate: (message: AgentToolMessage, index: number) => boolean;
   kind: AgentPromptReductionKind;
   minTokens: number;
+  conversationKey?: number;
+  resourceSignature?: string;
+  handleRecords: AgentToolResultHandleRecord[];
   clearToHandle?: boolean;
 }): { messages: AgentModelMessage[]; changed: boolean } {
   let messages = params.messages;
@@ -805,12 +904,15 @@ function reduceToolMessages(params: {
       message,
       maxTokens: targetTokens,
       argumentsDigestById,
+      conversationKey: params.conversationKey,
+      resourceSignature: params.resourceSignature,
       clearToHandle: params.clearToHandle,
     });
     if (!next) continue;
     messages = messages.map((entry, entryIndex) =>
-      entryIndex === index ? next : entry,
+      entryIndex === index ? next.message : entry,
     );
+    if (next.handleRecord) params.handleRecords.push(next.handleRecord);
     changed = true;
     addReduction(params.reductions, params.kind);
   }
@@ -834,6 +936,8 @@ export function enforceAgentPromptBudget(params: {
   messages: AgentModelMessage[];
   model?: string;
   inputTokenCap?: number;
+  conversationKey?: number;
+  resourceSignature?: string;
 }): AgentPromptBudgetResult {
   const limits = resolveAgentPromptBudgetLimits({
     model: params.model,
@@ -841,6 +945,7 @@ export function enforceAgentPromptBudget(params: {
   });
   let messages = params.messages.map((message) => cloneMessage(message));
   const reductions: AgentPromptReduction[] = [];
+  const handleRecords: AgentToolResultHandleRecord[] = [];
   const estimatedBeforeTokens = estimateContextMessagesTokens(messages);
   let changed = false;
   if (estimatedBeforeTokens <= limits.softLimitTokens) {
@@ -852,10 +957,18 @@ export function enforceAgentPromptBudget(params: {
       estimatedBeforeTokens,
       estimatedAfterTokens: estimatedBeforeTokens,
       reductions,
+      handleRecords,
     };
   }
 
-  const historyCompaction = compactOlderHistory(messages);
+  const argumentDigestById = buildToolCallArgumentDigestById(messages);
+  const historyCompaction = compactOlderHistory({
+    messages,
+    conversationKey: params.conversationKey,
+    resourceSignature: params.resourceSignature,
+    argumentDigestById,
+    handleRecords,
+  });
   if (historyCompaction.changed) {
     messages = historyCompaction.messages;
     changed = true;
@@ -912,6 +1025,9 @@ export function enforceAgentPromptBudget(params: {
       predicate: stage.predicate,
       kind: stage.kind,
       minTokens: stage.minTokens,
+      conversationKey: params.conversationKey,
+      resourceSignature: params.resourceSignature,
+      handleRecords,
       clearToHandle: "clearToHandle" in stage ? stage.clearToHandle : false,
     });
     messages = reduced.messages;
@@ -942,5 +1058,6 @@ export function enforceAgentPromptBudget(params: {
     estimatedBeforeTokens,
     estimatedAfterTokens,
     reductions,
+    handleRecords,
   };
 }
