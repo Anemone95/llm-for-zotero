@@ -306,8 +306,18 @@ function compactEvidenceSnippet(record: unknown): Record<string, unknown> {
   }
   const source = record as Record<string, unknown>;
   const compact: Record<string, unknown> = {};
+  const evidenceText = compactScalar(
+    source.text ?? source.snippet ?? source.surroundingText,
+    1_200,
+  );
+  if (evidenceText !== undefined && evidenceText !== "") {
+    compact.text = evidenceText;
+  }
   for (const key of [
-    "text",
+    "snippetId",
+    "itemId",
+    "contextItemId",
+    "title",
     "sourceLabel",
     "citationLabel",
     "sectionLabel",
@@ -318,11 +328,20 @@ function compactEvidenceSnippet(record: unknown): Record<string, unknown> {
     "quoteCitationId",
     "sourceKind",
     "matchStatus",
+    "matchMethod",
+    "matchedQueryVariant",
+    "whyMatched",
   ]) {
-    const value = compactScalar(source[key], key === "text" ? 1_200 : 240);
+    const value = compactScalar(source[key], key === "whyMatched" ? 500 : 240);
     if (value !== undefined && value !== "") compact[key] = value;
   }
-  const paperContext = compactPaperContext(source.paperContext);
+  const paperContext =
+    compactPaperContext(source.paperContext) ||
+    compactPaperContext({
+      itemId: source.itemId,
+      contextItemId: source.contextItemId,
+      title: source.title,
+    });
   if (paperContext) compact.paperContext = paperContext;
   if (Array.isArray(source.passages)) {
     compact.passageCount = source.passages.length;

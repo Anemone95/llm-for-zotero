@@ -69,17 +69,19 @@ function buildEvidenceToolMessage(snippetCount = 50): AgentModelMessage {
         score: 0.9,
       })),
       snippets: Array.from({ length: snippetCount }, (_, index) => ({
-        text: `Evidence snippet ${index} ${"B".repeat(900)}`,
-        sourceLabel: `Evidence paper ${index}`,
-        citationLabel: `Citation ${index}`,
-        pageLabel: `${index + 1}`,
-        sectionLabel: "Results",
+        snippetId: `lr_${20_000 + index}_${30_000 + index}_${index}_bm25`,
+        itemId: `${20_000 + index}`,
+        contextItemId: `${30_000 + index}`,
         chunkIndex: index,
-        paperContext: {
-          itemId: 20_000 + index,
-          contextItemId: 30_000 + index,
-          title: `Evidence paper ${index}`,
-        },
+        title: `Evidence paper ${index}`,
+        sourceKind: "pdf_text",
+        matchMethod: "bm25",
+        sectionLabel: "Results",
+        snippet: `Evidence snippet ${index} ${"B".repeat(900)}`,
+        surroundingText: `Surrounding evidence ${index} ${"C".repeat(900)}`,
+        score: 0.9,
+        whyMatched: "Full-text BM25 retrieval ranked this passage highly",
+        matchedQueryVariant: "representational drift",
       })),
       warnings: ["coverage is bounded by indexed text availability"],
     }),
@@ -285,10 +287,12 @@ describe("agent prompt budget", function () {
     const modelFacing = JSON.parse((tool as { content: string }).content);
     assert.isTrue(modelFacing.modelContextCompacted);
     assert.include(JSON.stringify(modelFacing), "queryCoverage");
-    assert.include(JSON.stringify(modelFacing), "Evidence snippet");
-    assert.include(JSON.stringify(modelFacing), "pageLabel");
-    assert.include(JSON.stringify(modelFacing), "sectionLabel");
-    assert.include(JSON.stringify(modelFacing), "paperContext");
+    assert.include(modelFacing.snippets[0].text, "Evidence snippet 0");
+    assert.equal(modelFacing.snippets[0].itemId, "20000");
+    assert.equal(modelFacing.snippets[0].contextItemId, "30000");
+    assert.equal(modelFacing.snippets[0].matchMethod, "bm25");
+    assert.equal(modelFacing.snippets[0].paperContext.itemId, "20000");
+    assert.equal(modelFacing.snippets[0].paperContext.contextItemId, "30000");
   });
 
   it("throws a graceful local over-budget error when protected context cannot fit", function () {

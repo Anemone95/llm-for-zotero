@@ -2368,17 +2368,19 @@ describe("AgentRuntime", function () {
           score: 0.9,
         })),
         snippets: Array.from({ length: 70 }, (_, index) => ({
-          text: `Evidence snippet ${index} ${"B".repeat(900)}`,
-          sourceLabel: `Evidence paper ${index}`,
-          citationLabel: `Citation ${index}`,
-          pageLabel: `${index + 1}`,
-          sectionLabel: "Results",
+          snippetId: `lr_${20_000 + index}_${30_000 + index}_${index}_bm25`,
+          itemId: `${20_000 + index}`,
+          contextItemId: `${30_000 + index}`,
           chunkIndex: index,
-          paperContext: {
-            itemId: 20_000 + index,
-            contextItemId: 30_000 + index,
-            title: `Evidence paper ${index}`,
-          },
+          title: `Evidence paper ${index}`,
+          sourceKind: "pdf_text",
+          matchMethod: "bm25",
+          sectionLabel: "Results",
+          snippet: `Evidence snippet ${index} ${"B".repeat(900)}`,
+          surroundingText: `Surrounding evidence ${index} ${"C".repeat(900)}`,
+          score: 0.9,
+          whyMatched: "Full-text BM25 retrieval ranked this passage highly",
+          matchedQueryVariant: "representational drift",
         })),
         warnings: ["coverage is bounded by indexed text availability"],
       };
@@ -2467,10 +2469,12 @@ describe("AgentRuntime", function () {
       assert.isTrue(modelFacing.modelContextCompacted);
       const serialized = JSON.stringify(modelFacing);
       assert.include(serialized, "queryCoverage");
-      assert.include(serialized, "Evidence snippet");
-      assert.include(serialized, "pageLabel");
-      assert.include(serialized, "sectionLabel");
-      assert.include(serialized, "paperContext");
+      assert.include(modelFacing.snippets[0].text, "Evidence snippet 0");
+      assert.equal(modelFacing.snippets[0].itemId, "20000");
+      assert.equal(modelFacing.snippets[0].contextItemId, "30000");
+      assert.equal(modelFacing.snippets[0].matchMethod, "bm25");
+      assert.equal(modelFacing.snippets[0].paperContext.itemId, "20000");
+      assert.equal(modelFacing.snippets[0].paperContext.contextItemId, "30000");
     } finally {
       restoreDb();
     }
