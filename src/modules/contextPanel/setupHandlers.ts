@@ -36,6 +36,10 @@ import {
   isUpstreamGlobalConversationKey,
   PREFERENCES_PANE_ID,
 } from "./constants";
+import {
+  isAtAutoFollowBottom,
+  resolveStreamingScrollFollowAction,
+} from "./scrollFollowPolicy";
 import { createContextIcon } from "./contextIcons";
 import {
   selectedModelCache,
@@ -1520,20 +1524,6 @@ export function setupHandlers(
     scrollTop: number;
     nearBottom: boolean;
   };
-  const STREAMING_FOLLOW_BOTTOM_CATCHUP_MAX_PX = 900;
-  const STREAMING_FOLLOW_BOTTOM_CATCHUP_VIEWPORT_RATIO = 1.5;
-  const getStreamingFollowBottomCatchupDistance = (
-    state: ChatBoxViewportState,
-  ): number =>
-    Math.max(
-      AUTO_SCROLL_BOTTOM_THRESHOLD,
-      Math.min(
-        STREAMING_FOLLOW_BOTTOM_CATCHUP_MAX_PX,
-        Math.round(
-          state.height * STREAMING_FOLLOW_BOTTOM_CATCHUP_VIEWPORT_RATIO,
-        ),
-      ),
-    );
   const buildChatBoxViewportState = (): ChatBoxViewportState | null => {
     if (!chatBox) return null;
     if (!isChatViewportVisible(chatBox)) return null;
@@ -1572,7 +1562,7 @@ export function setupHandlers(
   };
 
   if (item && chatBox) {
-    const handleStreamingCatchupWheel = (event: WheelEvent) => {
+    const handleStreamingFollowWheel = (event: WheelEvent) => {
       if (!item || !chatBox) return;
       if (!isCurrentConversationStreaming()) return;
       if (event.deltaY < 0) {
@@ -1581,27 +1571,11 @@ export function setupHandlers(
       }
       if (event.deltaY <= 0) return;
 
-      const target = event.target as Element | null;
-      const targetClosest =
-        target && typeof target.closest === "function"
-          ? target.closest.bind(target)
-          : null;
-      const fromStreamingMermaidPreview = Boolean(
-        targetClosest?.(".llm-bubble.streaming .llm-mermaid-preview"),
-      );
-      if (fromStreamingMermaidPreview) {
-        event.preventDefault();
-        requestStreamingFollowBottom();
-        return;
-      }
-
       const checkAfterNativeScroll = () => {
         const current = buildChatBoxViewportState();
         if (!current) return;
         const distanceFromBottom = current.maxScrollTop - current.scrollTop;
-        if (
-          distanceFromBottom <= getStreamingFollowBottomCatchupDistance(current)
-        ) {
+        if (isAtAutoFollowBottom(distanceFromBottom)) {
           requestStreamingFollowBottom();
         }
       };
@@ -1639,25 +1613,25 @@ export function setupHandlers(
       if (previousViewport && currentViewport) {
         const scrollDelta =
           currentViewport.scrollTop - previousViewport.scrollTop;
-        if (scrollDelta < -2) {
+        const distanceFromBottom =
+          currentViewport.maxScrollTop - currentViewport.scrollTop;
+        const followAction = resolveStreamingScrollFollowAction({
+          scrollDelta,
+          distanceFromBottom,
+          isStreaming: isCurrentConversationStreaming(),
+        });
+        if (followAction === "cancel") {
           cancelChatScrollFollowBottomRequest(item);
-        } else if (scrollDelta > 2 && isCurrentConversationStreaming()) {
-          const distanceFromBottom =
-            currentViewport.maxScrollTop - currentViewport.scrollTop;
-          if (
-            distanceFromBottom <=
-            getStreamingFollowBottomCatchupDistance(currentViewport)
-          ) {
-            requestChatScrollFollowBottom(body, item, chatBox);
-            captureChatBoxViewportState();
-            return;
-          }
+        } else if (followAction === "follow") {
+          requestChatScrollFollowBottom(body, item, chatBox);
+          captureChatBoxViewportState();
+          return;
         }
       }
       persistChatScrollSnapshot(item, chatBox);
       captureChatBoxViewportState();
     };
-    chatBox.addEventListener("wheel", handleStreamingCatchupWheel, {
+    chatBox.addEventListener("wheel", handleStreamingFollowWheel, {
       passive: false,
     });
     chatBox.addEventListener("scroll", persistScroll, { passive: true });
