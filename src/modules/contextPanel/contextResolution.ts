@@ -377,13 +377,13 @@ function getFirstPdfChildAttachment(
   return null;
 }
 
-async function getBestPdfAttachment(
+async function getBestSupportedContextAttachment(
   item: Zotero.Item | null | undefined,
 ): Promise<Zotero.Item | null> {
   if (!item || item.isAttachment?.() || !item.isRegularItem?.()) return null;
   try {
     const attachment = await item.getBestAttachment();
-    return attachment && isSupportedPdfContextAttachment(attachment)
+    return attachment && isSupportedContextAttachment(attachment)
       ? attachment
       : null;
   } catch (_error) {
@@ -457,7 +457,7 @@ export function resolveContextSourceItem(
     }
     return {
       contextItem: null,
-      statusText: `Using note: ${activeNoteSession.title}; parent item has no PDF context`,
+      statusText: `Using note: ${activeNoteSession.title}; parent item has no supported attachment context`,
       sourceKind: "none",
     };
   }
@@ -536,7 +536,7 @@ export function resolveContextSourceItem(
     : [];
   return {
     contextItem: null,
-    statusText: `No active tab PDF context (tab=${selectedTab?.selectedID ?? "?"}, type=${selectedTab?.selectedType ?? "?"}, tabType=${activeTab?.type ?? "?"}, dataKeys=${dataKeys.join("|") || "-"})`,
+    statusText: `No active tab attachment context (tab=${selectedTab?.selectedID ?? "?"}, type=${selectedTab?.selectedType ?? "?"}, tabType=${activeTab?.type ?? "?"}, dataKeys=${dataKeys.join("|") || "-"})`,
     sourceKind: "none",
   };
 }
@@ -566,7 +566,7 @@ export async function resolveContextSourceItemAsync(
       };
     }
     const parentItem = Zotero.Items.get(activeNoteSession.parentItemId) || null;
-    const bestAttachment = await getBestPdfAttachment(parentItem);
+    const bestAttachment = await getBestSupportedContextAttachment(parentItem);
     if (bestAttachment) {
       const label = getContextItemLabel(bestAttachment);
       return {
@@ -577,7 +577,7 @@ export async function resolveContextSourceItemAsync(
     }
     return {
       contextItem: null,
-      statusText: `Using note: ${activeNoteSession.title}; parent item has no PDF context`,
+      statusText: `Using note: ${activeNoteSession.title}; parent item has no supported attachment context`,
       sourceKind: "none",
     };
   }
@@ -630,7 +630,8 @@ export async function resolveContextSourceItemAsync(
     };
   }
 
-  const bestAttachment = await getBestPdfAttachment(panelParentItem);
+  const bestAttachment =
+    await getBestSupportedContextAttachment(panelParentItem);
   if (bestAttachment && panelParentItem) {
     const parentTitle =
       sanitizeText(panelParentItem.getField("title") || "").trim() ||
@@ -645,7 +646,7 @@ export async function resolveContextSourceItemAsync(
 
   return {
     contextItem: null,
-    statusText: "Parent item has no PDF best attachment",
+    statusText: "Parent item has no supported best attachment",
     sourceKind: "none",
   };
 }
@@ -1311,11 +1312,7 @@ export function createNoteContextChip(
     noteMeta.dataset.contextIndex = `${options.removableIndex}`;
     noteChip.dataset.contextIndex = `${options.removableIndex}`;
   }
-  const noteIcon = createContextIcon(
-    ownerDoc,
-    "note",
-    "llm-note-context-icon",
-  );
+  const noteIcon = createContextIcon(ownerDoc, "note", "llm-note-context-icon");
   const noteLabel = ownerDoc.createElement("span");
   noteLabel.className = "llm-note-context-label";
   noteLabel.textContent = noteLabelText;

@@ -34,6 +34,10 @@ export type HistorySearchPopupControllerDeps = {
   loadDocument: (
     entry: ConversationHistoryEntry,
   ) => Promise<HistorySearchDocument>;
+  searchEntries?: (query: string) => Promise<{
+    entries: ConversationHistoryEntry[];
+    resultsByKey: Map<number, HistorySearchResult>;
+  }>;
   onSelect: (entry: ConversationHistoryEntry) => void | Promise<void>;
   translate?: TranslateFn;
   log?: (...args: unknown[]) => void;
@@ -351,6 +355,12 @@ export function createHistorySearchPopupController(
       }
 
       const normalizedQuery = normalizeHistorySearchQuery(query);
+      if (deps.searchEntries) {
+        const indexed = await deps.searchEntries(query);
+        if (thisSeq !== searchSeq || !controller.isOpen()) return;
+        renderEntries(indexed.entries, query, indexed.resultsByKey);
+        return;
+      }
       const documents = new Map<number, HistorySearchDocument>();
       await Promise.all(
         allEntries.map(async (entry) => {

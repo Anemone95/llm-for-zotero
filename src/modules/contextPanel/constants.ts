@@ -2,10 +2,12 @@ import { config } from "../../../package.json";
 import { t } from "../../utils/i18n";
 import { ReasoningLevel as LLMReasoningLevel } from "../../utils/llmClient";
 import {
+  buildDefaultUpstreamGlobalConversationKey,
   isConversationKeyForKind,
   UPSTREAM_GLOBAL_CONVERSATION_KEY_BASE,
   UPSTREAM_PAPER_CONVERSATION_KEY_BASE,
 } from "../../shared/conversationKeySpace";
+export { buildDefaultUpstreamGlobalConversationKey };
 export {
   COLLECTION_RETRIEVAL_MAX_PAPERS,
   MAX_FULL_TEXT_PAPER_CONTEXTS,

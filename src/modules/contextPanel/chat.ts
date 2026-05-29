@@ -9,18 +9,14 @@ import {
 import {
   appendMessage as appendStoredMessage,
   clearConversation as clearStoredConversation,
-  loadConversation,
   pruneConversation,
   updateLatestUserMessage as updateStoredLatestUserMessage,
   updateLatestAssistantMessage as updateStoredLatestAssistantMessage,
-  deleteTurnMessages as deleteStoredTurnMessages,
   StoredChatMessage,
 } from "../../utils/chatStore";
-import { loadClaudeConversation } from "../../claudeCode/store";
+import { conversationRepository } from "../../core/conversations/repository";
 import {
   appendCodexMessage,
-  deleteCodexTurnMessages,
-  loadCodexConversation,
   pruneCodexConversation,
   updateLatestCodexAssistantMessage,
   updateLatestCodexUserMessage,
@@ -33,7 +29,6 @@ import {
   appendClaudeConversationMessage,
   buildClaudeScope,
   captureClaudeSessionInfo,
-  deleteClaudeConversationTurnMessages,
   getClaudeBridgeRuntime,
   isClaudeConversationSystemActive,
   updateLatestClaudeConversationAssistantMessage,
@@ -1283,13 +1278,11 @@ async function loadStoredConversationByKey(
     conversationSystem,
   });
   if (!storageSystem) return [];
-  if (storageSystem === "claude_code") {
-    return loadClaudeConversation(conversationKey, limit);
-  }
-  if (storageSystem === "codex") {
-    return loadCodexConversation(conversationKey, limit);
-  }
-  return loadConversation(conversationKey, limit);
+  return conversationRepository.loadMessages({
+    system: storageSystem,
+    conversationKey,
+    limit,
+  });
 }
 
 async function updateStoredLatestUserMessageByConversation(
@@ -5322,21 +5315,13 @@ export async function editUserTurnAndRetry(opts: {
       });
       if (!storageSystem) {
         continue;
-      } else if (storageSystem === "claude_code") {
-        await deleteClaudeConversationTurnMessages(
-          conversationKey,
-          p.userTs,
-          p.assistantTs,
-        );
-      } else if (storageSystem === "codex") {
-        await deleteCodexTurnMessages(conversationKey, p.userTs, p.assistantTs);
-      } else {
-        await deleteStoredTurnMessages(
-          conversationKey,
-          p.userTs,
-          p.assistantTs,
-        );
       }
+      await conversationRepository.deleteTurnMessages({
+        system: storageSystem,
+        conversationKey,
+        userTimestamp: p.userTs,
+        assistantTimestamp: p.assistantTs,
+      });
     } catch (err) {
       ztoolkit.log("LLM: Failed to delete subsequent stored turn", err);
     }

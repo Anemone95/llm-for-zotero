@@ -1,0 +1,267 @@
+import { assert } from "chai";
+import { conversationRepository } from "../src/core/conversations/repository";
+import {
+  CODEX_GLOBAL_CONVERSATION_KEY_BASE,
+} from "../src/shared/conversationKeySpace";
+import { buildConversationID } from "../src/shared/conversationRegistry";
+
+describe("conversationRepository", function () {
+  const globalScope = globalThis as typeof globalThis & {
+    Zotero?: Record<string, unknown>;
+  };
+  const originalZotero = globalScope.Zotero;
+
+  afterEach(function () {
+    globalScope.Zotero = originalZotero;
+  });
+
+  it("normalizes upstream catalog rows behind the repository boundary", async function () {
+    const queries: Array<{ sql: string; params?: unknown[] }> = [];
+    globalScope.Zotero = {
+      ...(originalZotero || {}),
+      DB: {
+        queryAsync: async (sql: string, params?: unknown[]) => {
+          queries.push({ sql, params });
+          if (sql.includes("FROM llm_for_zotero_global_conversations gc")) {
+            return [
+              {
+                conversationKey: 2_000_000_021,
+                libraryID: 7,
+                createdAt: 100,
+                title: "Repository title",
+                lastActivityAt: 300,
+                userTurnCount: 2,
+              },
+            ];
+          }
+          return [];
+        },
+      },
+    };
+
+    const rows = await conversationRepository.listCatalogEntries({
+      system: "upstream",
+      kind: "global",
+      libraryID: 7,
+      limit: 10,
+      includeEmpty: true,
+    });
+
+    assert.deepEqual(rows, [
+      {
+        conversationID: buildConversationID({
+          conversationKey: 2_000_000_021,
+          system: "upstream",
+          kind: "global",
+          libraryID: 7,
+        }),
+        conversationKey: 2_000_000_021,
+        system: "upstream",
+        kind: "global",
+        libraryID: 7,
+        createdAt: 100,
+        lastActivityAt: 300,
+        title: "Repository title",
+        userTurnCount: 2,
+      },
+    ]);
+    assert.isTrue(
+      queries.some(({ sql }) =>
+        sql.includes("FROM llm_for_zotero_global_conversations gc"),
+      ),
+    );
+    const listQuery = queries.find(({ sql }) =>
+      sql.includes("FROM llm_for_zotero_global_conversations gc"),
+    );
+    assert.notInclude(listQuery?.sql || "", "HAVING");
+  });
+
+  it("routes catalog title updates by conversation system", async function () {
+    const queries: Array<{ sql: string; params?: unknown[] }> = [];
+    const conversationKey = CODEX_GLOBAL_CONVERSATION_KEY_BASE + 21;
+    globalScope.Zotero = {
+      ...(originalZotero || {}),
+      DB: {
+        queryAsync: async (sql: string, params?: unknown[]) => {
+          queries.push({ sql, params });
+          return [];
+        },
+      },
+    };
+
+    await conversationRepository.setCatalogTitle({
+      system: "codex",
+      kind: "global",
+      conversationKey,
+      title: "Renamed Codex chat",
+    });
+
+    const update = queries.find(({ sql }) =>
+      sql.includes("UPDATE llm_for_zotero_codex_conversations"),
+    );
+    assert.isOk(update);
+    assert.deepEqual(update?.params, ["Renamed Codex chat", conversationKey]);
+  });
+
+  it("routes catalog deletion by system and kind", async function () {
+    const queries: Array<{ sql: string; params?: unknown[] }> = [];
+    globalScope.Zotero = {
+      ...(originalZotero || {}),
+      DB: {
+        queryAsync: async (sql: string, params?: unknown[]) => {
+          queries.push({ sql, params });
+          return [];
+        },
+      },
+    };
+
+    await conversationRepository.deleteCatalogEntry({
+      system: "upstream",
+      kind: "paper",
+      conversationKey: 42,
+    });
+
+    const deleteQuery = queries.find(({ sql }) =>
+      sql.includes("DELETE FROM llm_for_zotero_paper_conversations"),
+    );
+    assert.isOk(deleteQuery);
+    assert.deepEqual(deleteQuery?.params, [42]);
+  });
+
+  it("repairs missing runtime registry rows when ensuring an existing Codex catalog row", async function () {
+    const queries: Array<{ sql: string; params?: unknown[] }> = [];
+    const conversationKey = CODEX_GLOBAL_CONVERSATION_KEY_BASE + 44;
+    const conversationID = buildConversationID({
+      conversationKey,
+      system: "codex",
+      kind: "global",
+      libraryID: 1,
+      profileSignature: "profile-default",
+    });
+    globalScope.Zotero = {
+      ...(originalZotero || {}),
+      Profile: {
+        dir: "/tmp/llm-for-zotero-test-profile",
+      },
+      DB: {
+        queryAsync: async (sql: string, params?: unknown[]) => {
+          queries.push({ sql, params });
+          if (
+            sql.includes("FROM llm_for_zotero_codex_conversations c") &&
+            sql.includes("WHERE c.conversation_key = ?")
+          ) {
+            return [
+              {
+                conversationID,
+                conversationKey,
+                libraryID: 1,
+                kind: "global",
+                paperItemID: null,
+                createdAt: 100,
+                updatedAt: 200,
+                title: "Existing Codex chat",
+                providerSessionId: null,
+                scopedConversationKey: null,
+                scopeType: null,
+                scopeId: null,
+                scopeLabel: null,
+                cwd: null,
+                modelName: null,
+                effort: null,
+                userTurnCount: 0,
+              },
+            ];
+          }
+          return [];
+        },
+      },
+    };
+
+    const entry = await conversationRepository.ensureCatalogEntry({
+      system: "codex",
+      kind: "global",
+      conversationKey,
+      libraryID: 1,
+    });
+
+    assert.equal(entry?.conversationKey, conversationKey);
+    assert.isTrue(
+      queries.some(
+        ({ sql, params }) =>
+          sql.includes("INSERT INTO llm_for_zotero_conversation_registry") &&
+          params?.[0] === conversationID &&
+          params?.[1] === conversationKey,
+      ),
+    );
+  });
+
+  it("routes message loading and turn deletion by conversation system", async function () {
+    const queries: Array<{ sql: string; params?: unknown[] }> = [];
+    const conversationKey = CODEX_GLOBAL_CONVERSATION_KEY_BASE + 21;
+    globalScope.Zotero = {
+      ...(originalZotero || {}),
+      DB: {
+        executeTransaction: async (fn: () => Promise<void>) => fn(),
+        queryAsync: async (sql: string, params?: unknown[]) => {
+          queries.push({ sql, params });
+          return [];
+        },
+      },
+    };
+
+    await conversationRepository.loadMessages({
+      system: "codex",
+      conversationKey,
+      limit: 5,
+    });
+    await conversationRepository.deleteTurnMessages({
+      system: "codex",
+      conversationKey,
+      userTimestamp: 100,
+      assistantTimestamp: 200,
+    });
+
+    const loadQuery = queries.find(
+      ({ sql }) =>
+        sql.includes("FROM llm_for_zotero_codex_messages") &&
+        sql.includes("LIMIT ?"),
+    );
+    assert.isOk(loadQuery);
+    assert.deepEqual(loadQuery?.params?.slice(-1), [5]);
+
+    const deleteQueries = queries.filter(({ sql }) =>
+      sql.includes("DELETE FROM llm_for_zotero_codex_messages"),
+    );
+    assert.lengthOf(deleteQueries, 2);
+    assert.deepEqual(deleteQueries[0]?.params?.slice(-1), [100]);
+    assert.deepEqual(deleteQueries[1]?.params?.slice(-1), [200]);
+  });
+
+  it("touches upstream empty draft activity through the repository", async function () {
+    const queries: Array<{ sql: string; params?: unknown[] }> = [];
+    const conversationKey = 2_000_000_021;
+    globalScope.Zotero = {
+      ...(originalZotero || {}),
+      DB: {
+        queryAsync: async (sql: string, params?: unknown[]) => {
+          queries.push({ sql, params });
+          return [];
+        },
+      },
+    };
+
+    await conversationRepository.touchEmptyCatalogActivity({
+      system: "upstream",
+      kind: "global",
+      conversationKey,
+      timestamp: 1234,
+    });
+
+    const update = queries.find(({ sql }) =>
+      sql.includes("UPDATE llm_for_zotero_global_conversations") &&
+      sql.includes("SET created_at = ?"),
+    );
+    assert.isOk(update);
+    assert.deepEqual(update?.params?.slice(0, 2), [1234, conversationKey]);
+  });
+});

@@ -48,6 +48,10 @@ import type {
   SelectedTextContext,
 } from "../../types";
 import {
+  isPaperContextFullTextOnlySourceMode,
+  isPaperContextReaderFocusableSourceMode,
+} from "./composeContextController";
+import {
   removePinnedSelectedText,
   togglePinnedFile,
   togglePinnedImage,
@@ -423,6 +427,13 @@ export function attachComposePreviewInteractionController(
         item.id,
         paperContext,
       );
+      if (isPaperContextFullTextOnlySourceMode(contentSource)) {
+        setStatus(
+          t("Attachment sources are always sent as full text."),
+          "ready",
+        );
+        return;
+      }
       if (contentSource === "pdf" && !deps.isWebChatMode()) {
         setStatus(
           t(
@@ -479,6 +490,8 @@ export function attachComposePreviewInteractionController(
         ".llm-paper-chip-menu-row",
       ) as HTMLButtonElement | null;
       if (cardRow) {
+        const item = getItem();
+        if (!item) return;
         const paperChipForCard = cardRow.closest(
           ".llm-paper-context-chip",
         ) as HTMLDivElement | null;
@@ -489,6 +502,11 @@ export function attachComposePreviewInteractionController(
         const paperContextForCard =
           deps.resolvePaperContextFromChipElement(paperChipForCard);
         if (!paperContextForCard) return;
+        const contentSource = deps.resolvePaperContentSourceMode(
+          item.id,
+          paperContextForCard,
+        );
+        if (!isPaperContextReaderFocusableSourceMode(contentSource)) return;
         void deps
           .focusPaperContextInActiveTab(paperContextForCard)
           .then((focused) => {
@@ -516,9 +534,19 @@ export function attachComposePreviewInteractionController(
       if (!paperContext) return;
       const mouse = event as MouseEvent;
       if (mouse.metaKey || mouse.ctrlKey) {
-        void openPaperContextInReader(paperContext);
+        const contentSource = deps.resolvePaperContentSourceMode(
+          item.id,
+          paperContext,
+        );
+        if (isPaperContextReaderFocusableSourceMode(contentSource)) {
+          void openPaperContextInReader({
+            ...paperContext,
+            contentSourceMode: contentSource,
+          });
+        }
         return;
       }
+      if (paperChip.dataset.paperContextMenu === "false") return;
       deps.openPaperChipMenu(paperChip, paperContext, { sticky: true });
     });
   }

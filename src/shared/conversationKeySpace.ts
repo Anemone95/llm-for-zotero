@@ -151,13 +151,21 @@ export function buildDefaultConversationKey(
   profileSignature?: string | null,
 ): number {
   if (system === "upstream") {
-    if (kind === "global") return UPSTREAM_GLOBAL_CONVERSATION_KEY_BASE;
+    if (kind === "global") {
+      return UPSTREAM_GLOBAL_CONVERSATION_KEY_BASE + normalizeScopeId(scopeId);
+    }
     return normalizeScopeId(scopeId);
   }
   return (
     getRuntimeDefaultConversationKeyRange(system, kind, profileSignature || "").start +
     normalizeScopeId(scopeId)
   );
+}
+
+export function buildDefaultUpstreamGlobalConversationKey(
+  libraryID: number,
+): number {
+  return buildDefaultConversationKey("upstream", "global", libraryID);
 }
 
 export function classifyConversationKey(

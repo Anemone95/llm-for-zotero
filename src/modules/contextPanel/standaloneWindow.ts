@@ -1,4 +1,9 @@
-import { config, GLOBAL_CONVERSATION_KEY_BASE, isUpstreamGlobalConversationKey } from "./constants";
+import {
+  buildDefaultUpstreamGlobalConversationKey,
+  config,
+  GLOBAL_CONVERSATION_KEY_BASE,
+  isUpstreamGlobalConversationKey,
+} from "./constants";
 import {
   activeContextPanels,
   activeContextPanelRawItems,
@@ -41,26 +46,15 @@ import { t } from "../../utils/i18n";
 import type { ConversationSystem } from "../../shared/types";
 import type { ChatRuntimeMode } from "./types";
 import {
-  createGlobalConversation,
-  createPaperConversation,
-  ensureGlobalConversationExists,
-  getGlobalConversation,
-  getLatestEmptyGlobalConversation,
-  getPaperConversation,
-  listPaperConversations,
-  loadConversation,
-  touchEmptyGlobalConversation,
-  touchEmptyPaperConversation,
-} from "../../utils/chatStore";
+  conversationRepository,
+  type ConversationCatalogEntry,
+} from "../../core/conversations/repository";
 import {
   ATTACHMENT_GC_MIN_AGE_MS,
   collectAndDeleteUnreferencedBlobs,
 } from "../../utils/attachmentRefStore";
 import { chatHistory, loadedConversationKeys } from "./state";
-import {
-  loadAllConversationHistory,
-  loadConversationHistoryScope,
-} from "./historyLoader";
+import { loadAllConversationHistory } from "./historyLoader";
 import {
   formatGlobalHistoryTimestamp,
   GLOBAL_HISTORY_UNDO_WINDOW_MS,
@@ -118,19 +112,7 @@ import {
   createClaudeGlobalPortalItem,
   createClaudePaperPortalItem,
 } from "../../claudeCode/portal";
-import {
-  createClaudeGlobalConversation,
-  createClaudePaperConversation,
-  getClaudeConversationSummary,
-  listClaudeGlobalConversations,
-  listClaudePaperConversations,
-  loadClaudeConversation,
-  upsertClaudeConversationSummary,
-} from "../../claudeCode/store";
-import {
-  loadAllClaudeConversationHistory,
-  loadClaudeConversationHistoryScope,
-} from "../../claudeCode/historyLoader";
+import { loadAllClaudeConversationHistory } from "../../claudeCode/historyLoader";
 import {
   buildDefaultCodexGlobalConversationKey,
 } from "../../codexAppServer/constants";
@@ -152,19 +134,7 @@ import {
   buildCodexLibraryStateKey,
   buildCodexPaperStateKey,
 } from "../../codexAppServer/state";
-import {
-  createCodexGlobalConversation,
-  createCodexPaperConversation,
-  getCodexConversationSummary,
-  listCodexGlobalConversations,
-  listCodexPaperConversations,
-  loadCodexConversation,
-  upsertCodexConversationSummary,
-} from "../../codexAppServer/store";
-import {
-  loadAllCodexConversationHistory,
-  loadCodexConversationHistoryScope,
-} from "../../codexAppServer/historyLoader";
+import { loadAllCodexConversationHistory } from "../../codexAppServer/historyLoader";
 import { finalizeConversationDeletion } from "./conversationDeletion";
 import {
   clearActiveConversationForPendingDeletion,
@@ -399,6 +369,7 @@ export function renderStandalonePlaceholder(body: Element): void {
 }
 
 type SidebarConv = {
+  conversationID?: string;
   conversationKey: number;
   kind?: "global" | "paper";
   conversationSystem?: ConversationSystem;
@@ -573,8 +544,11 @@ export function openStandaloneChat(options?: {
           getLastUsedCodexGlobalConversationKey(libraryID) ||
           buildDefaultCodexGlobalConversationKey(libraryID)
     : lockedKey ??
-      activeGlobalConversationByLibrary.get(libraryID) ??
-      GLOBAL_CONVERSATION_KEY_BASE;
+      (activeGlobalConversationByLibrary.get(libraryID) ===
+      GLOBAL_CONVERSATION_KEY_BASE
+        ? buildDefaultUpstreamGlobalConversationKey(libraryID)
+        : activeGlobalConversationByLibrary.get(libraryID)) ??
+      buildDefaultUpstreamGlobalConversationKey(libraryID);
   const globalPortalItem = isClaudeConversationSystem()
     ? createClaudeGlobalPortalItem(libraryID, conversationKey)
     : isCodexConversationSystem()
@@ -1272,43 +1246,37 @@ export function openStandaloneChat(options?: {
           : getCurrentLibraryScopeID();
       };
 
-      const ensureClaudeConversationCatalogEntry = async (params: {
-        conversationKey: number;
+      const ensureConversationCatalogEntry = async (params: {
+        conversationKey?: number;
         libraryID: number;
         kind: "global" | "paper";
         paperItemID?: number;
-      }) => {
-        const existing = await getClaudeConversationSummary(params.conversationKey);
-        if (existing) return existing;
-        await upsertClaudeConversationSummary({
+      }) =>
+        conversationRepository.ensureCatalogEntry({
+          system: currentConversationSystem,
           conversationKey: params.conversationKey,
           libraryID: params.libraryID,
           kind: params.kind,
           paperItemID: params.paperItemID,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
         });
-        return getClaudeConversationSummary(params.conversationKey);
-      };
 
-      const ensureCodexConversationCatalogEntry = async (params: {
-        conversationKey: number;
-        libraryID: number;
-        kind: "global" | "paper";
-        paperItemID?: number;
-      }) => {
-        const existing = await getCodexConversationSummary(params.conversationKey);
-        if (existing) return existing;
-        await upsertCodexConversationSummary({
-          conversationKey: params.conversationKey,
-          libraryID: params.libraryID,
-          kind: params.kind,
-          paperItemID: params.paperItemID,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        });
-        return getCodexConversationSummary(params.conversationKey);
-      };
+      const toSidebarConversation = (
+        entry: ConversationCatalogEntry,
+      ): SidebarConv => ({
+        conversationID: entry.conversationID,
+        conversationKey: entry.conversationKey,
+        kind: entry.kind,
+        libraryID: entry.libraryID,
+        lastActivityAt: entry.lastActivityAt || entry.createdAt || 0,
+        title: entry.title,
+        userTurnCount: entry.userTurnCount,
+        sessionVersion: entry.sessionVersion,
+        paperItemID: entry.paperItemID,
+        providerSessionId: entry.providerSessionId,
+        scopedConversationKey: entry.scopedConversationKey,
+        conversationSystem: entry.system,
+        mode: entry.kind === "paper" ? "paper" : "open",
+      });
 
       // -----------------------------------------------------------------------
       // Webchat mode UI updates for standalone window
@@ -1835,74 +1803,23 @@ export function openStandaloneChat(options?: {
         );
         try {
           if (standaloneMode === "open") {
-            let conversations: SidebarConv[];
-            if (isClaudeConversationSystem()) {
-              if (activeConversationKey > 0) {
-                await ensureClaudeConversationCatalogEntry({
-                  conversationKey: activeConversationKey,
-                  libraryID: getCurrentLibraryScopeID(),
-                  kind: "global",
-                });
-              }
-              conversations = (await loadClaudeConversationHistoryScope({
-                libraryID: getCurrentLibraryScopeID(),
+            const currentLibraryID = getCurrentLibraryScopeID();
+            if (activeConversationKey > 0) {
+              await ensureConversationCatalogEntry({
+                conversationKey: activeConversationKey,
+                libraryID: currentLibraryID,
                 kind: "global",
-                limit: 50,
-              })).map((entry) => ({
-                conversationKey: entry.conversationKey,
-                kind: "global" as const,
-                libraryID: getCurrentLibraryScopeID(),
-                lastActivityAt: entry.lastActivityAt,
-                title: entry.title,
-                userTurnCount: entry.userTurnCount,
-                providerSessionId: entry.providerSessionId,
-                scopedConversationKey: entry.scopedConversationKey,
-                conversationSystem: "claude_code",
-                mode: "open" as const,
-              }));
-            } else if (isCodexConversationSystem()) {
-              if (activeConversationKey > 0) {
-                await ensureCodexConversationCatalogEntry({
-                  conversationKey: activeConversationKey,
-                  libraryID: getCurrentLibraryScopeID(),
-                  kind: "global",
-                });
-              }
-              conversations = (await loadCodexConversationHistoryScope({
-                libraryID: getCurrentLibraryScopeID(),
-                kind: "global",
-                limit: 50,
-              })).map((entry) => ({
-                conversationKey: entry.conversationKey,
-                kind: "global" as const,
-                libraryID: getCurrentLibraryScopeID(),
-                lastActivityAt: entry.lastActivityAt,
-                title: entry.title,
-                userTurnCount: entry.userTurnCount,
-                providerSessionId: entry.providerSessionId,
-                scopedConversationKey: entry.scopedConversationKey,
-                conversationSystem: "codex",
-                mode: "open" as const,
-              }));
-            } else {
-              await ensureGlobalConversationExists(getCurrentLibraryScopeID(), activeConversationKey);
-              conversations = (await loadConversationHistoryScope({
-                mode: "open",
-                libraryID: getCurrentLibraryScopeID(),
-                limit: 50,
-              })).map((entry) => ({
-                conversationKey: entry.conversationKey,
-                kind: "global" as const,
-                libraryID: getCurrentLibraryScopeID(),
-                lastActivityAt: entry.lastActivityAt,
-                title: entry.title,
-                userTurnCount: entry.userTurnCount,
-                sessionVersion: entry.sessionVersion,
-                paperItemID: entry.paperItemID,
-                conversationSystem: "upstream",
-                mode: entry.mode,
-              }));
+              });
             }
+            const conversations = (
+              await conversationRepository.listCatalogEntries({
+                system: currentConversationSystem,
+                kind: "global",
+                libraryID: currentLibraryID,
+                limit: 50,
+                includeEmpty: true,
+              })
+            ).map(toSidebarConversation);
             if (cancelled) return;
             sidebarTitle.textContent = t("History");
             renderSidebarItems(conversations);
@@ -1924,80 +1841,23 @@ export function openStandaloneChat(options?: {
               "paperID=" + paperID,
               "libraryID=" + paperLibID,
             );
-            let conversations: SidebarConv[];
-            if (isClaudeConversationSystem()) {
-              if (activeConversationKey > 0) {
-                await ensureClaudeConversationCatalogEntry({
-                  conversationKey: activeConversationKey,
-                  libraryID: paperLibID,
-                  kind: "paper",
-                  paperItemID: paperID,
-                });
-              }
-              conversations = (await loadClaudeConversationHistoryScope({
-                libraryID: paperLibID,
+            await ensureConversationCatalogEntry({
+              conversationKey:
+                activeConversationKey > 0 ? activeConversationKey : undefined,
+              libraryID: paperLibID,
+              kind: "paper",
+              paperItemID: paperID,
+            });
+            const conversations = (
+              await conversationRepository.listCatalogEntries({
+                system: currentConversationSystem,
                 kind: "paper",
-                paperItemID: paperID,
-                limit: 50,
-              })).map((entry) => ({
-                conversationKey: entry.conversationKey,
-                kind: "paper" as const,
-                libraryID: paperLibID,
-                lastActivityAt: entry.lastActivityAt,
-                title: entry.title,
-                userTurnCount: entry.userTurnCount,
-                paperItemID: entry.paperItemID,
-                providerSessionId: entry.providerSessionId,
-                scopedConversationKey: entry.scopedConversationKey,
-                conversationSystem: "claude_code",
-                mode: "paper" as const,
-              }));
-            } else if (isCodexConversationSystem()) {
-              if (activeConversationKey > 0) {
-                await ensureCodexConversationCatalogEntry({
-                  conversationKey: activeConversationKey,
-                  libraryID: paperLibID,
-                  kind: "paper",
-                  paperItemID: paperID,
-                });
-              }
-              conversations = (await loadCodexConversationHistoryScope({
-                libraryID: paperLibID,
-                kind: "paper",
-                paperItemID: paperID,
-                limit: 50,
-              })).map((entry) => ({
-                conversationKey: entry.conversationKey,
-                kind: "paper" as const,
-                libraryID: paperLibID,
-                lastActivityAt: entry.lastActivityAt,
-                title: entry.title,
-                userTurnCount: entry.userTurnCount,
-                paperItemID: entry.paperItemID,
-                providerSessionId: entry.providerSessionId,
-                scopedConversationKey: entry.scopedConversationKey,
-                conversationSystem: "codex",
-                mode: "paper" as const,
-              }));
-            } else {
-              conversations = (await loadConversationHistoryScope({
-                mode: "paper",
                 libraryID: paperLibID,
                 paperItemID: paperID,
                 limit: 50,
-              })).map((entry) => ({
-                conversationKey: entry.conversationKey,
-                kind: "paper" as const,
-                libraryID: paperLibID,
-                lastActivityAt: entry.lastActivityAt,
-                title: entry.title,
-                userTurnCount: entry.userTurnCount,
-                sessionVersion: entry.sessionVersion,
-                paperItemID: entry.paperItemID,
-                conversationSystem: "upstream",
-                mode: entry.mode,
-              }));
-            }
+                includeEmpty: true,
+              })
+            ).map(toSidebarConversation);
             if (cancelled) return;
             sidebarTitle.textContent = t("History");
             renderSidebarItems(conversations);
@@ -2065,6 +1925,7 @@ export function openStandaloneChat(options?: {
           sectionTitle: isPaper
             ? resolvePaperSearchScopeLabel(entry.paperItemID)
             : t("Library chat"),
+          conversationID: entry.conversationID,
           conversationKey: entry.conversationKey,
           title,
           timestampText:
@@ -2089,6 +1950,7 @@ export function openStandaloneChat(options?: {
           entries = (await loadAllClaudeConversationHistory({ libraryID, limit }))
             .map((entry) => ({
               conversationKey: entry.conversationKey,
+              conversationID: entry.conversationID,
               lastActivityAt: entry.lastActivityAt,
               title: entry.title,
               paperItemID: entry.paperItemID,
@@ -2098,6 +1960,7 @@ export function openStandaloneChat(options?: {
           entries = (await loadAllCodexConversationHistory({ libraryID, limit }))
             .map((entry) => ({
               conversationKey: entry.conversationKey,
+              conversationID: entry.conversationID,
               lastActivityAt: entry.lastActivityAt,
               title: entry.title,
               paperItemID: entry.paperItemID,
@@ -2107,6 +1970,7 @@ export function openStandaloneChat(options?: {
           entries = (await loadAllConversationHistory({ libraryID, limit })).map(
             (entry) => ({
               conversationKey: entry.conversationKey,
+              conversationID: entry.conversationID,
               lastActivityAt: entry.lastActivityAt,
               title: entry.title,
               sessionVersion: entry.sessionVersion,
@@ -2124,11 +1988,11 @@ export function openStandaloneChat(options?: {
         const fingerprint = createHistorySearchDocumentFingerprint(entry);
         const cached = searchDocCache.get(entry.conversationKey);
         if (cached?.fingerprint === fingerprint) return cached.document;
-        const messages = isClaudeConversationSystem()
-          ? await loadClaudeConversation(entry.conversationKey, 200)
-          : isCodexConversationSystem()
-            ? await loadCodexConversation(entry.conversationKey, 200)
-            : await loadConversation(entry.conversationKey, 200);
+        const messages = await conversationRepository.loadMessages({
+          system: currentConversationSystem,
+          conversationKey: entry.conversationKey,
+          limit: 200,
+        });
         const document = createHistorySearchDocument(entry, messages);
         searchDocCache.set(entry.conversationKey, { fingerprint, document });
         return document;
@@ -2737,6 +2601,7 @@ export function openStandaloneChat(options?: {
         });
         const result = await finalizeConversationDeletion(
           {
+            conversationID: entry.conversationID,
             conversationKey: entry.conversationKey,
             kind: entry.kind || (standaloneMode === "open" ? "global" : "paper"),
             conversationSystem: pending.conversationSystem,
@@ -2923,114 +2788,21 @@ export function openStandaloneChat(options?: {
           normalizeStandaloneCreateConversationOptions(options);
         const currentLibraryID = getCurrentLibraryScopeID();
         if (!currentLibraryID) return 0;
-        if (isClaudeConversationSystem()) {
-          const currentKey = Number(activeConversationKey || 0);
-          if (
-            Number.isFinite(currentKey) &&
-            currentKey > 0 &&
-            Math.floor(currentKey) !== excludeConversationKey
-          ) {
-            try {
-              const currentSummary = await getClaudeConversationSummary(currentKey);
-              if (isReusableStandaloneDraft({
-                forceFresh,
-                summary: currentSummary,
-                kind: "global",
-                libraryID: currentLibraryID,
-              })) {
-                return Math.floor(currentKey);
-              }
-            } catch (err) {
-              ztoolkit.log("LLM: standalone failed to inspect active Claude global draft", err);
-            }
-          }
-          try {
-            const summaries = await listClaudeGlobalConversations(
-              currentLibraryID,
-              50,
-            );
-            const latestEmpty = findReusableStandaloneDraft({
-              forceFresh,
-              summaries,
-              kind: "global",
-              libraryID: currentLibraryID,
-            });
-            const latestEmptyKey = Number(latestEmpty?.conversationKey || 0);
-            if (
-              Number.isFinite(latestEmptyKey) &&
-              latestEmptyKey > 0 &&
-              Math.floor(latestEmptyKey) !== excludeConversationKey
-            ) {
-              return Math.floor(latestEmptyKey);
-            }
-          } catch (err) {
-            ztoolkit.log("LLM: standalone failed to list Claude global drafts", err);
-          }
-          const createdKey = Number(
-            (await createClaudeGlobalConversation(currentLibraryID))?.conversationKey || 0,
-          );
-          return Math.floor(createdKey) === excludeConversationKey ? 0 : createdKey;
-        }
-        if (isCodexConversationSystem()) {
-          const currentKey = Number(activeConversationKey || 0);
-          if (
-            Number.isFinite(currentKey) &&
-            currentKey > 0 &&
-            Math.floor(currentKey) !== excludeConversationKey
-          ) {
-            try {
-              const currentSummary = await getCodexConversationSummary(currentKey);
-              if (isReusableStandaloneDraft({
-                forceFresh,
-                summary: currentSummary,
-                kind: "global",
-                libraryID: currentLibraryID,
-              })) {
-                return Math.floor(currentKey);
-              }
-            } catch (err) {
-              ztoolkit.log("LLM: standalone failed to inspect active Codex global draft", err);
-            }
-          }
-          try {
-            const summaries = await listCodexGlobalConversations(
-              currentLibraryID,
-              50,
-            );
-            const latestEmpty = findReusableStandaloneDraft({
-              forceFresh,
-              summaries,
-              kind: "global",
-              libraryID: currentLibraryID,
-            });
-            const latestEmptyKey = Number(latestEmpty?.conversationKey || 0);
-            if (
-              Number.isFinite(latestEmptyKey) &&
-              latestEmptyKey > 0 &&
-              Math.floor(latestEmptyKey) !== excludeConversationKey
-            ) {
-              return Math.floor(latestEmptyKey);
-            }
-          } catch (err) {
-            ztoolkit.log("LLM: standalone failed to list Codex global drafts", err);
-          }
-          const createdKey = Number(
-            (await createCodexGlobalConversation(currentLibraryID))?.conversationKey || 0,
-          );
-          return Math.floor(createdKey) === excludeConversationKey ? 0 : createdKey;
-        }
         const currentKey = Number(activeConversationKey || 0);
         if (
-          isUpstreamGlobalConversationKey(currentKey) &&
+          Number.isFinite(currentKey) &&
+          currentKey > 0 &&
           Math.floor(currentKey) !== excludeConversationKey
         ) {
           try {
-            const currentSummary = await getGlobalConversation(currentKey);
+            const currentSummary = await conversationRepository.getCatalogEntry({
+              system: currentConversationSystem,
+              kind: "global",
+              conversationKey: Math.floor(currentKey),
+            });
             if (isReusableStandaloneDraft({
               forceFresh,
-              summary: currentSummary
-                ? { ...currentSummary, kind: "global" as const }
-                : null,
+              summary: currentSummary,
               kind: "global",
               libraryID: currentLibraryID,
             })) {
@@ -3041,26 +2813,39 @@ export function openStandaloneChat(options?: {
           }
         }
         try {
-          const latestEmpty = await getLatestEmptyGlobalConversation(currentLibraryID);
+          const summaries = await conversationRepository.listCatalogEntries({
+            system: currentConversationSystem,
+            kind: "global",
+            libraryID: currentLibraryID,
+            limit: 50,
+            includeEmpty: true,
+          });
+          const latestEmpty = findReusableStandaloneDraft({
+            forceFresh,
+            summaries,
+            kind: "global",
+            libraryID: currentLibraryID,
+          });
           const latestEmptyKey = Number(latestEmpty?.conversationKey || 0);
           if (
+            Number.isFinite(latestEmptyKey) &&
             latestEmptyKey > 0 &&
-            Math.floor(latestEmptyKey) !== excludeConversationKey &&
-            isReusableStandaloneDraft({
-              forceFresh,
-              summary: latestEmpty
-                ? { ...latestEmpty, kind: "global" as const }
-                : null,
-              kind: "global",
-              libraryID: currentLibraryID,
-            })
+            Math.floor(latestEmptyKey) !== excludeConversationKey
           ) {
             return Math.floor(latestEmptyKey);
           }
         } catch (err) {
           ztoolkit.log("LLM: standalone failed to load latest global draft", err);
         }
-        const createdKey = await createGlobalConversation(currentLibraryID);
+        const createdKey = Number(
+          (
+            await conversationRepository.createCatalogEntry({
+              system: currentConversationSystem,
+              kind: "global",
+              libraryID: currentLibraryID,
+            })
+          )?.conversationKey || 0,
+        );
         return Math.floor(Number(createdKey || 0)) === excludeConversationKey
           ? 0
           : createdKey;
@@ -3079,112 +2864,6 @@ export function openStandaloneChat(options?: {
         if (!paperLibraryID || !paperId) {
           return { conversationKey: 0 };
         }
-        if (isClaudeConversationSystem()) {
-          const currentKey = Number(activeConversationKey || 0);
-          if (
-            Number.isFinite(currentKey) &&
-            currentKey > 0 &&
-            Math.floor(currentKey) !== excludeConversationKey
-          ) {
-            try {
-              const currentSummary = await getClaudeConversationSummary(currentKey);
-              if (isReusableStandaloneDraft({
-                forceFresh,
-                summary: currentSummary,
-                kind: "paper",
-                paperItemID: paperId,
-              })) {
-                return { conversationKey: Math.floor(currentKey) };
-              }
-            } catch (err) {
-              ztoolkit.log("LLM: standalone failed to inspect active Claude paper draft", err);
-            }
-          }
-          try {
-            const summaries = await listClaudePaperConversations(
-              paperLibraryID,
-              paperId,
-              50,
-            );
-            const emptyEntry = findReusableStandaloneDraft({
-              forceFresh,
-              summaries,
-              kind: "paper",
-              paperItemID: paperId,
-            });
-            const emptyConversationKey = Number(emptyEntry?.conversationKey || 0);
-            if (
-              Number.isFinite(emptyConversationKey) &&
-              emptyConversationKey > 0 &&
-              Math.floor(emptyConversationKey) !== excludeConversationKey
-            ) {
-              return { conversationKey: Math.floor(emptyConversationKey) };
-            }
-          } catch (err) {
-            ztoolkit.log("LLM: standalone failed to list Claude paper drafts", err);
-          }
-          const createdKey = Number(
-              (await createClaudePaperConversation(paperLibraryID, paperId))
-                ?.conversationKey || 0,
-          );
-          return {
-            conversationKey:
-              Math.floor(createdKey) === excludeConversationKey ? 0 : createdKey,
-          };
-        }
-        if (isCodexConversationSystem()) {
-          const currentKey = Number(activeConversationKey || 0);
-          if (
-            Number.isFinite(currentKey) &&
-            currentKey > 0 &&
-            Math.floor(currentKey) !== excludeConversationKey
-          ) {
-            try {
-              const currentSummary = await getCodexConversationSummary(currentKey);
-              if (isReusableStandaloneDraft({
-                forceFresh,
-                summary: currentSummary,
-                kind: "paper",
-                paperItemID: paperId,
-              })) {
-                return { conversationKey: Math.floor(currentKey) };
-              }
-            } catch (err) {
-              ztoolkit.log("LLM: standalone failed to inspect active Codex paper draft", err);
-            }
-          }
-          try {
-            const summaries = await listCodexPaperConversations(
-              paperLibraryID,
-              paperId,
-              50,
-            );
-            const emptyEntry = findReusableStandaloneDraft({
-              forceFresh,
-              summaries,
-              kind: "paper",
-              paperItemID: paperId,
-            });
-            const emptyConversationKey = Number(emptyEntry?.conversationKey || 0);
-            if (
-              Number.isFinite(emptyConversationKey) &&
-              emptyConversationKey > 0 &&
-              Math.floor(emptyConversationKey) !== excludeConversationKey
-            ) {
-              return { conversationKey: Math.floor(emptyConversationKey) };
-            }
-          } catch (err) {
-            ztoolkit.log("LLM: standalone failed to list Codex paper drafts", err);
-          }
-          const createdKey = Number(
-              (await createCodexPaperConversation(paperLibraryID, paperId))
-                ?.conversationKey || 0,
-          );
-          return {
-            conversationKey:
-              Math.floor(createdKey) === excludeConversationKey ? 0 : createdKey,
-          };
-        }
         const currentKey = Number(activeConversationKey || 0);
         if (
           Number.isFinite(currentKey) &&
@@ -3192,12 +2871,14 @@ export function openStandaloneChat(options?: {
           Math.floor(currentKey) !== excludeConversationKey
         ) {
           try {
-            const currentSummary = await getPaperConversation(currentKey);
+            const currentSummary = await conversationRepository.getCatalogEntry({
+              system: currentConversationSystem,
+              kind: "paper",
+              conversationKey: Math.floor(currentKey),
+            });
             if (isReusableStandaloneDraft({
               forceFresh,
-              summary: currentSummary
-                ? { ...currentSummary, kind: "paper" as const }
-                : null,
+              summary: currentSummary,
               kind: "paper",
               paperItemID: paperId,
             })) {
@@ -3208,13 +2889,17 @@ export function openStandaloneChat(options?: {
           }
         }
         try {
-          const summaries = await listPaperConversations(paperLibraryID, paperId, 50);
+          const summaries = await conversationRepository.listCatalogEntries({
+            system: currentConversationSystem,
+            kind: "paper",
+            libraryID: paperLibraryID,
+            paperItemID: paperId,
+            limit: 50,
+            includeEmpty: true,
+          });
           const emptyEntry = findReusableStandaloneDraft({
             forceFresh,
-            summaries: summaries.map((summary) => ({
-              ...summary,
-              kind: "paper" as const,
-            })),
+            summaries,
             kind: "paper",
             paperItemID: paperId,
           });
@@ -3232,7 +2917,12 @@ export function openStandaloneChat(options?: {
         } catch (err) {
           ztoolkit.log("LLM: standalone failed to list paper drafts", err);
         }
-        const summary = await createPaperConversation(paperLibraryID, paperId);
+        const summary = await conversationRepository.createCatalogEntry({
+          system: currentConversationSystem,
+          kind: "paper",
+          libraryID: paperLibraryID,
+          paperItemID: paperId,
+        });
         const createdKey = Number(summary?.conversationKey || 0);
         return {
           conversationKey:
@@ -3249,56 +2939,12 @@ export function openStandaloneChat(options?: {
           ? Math.floor(conversationKey)
           : 0;
         if (normalizedKey <= 0) return;
-        const now = Date.now();
-        if (isClaudeConversationSystem()) {
-          const summary = await getClaudeConversationSummary(normalizedKey);
-          if (!summary || (summary.userTurnCount || 0) > 0) return;
-          await upsertClaudeConversationSummary({
-            conversationKey: summary.conversationKey,
-            libraryID: summary.libraryID,
-            kind: summary.kind,
-            paperItemID: summary.paperItemID,
-            createdAt: summary.createdAt,
-            updatedAt: now,
-            title: summary.title,
-            providerSessionId: summary.providerSessionId,
-            scopedConversationKey: summary.scopedConversationKey,
-            scopeType: summary.scopeType,
-            scopeId: summary.scopeId,
-            scopeLabel: summary.scopeLabel,
-            cwd: summary.cwd,
-            model: summary.model,
-            effort: summary.effort,
-          });
-          return;
-        }
-        if (isCodexConversationSystem()) {
-          const summary = await getCodexConversationSummary(normalizedKey);
-          if (!summary || (summary.userTurnCount || 0) > 0) return;
-          await upsertCodexConversationSummary({
-            conversationKey: summary.conversationKey,
-            libraryID: summary.libraryID,
-            kind: summary.kind,
-            paperItemID: summary.paperItemID,
-            createdAt: summary.createdAt,
-            updatedAt: now,
-            title: summary.title,
-            providerSessionId: summary.providerSessionId,
-            scopedConversationKey: summary.scopedConversationKey,
-            scopeType: summary.scopeType,
-            scopeId: summary.scopeId,
-            scopeLabel: summary.scopeLabel,
-            cwd: summary.cwd,
-            model: summary.model,
-            effort: summary.effort,
-          });
-          return;
-        }
-        if (kind === "global") {
-          await touchEmptyGlobalConversation(normalizedKey, now);
-          return;
-        }
-        await touchEmptyPaperConversation(normalizedKey, now);
+        await conversationRepository.touchEmptyCatalogActivity({
+          system: currentConversationSystem,
+          kind,
+          conversationKey: normalizedKey,
+          timestamp: Date.now(),
+        });
       };
 
       const restoreStandaloneOpenConversation = async (
@@ -3566,11 +3212,14 @@ export function openStandaloneChat(options?: {
             const lockedKey = getLockedGlobalConversationKey(libraryID);
             if (lockedKey !== null) return lockedKey;
             const activeKey = Number(activeGlobalConversationByLibrary.get(libraryID) || 0);
-            return isUpstreamGlobalConversationKey(activeKey) ? Math.floor(activeKey) : 0;
+            if (!isUpstreamGlobalConversationKey(activeKey)) return 0;
+            return activeKey === GLOBAL_CONVERSATION_KEY_BASE
+              ? buildDefaultUpstreamGlobalConversationKey(libraryID)
+              : Math.floor(activeKey);
           })();
           const targetKey = Number.isFinite(rememberedUpstreamKey) && rememberedUpstreamKey > 0
             ? Math.floor(rememberedUpstreamKey)
-            : GLOBAL_CONVERSATION_KEY_BASE;
+            : buildDefaultUpstreamGlobalConversationKey(libraryID);
           if (switchSeq !== systemSwitchSeq) return;
           if (targetKey > 0) {
             mountOpenConversation(targetKey);

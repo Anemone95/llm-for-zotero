@@ -16,23 +16,24 @@ describe("conversationDeletion", function () {
       clearStoredConversation: async (conversationKey: number) => {
         calls.push(`clear-upstream:${conversationKey}`);
       },
-      deleteGlobalConversation: async (conversationKey: number) => {
-        calls.push(`delete-global:${conversationKey}`);
-      },
-      deletePaperConversation: async (conversationKey: number) => {
-        calls.push(`delete-paper:${conversationKey}`);
-      },
       clearClaudeConversation: async (conversationKey: number) => {
         calls.push(`clear-claude:${conversationKey}`);
-      },
-      deleteClaudeConversation: async (conversationKey: number) => {
-        calls.push(`delete-claude:${conversationKey}`);
       },
       clearCodexConversation: async (conversationKey: number) => {
         calls.push(`clear-codex:${conversationKey}`);
       },
-      deleteCodexConversation: async (conversationKey: number) => {
-        calls.push(`delete-codex:${conversationKey}`);
+      deleteCatalogEntry: async (target: {
+        conversationKey: number;
+        kind: "global" | "paper";
+        conversationSystem: "upstream" | "claude_code" | "codex";
+      }) => {
+        if (target.conversationSystem === "claude_code") {
+          calls.push(`delete-claude:${target.conversationKey}`);
+        } else if (target.conversationSystem === "codex") {
+          calls.push(`delete-codex:${target.conversationKey}`);
+        } else {
+          calls.push(`delete-${target.kind}:${target.conversationKey}`);
+        }
       },
       clearOwnerAttachmentRefs: async (_ownerType: string, ownerKey: number) => {
         calls.push(`refs:${ownerKey}`);
@@ -59,7 +60,7 @@ describe("conversationDeletion", function () {
         queryAsync: async (sql: string) => {
           if (
             sql.includes("FROM llm_for_zotero_conversation_registry") &&
-            sql.includes("WHERE conversation_key = ?")
+            sql.includes("WHERE legacy_conversation_key = ?")
           ) {
             return [
               {
@@ -142,6 +143,60 @@ describe("conversationDeletion", function () {
       "files:7101",
       "selection",
       "gc",
+    ]);
+  });
+
+  it("resolves the canonical conversation id before deletion scope validation", async function () {
+    const calls: string[] = [];
+    globalScope.Zotero = {
+      DB: {
+        queryAsync: async (sql: string) => {
+          if (
+            sql.includes("FROM llm_for_zotero_conversation_registry") &&
+            sql.includes("WHERE legacy_conversation_key = ?")
+          ) {
+            return [
+              {
+                conversationID: "opaque-conversation-7103",
+                conversationKey: 7103,
+                system: "upstream",
+                kind: "global",
+                profileSignature: "profile-default",
+                libraryID: 1,
+                paperItemID: null,
+                valid: 1,
+              },
+            ];
+          }
+          return [];
+        },
+      },
+    };
+
+    const result = await finalizeConversationDeletion(
+      {
+        conversationKey: 7103,
+        kind: "global",
+        conversationSystem: "upstream",
+        libraryID: 1,
+      },
+      {
+        clearAgentToolCaches: (conversationKey) => {
+          calls.push(`tool:${conversationKey}`);
+        },
+        clearAgentConversationState: async (conversationKey) => {
+          calls.push(`agent:${conversationKey}`);
+        },
+        operations: createOperations(calls),
+      },
+    );
+
+    assert.isTrue(result.ok);
+    assert.includeMembers(calls, [
+      "tool:7103",
+      "agent:7103",
+      "clear-upstream:7103",
+      "delete-global:7103",
     ]);
   });
 

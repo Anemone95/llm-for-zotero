@@ -1,5 +1,6 @@
 import { assert } from "chai";
 import { appendMessage, loadConversation } from "../src/utils/chatStore";
+import { buildConversationID } from "../src/shared/conversationRegistry";
 
 describe("chatStore note contexts", function () {
   const globalScope = globalThis as typeof globalThis & {
@@ -11,15 +12,23 @@ describe("chatStore note contexts", function () {
     globalScope.Zotero = originalZotero;
   });
 
+  function findChatMessageInsert(
+    queries: Array<{ sql: string; params: unknown[] }>,
+  ): { sql: string; params: unknown[] } {
+    const query = queries.find(({ sql }) =>
+      sql.includes("INSERT INTO llm_for_zotero_chat_messages"),
+    );
+    assert.isOk(query, "expected chat message insert query");
+    return query as { sql: string; params: unknown[] };
+  }
+
   it("persists selectedTextNoteContexts when appending a message", async function () {
-    let capturedQuery = "";
-    let capturedParams: unknown[] = [];
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
     globalScope.Zotero = {
       ...(originalZotero || {}),
       DB: {
         queryAsync: async (sql: string, params?: unknown[]) => {
-          capturedQuery = sql;
-          capturedParams = Array.isArray(params) ? params : [];
+          queries.push({ sql, params: Array.isArray(params) ? params : [] });
           return [];
         },
       },
@@ -41,9 +50,10 @@ describe("chatStore note contexts", function () {
       ],
     });
 
-    assert.include(capturedQuery, "selected_text_note_contexts_json");
+    const insert = findChatMessageInsert(queries);
+    assert.include(insert.sql, "selected_text_note_contexts_json");
     assert.include(
-      capturedParams,
+      insert.params,
       JSON.stringify([
         {
           libraryID: 1,
@@ -56,12 +66,12 @@ describe("chatStore note contexts", function () {
   });
 
   it("persists context usage fields when appending a message", async function () {
-    let capturedParams: unknown[] = [];
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
     globalScope.Zotero = {
       ...(originalZotero || {}),
       DB: {
-        queryAsync: async (_sql: string, params?: unknown[]) => {
-          capturedParams = Array.isArray(params) ? params : [];
+        queryAsync: async (sql: string, params?: unknown[]) => {
+          queries.push({ sql, params: Array.isArray(params) ? params : [] });
           return [];
         },
       },
@@ -75,20 +85,19 @@ describe("chatStore note contexts", function () {
       contextWindow: 200000,
     });
 
-    assert.lengthOf(capturedParams, 28);
-    assert.equal(capturedParams[26], 1234);
-    assert.equal(capturedParams[27], 200000);
+    const insert = findChatMessageInsert(queries);
+    assert.lengthOf(insert.params, 29);
+    assert.equal(insert.params[27], 1234);
+    assert.equal(insert.params[28], 200000);
   });
 
   it("persists an explicit empty model attachment split", async function () {
-    let capturedQuery = "";
-    let capturedParams: unknown[] = [];
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
     globalScope.Zotero = {
       ...(originalZotero || {}),
       DB: {
         queryAsync: async (sql: string, params?: unknown[]) => {
-          capturedQuery = sql;
-          capturedParams = Array.isArray(params) ? params : [];
+          queries.push({ sql, params: Array.isArray(params) ? params : [] });
           return [];
         },
       },
@@ -111,19 +120,18 @@ describe("chatStore note contexts", function () {
       modelAttachments: [],
     });
 
-    assert.include(capturedQuery, "model_attachments_json");
-    assert.equal(capturedParams[18], JSON.stringify([]));
+    const insert = findChatMessageInsert(queries);
+    assert.include(insert.sql, "model_attachments_json");
+    assert.equal(insert.params[19], JSON.stringify([]));
   });
 
   it("persists selectedCollectionContexts when appending a message", async function () {
-    let capturedQuery = "";
-    let capturedParams: unknown[] = [];
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
     globalScope.Zotero = {
       ...(originalZotero || {}),
       DB: {
         queryAsync: async (sql: string, params?: unknown[]) => {
-          capturedQuery = sql;
-          capturedParams = Array.isArray(params) ? params : [];
+          queries.push({ sql, params: Array.isArray(params) ? params : [] });
           return [];
         },
       },
@@ -142,9 +150,10 @@ describe("chatStore note contexts", function () {
       ],
     });
 
-    assert.include(capturedQuery, "collection_contexts_json");
+    const insert = findChatMessageInsert(queries);
+    assert.include(insert.sql, "collection_contexts_json");
     assert.equal(
-      capturedParams[15],
+      insert.params[16],
       JSON.stringify([
         {
           collectionId: 55,
@@ -213,5 +222,164 @@ describe("chatStore note contexts", function () {
     assert.deepEqual(messages[0]?.modelAttachments, []);
     assert.equal(messages[0]?.contextTokens, 321);
     assert.equal(messages[0]?.contextWindow, 64000);
+  });
+
+  it("loads registered conversations whose legacy message rows are not backfilled yet", async function () {
+    const conversationKey = 42;
+    const conversationID = buildConversationID({
+      conversationKey,
+      system: "upstream",
+      kind: "paper",
+      libraryID: 1,
+      paperItemID: conversationKey,
+      profileSignature: "profile-dev",
+    });
+    let messageQuery = "";
+    let messageParams: unknown[] = [];
+    globalScope.Zotero = {
+      ...(originalZotero || {}),
+      Profile: {
+        dir: "/tmp/llm-for-zotero-test-profile",
+      },
+      DB: {
+        queryAsync: async (sql: string, params?: unknown[]) => {
+          const queryParams = Array.isArray(params) ? params : [];
+          if (
+            sql.includes("FROM llm_for_zotero_conversation_registry") &&
+            sql.includes("WHERE legacy_conversation_key = ?")
+          ) {
+            return [
+              {
+                conversationID,
+                conversationKey,
+                system: "upstream",
+                kind: "paper",
+                profileSignature: "profile-dev",
+                libraryID: 1,
+                paperItemID: conversationKey,
+                valid: 1,
+              },
+            ];
+          }
+          if (
+            sql.includes("FROM llm_for_zotero_chat_messages") &&
+            sql.includes("ORDER BY timestamp ASC")
+          ) {
+            messageQuery = sql;
+            messageParams = queryParams;
+            return [
+              {
+                role: "user",
+                text: "Legacy body",
+                timestamp: 100,
+              },
+            ];
+          }
+          return [];
+        },
+      },
+    };
+
+    const messages = await loadConversation(conversationKey, 20);
+
+    assert.lengthOf(messages, 1);
+    assert.equal(messages[0]?.text, "Legacy body");
+    assert.include(messageQuery, "conversation_id = ?");
+    assert.include(messageQuery, "conversation_key = ?");
+    assert.deepEqual(messageParams, [conversationID, conversationKey, 20]);
+  });
+
+  it("repairs safe stale conversation ids before loading registered conversations", async function () {
+    const conversationKey = 42;
+    const conversationID = buildConversationID({
+      conversationKey,
+      system: "upstream",
+      kind: "paper",
+      libraryID: 1,
+      paperItemID: conversationKey,
+      profileSignature: "profile-dev",
+    });
+    const staleConversationID = buildConversationID({
+      conversationKey,
+      system: "upstream",
+      kind: "paper",
+      libraryID: 1,
+      paperItemID: conversationKey,
+      profileSignature: "profile-old",
+    });
+    let repaired = false;
+    let updateParams: unknown[] = [];
+    globalScope.Zotero = {
+      ...(originalZotero || {}),
+      Profile: {
+        dir: "/tmp/llm-for-zotero-test-profile",
+      },
+      DB: {
+        queryAsync: async (sql: string, params?: unknown[]) => {
+          const queryParams = Array.isArray(params) ? params : [];
+          if (
+            sql.includes("FROM llm_for_zotero_conversation_registry") &&
+            sql.includes("WHERE legacy_conversation_key = ?")
+          ) {
+            return [
+              {
+                conversationID,
+                conversationKey,
+                system: "upstream",
+                kind: "paper",
+                profileSignature: "profile-dev",
+                libraryID: 1,
+                paperItemID: conversationKey,
+                valid: 1,
+              },
+            ];
+          }
+          if (
+            sql.includes("SELECT DISTINCT conversation_id AS conversationID") &&
+            sql.includes("FROM llm_for_zotero_chat_messages")
+          ) {
+            return [{ conversationID: staleConversationID }];
+          }
+          if (
+            sql.includes("paper_contexts_json AS paperContextsJson") &&
+            sql.includes("FROM llm_for_zotero_chat_messages") &&
+            !sql.includes("ORDER BY timestamp ASC")
+          ) {
+            return [
+              {
+                paperContextsJson: JSON.stringify([{ itemId: conversationKey }]),
+              },
+            ];
+          }
+          if (
+            sql.includes("UPDATE llm_for_zotero_chat_messages") &&
+            sql.includes("SET conversation_id = ?")
+          ) {
+            repaired = true;
+            updateParams = queryParams;
+            return [];
+          }
+          if (
+            sql.includes("FROM llm_for_zotero_chat_messages") &&
+            sql.includes("ORDER BY timestamp ASC")
+          ) {
+            return repaired
+              ? [{ role: "user", text: "Recovered body", timestamp: 100 }]
+              : [];
+          }
+          return [];
+        },
+      },
+    };
+
+    const messages = await loadConversation(conversationKey, 20);
+
+    assert.lengthOf(messages, 1);
+    assert.equal(messages[0]?.text, "Recovered body");
+    assert.deepEqual(updateParams, [
+      conversationID,
+      conversationKey,
+      staleConversationID,
+    ]);
   });
 });

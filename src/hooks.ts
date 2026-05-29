@@ -14,6 +14,9 @@ import { invalidatePaperSearchCache } from "./modules/contextPanel/paperSearch";
 import { initChatStore } from "./utils/chatStore";
 import { initClaudeCodeStore } from "./claudeCode/store";
 import { initCodexAppServerStore } from "./codexAppServer/store";
+import { auditConversationIntegrity } from "./shared/conversationIntegrity";
+import { refreshConversationSearchIndex } from "./shared/conversationSearchIndex";
+import { markConversationIDTransitionMigrationApplied } from "./shared/conversationSchemaMigrations";
 import { ensureClaudeProjectBootstrapIfEnabled } from "./claudeCode/bootstrapGate";
 import {
   initAttachmentRefStore,
@@ -50,20 +53,44 @@ async function onStartup() {
   initI18n();
   initFontScale();
 
+  let chatStoreReady = false;
+  let claudeStoreReady = false;
+  let codexStoreReady = false;
   try {
     await initChatStore();
+    chatStoreReady = true;
   } catch (err) {
     ztoolkit.log("LLM: Failed to initialize chat store", err);
   }
   try {
     await initClaudeCodeStore();
+    claudeStoreReady = true;
   } catch (err) {
     ztoolkit.log("LLM: Failed to initialize Claude Code store", err);
   }
   try {
     await initCodexAppServerStore();
+    codexStoreReady = true;
   } catch (err) {
     ztoolkit.log("LLM: Failed to initialize Codex App Server store", err);
+  }
+  if (chatStoreReady && claudeStoreReady && codexStoreReady) {
+    try {
+      await markConversationIDTransitionMigrationApplied();
+    } catch (err) {
+      ztoolkit.log("LLM: Failed to mark conversation schema migration", err);
+    }
+    void refreshConversationSearchIndex().catch((err) => {
+      ztoolkit.log("LLM: Failed to refresh conversation search index", err);
+    });
+  }
+  try {
+    const report = await auditConversationIntegrity();
+    if (!report.ok) {
+      ztoolkit.log("LLM: Conversation history integrity audit found issues", report);
+    }
+  } catch (err) {
+    ztoolkit.log("LLM: Failed to audit conversation history integrity", err);
   }
   try {
     await ensureClaudeProjectBootstrapIfEnabled();

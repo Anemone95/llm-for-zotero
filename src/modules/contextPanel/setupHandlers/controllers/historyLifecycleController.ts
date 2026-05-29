@@ -2,6 +2,16 @@ import { createElement } from "../../../../utils/domHelpers";
 import { t } from "../../../../utils/i18n";
 import type { ConversationSystem } from "../../../../shared/types";
 import {
+  searchConversationIndex,
+  type ConversationSearchIndexMatch,
+} from "../../../../shared/conversationSearchIndex";
+import {
+  conversationRepository,
+  type ConversationCatalogEntry,
+} from "../../../../core/conversations/repository";
+import {
+  buildDefaultUpstreamGlobalConversationKey,
+  GLOBAL_CONVERSATION_KEY_BASE,
   MAX_SELECTED_PAPER_CONTEXTS,
   GLOBAL_HISTORY_LIMIT,
   PERSISTED_HISTORY_LIMIT,
@@ -34,23 +44,6 @@ import {
   refreshConversationPanels,
 } from "../../chat";
 import {
-  clearConversationTitle,
-  createGlobalConversation,
-  createPaperConversation,
-  deleteTurnMessages,
-  ensureGlobalConversationExists,
-  getGlobalConversation,
-  getLatestEmptyGlobalConversation,
-  loadConversation,
-  getPaperConversation,
-  listPaperConversations,
-  ensurePaperV1Conversation,
-  setGlobalConversationTitle,
-  setPaperConversationTitle,
-  touchEmptyGlobalConversation,
-  touchEmptyPaperConversation,
-} from "../../../../utils/chatStore";
-import {
   loadAllConversationHistory,
   loadConversationHistoryScope,
 } from "../../historyLoader";
@@ -70,33 +63,17 @@ import {
 import {
   getConversationSystemPref,
   getLastUsedClaudeGlobalConversationKey,
-  getLastUsedClaudePaperConversationKey,
   setConversationSystemPref,
   setLastUsedClaudeGlobalConversationKey,
-  setLastUsedClaudePaperConversationKey,
 } from "../../../../claudeCode/prefs";
 import {
   activeClaudeGlobalConversationByLibrary,
-  activeClaudePaperConversationByPaper,
   buildClaudeLibraryStateKey,
-  buildClaudePaperStateKey,
 } from "../../../../claudeCode/state";
 import {
   createClaudeGlobalPortalItem,
   createClaudePaperPortalItem,
 } from "../../../../claudeCode/portal";
-import {
-  createClaudeGlobalConversation,
-  createClaudePaperConversation,
-  deleteClaudeTurnMessages,
-  ensureClaudePaperConversation,
-  getClaudeConversationSummary,
-  listClaudeGlobalConversations,
-  listClaudePaperConversations,
-  loadClaudeConversation,
-  setClaudeConversationTitle,
-  upsertClaudeConversationSummary,
-} from "../../../../claudeCode/store";
 import {
   getLastUsedCodexGlobalConversationKey,
   getLastUsedCodexPaperConversationKey,
@@ -114,18 +91,6 @@ import {
   createCodexPaperPortalItem,
 } from "../../../../codexAppServer/portal";
 import {
-  createCodexGlobalConversation,
-  createCodexPaperConversation,
-  deleteCodexTurnMessages,
-  ensureCodexPaperConversation,
-  getCodexConversationSummary,
-  listCodexGlobalConversations,
-  listCodexPaperConversations,
-  loadCodexConversation,
-  setCodexConversationTitle,
-  upsertCodexConversationSummary,
-} from "../../../../codexAppServer/store";
-import {
   createGlobalPortalItem,
   createPaperPortalItem,
   resolveConversationBaseItem,
@@ -139,7 +104,6 @@ import {
 import { extractManagedBlobHash } from "../../attachmentStorage";
 import {
   getLastUsedPaperConversationKey,
-  setLastUsedPaperConversationKey,
   getLockedGlobalConversationKey,
   setLockedGlobalConversationKey,
   buildPaperStateKey,
@@ -184,6 +148,7 @@ import {
 
 type StatusLevel = "ready" | "warning" | "error";
 type PendingTurnDeletion = {
+  conversationSystem: ConversationSystem;
   conversationKey: number;
   userTimestamp: number;
   assistantTimestamp: number;
@@ -399,6 +364,7 @@ export function createHistoryLifecycleController(
     historySearchExpanded = false;
     historySearchLoading = false;
     historySearchEntries = [];
+    historySearchResultsByKey = new Map();
   };
   const closeHistoryRowMenu = () => {
     deps.closeHistoryRowMenu();
@@ -434,41 +400,22 @@ export function createHistoryLifecycleController(
   const setActiveEditSession = deps.setActiveEditSession;
   const ztoolkit = { log: deps.log };
   const panelWin = body.ownerDocument?.defaultView || null;
-  const ensureClaudeConversationCatalogEntry = async (params: {
+  const ensureConversationCatalogEntry = async (params: {
+    system: ConversationSystem;
     conversationKey: number;
     libraryID: number;
     kind: "global" | "paper";
     paperItemID?: number;
     title?: string;
   }) => {
-    const existing = await getClaudeConversationSummary(params.conversationKey);
-    if (existing) return existing;
-    await upsertClaudeConversationSummary({
+    return conversationRepository.ensureCatalogEntry({
+      system: params.system,
       conversationKey: params.conversationKey,
       libraryID: params.libraryID,
       kind: params.kind,
       paperItemID: params.paperItemID,
       title: params.title || "",
     });
-    return getClaudeConversationSummary(params.conversationKey);
-  };
-  const ensureCodexConversationCatalogEntry = async (params: {
-    conversationKey: number;
-    libraryID: number;
-    kind: "global" | "paper";
-    paperItemID?: number;
-    title?: string;
-  }) => {
-    const existing = await getCodexConversationSummary(params.conversationKey);
-    if (existing) return existing;
-    await upsertCodexConversationSummary({
-      conversationKey: params.conversationKey,
-      libraryID: params.libraryID,
-      kind: params.kind,
-      paperItemID: params.paperItemID,
-      title: params.title || "",
-    });
-    return getCodexConversationSummary(params.conversationKey);
   };
   const touchEmptyDraftActivity = async (
     conversationKey: number,
@@ -479,39 +426,12 @@ export function createHistoryLifecycleController(
       : 0;
     if (normalizedKey <= 0) return;
     const now = Date.now();
-    if (isClaudeConversationSystem()) {
-      const summary = await getClaudeConversationSummary(normalizedKey);
-      if (!summary || (summary.userTurnCount || 0) > 0) return;
-      await touchClaudeConversation(normalizedKey, { updatedAt: now });
-      return;
-    }
-    if (isCodexConversationSystem()) {
-      const summary = await getCodexConversationSummary(normalizedKey);
-      if (!summary || (summary.userTurnCount || 0) > 0) return;
-      await upsertCodexConversationSummary({
-        conversationKey: summary.conversationKey,
-        libraryID: summary.libraryID,
-        kind: summary.kind,
-        paperItemID: summary.paperItemID,
-        createdAt: summary.createdAt,
-        updatedAt: now,
-        title: summary.title,
-        providerSessionId: summary.providerSessionId,
-        scopedConversationKey: summary.scopedConversationKey,
-        scopeType: summary.scopeType,
-        scopeId: summary.scopeId,
-        scopeLabel: summary.scopeLabel,
-        cwd: summary.cwd,
-        model: summary.model,
-        effort: summary.effort,
-      });
-      return;
-    }
-    if (kind === "global") {
-      await touchEmptyGlobalConversation(normalizedKey, now);
-      return;
-    }
-    await touchEmptyPaperConversation(normalizedKey, now);
+    await conversationRepository.touchEmptyCatalogActivity({
+      system: getConversationSystem(),
+      conversationKey: normalizedKey,
+      kind,
+      timestamp: now,
+    });
   };
   let latestConversationHistory: ConversationHistoryEntry[] = [];
   let explicitNewChatInFlight = false;
@@ -520,6 +440,7 @@ export function createHistoryLifecycleController(
   let historySearchExpanded = false;
   let historySearchLoading = false;
   let historySearchEntries: ConversationHistoryEntry[] = [];
+  let historySearchResultsByKey = new Map<number, HistorySearchResult>();
   let historySearchLoadSeq = 0;
   const historySearchDocumentCache = new Map<
     number,
@@ -535,6 +456,7 @@ export function createHistoryLifecycleController(
   const pendingHistoryDeletionKeys = new Set<number>();
   const MESSAGE_TURN_UNDO_WINDOW_MS = 8000;
   type PendingTurnDeletion = {
+    conversationSystem: ConversationSystem;
     conversationKey: number;
     userTimestamp: number;
     assistantTimestamp: number;
@@ -732,11 +654,13 @@ export function createHistoryLifecycleController(
 
   const createHistorySearchEntry = (params: {
     kind: "paper" | "global";
+    conversationID?: string;
     conversationKey: number;
     title?: string;
     createdAt?: number;
     lastActivityAt: number;
     isDraft?: boolean;
+    userTurnCount?: number;
     paperItemID?: number;
     sessionVersion?: number;
   }): ConversationHistoryEntry | null => {
@@ -762,6 +686,7 @@ export function createHistoryLifecycleController(
         params.kind === "paper"
           ? resolveHistoryPaperLabel(paperItemID)
           : "Library chat",
+      conversationID: params.conversationID,
       conversationKey: Math.floor(conversationKey),
       title:
         normalizeHistoryTitle(params.title) ||
@@ -774,6 +699,11 @@ export function createHistoryLifecycleController(
       isDraft,
       isPendingDelete: false,
       lastActivityAt: normalizedLastActivity,
+      userTurnCount:
+        Number.isFinite(Number(params.userTurnCount)) &&
+        Number(params.userTurnCount) >= 0
+          ? Math.floor(Number(params.userTurnCount))
+          : undefined,
       paperItemID,
       sessionVersion:
         params.kind === "paper" &&
@@ -801,6 +731,7 @@ export function createHistoryLifecycleController(
       for (const summary of summaries) {
         const entry = createHistorySearchEntry({
           kind: summary.kind === "paper" ? "paper" : "global",
+          conversationID: summary.conversationID,
           conversationKey: summary.conversationKey,
           title: summary.title,
           createdAt: summary.createdAt,
@@ -818,6 +749,7 @@ export function createHistoryLifecycleController(
       for (const summary of summaries) {
         const entry = createHistorySearchEntry({
           kind: summary.kind === "paper" ? "paper" : "global",
+          conversationID: summary.conversationID,
           conversationKey: summary.conversationKey,
           title: summary.title,
           createdAt: summary.createdAt,
@@ -835,6 +767,7 @@ export function createHistoryLifecycleController(
       for (const summary of summaries) {
         const entry = createHistorySearchEntry({
           kind: summary.mode === "paper" ? "paper" : "global",
+          conversationID: summary.conversationID,
           conversationKey: summary.conversationKey,
           title: summary.title,
           createdAt: summary.createdAt,
@@ -856,23 +789,85 @@ export function createHistoryLifecycleController(
     return entries;
   };
 
+  const createHistorySearchEntryFromIndexMatch = (
+    match: ConversationSearchIndexMatch,
+  ): ConversationHistoryEntry | null =>
+    createHistorySearchEntry({
+      kind: match.kind,
+      conversationID: match.conversationID,
+      conversationKey: match.conversationKey,
+      title: match.title,
+      createdAt: match.lastActivityAt,
+      lastActivityAt: match.lastActivityAt,
+      isDraft: match.userTurnCount <= 0,
+      userTurnCount: match.userTurnCount,
+      paperItemID: match.paperItemID,
+    });
+
+  const cacheHistorySearchDocument = (
+    entry: ConversationHistoryEntry,
+    document: HistorySearchDocument,
+  ): void => {
+    const fingerprint = getHistorySearchDocumentFingerprint(entry);
+    historySearchDocumentCache.set(entry.conversationKey, {
+      fingerprint,
+      document,
+    });
+    historySearchDocumentTasks.delete(entry.conversationKey);
+    pruneHistorySearchDocumentCache();
+  };
+
+  const searchIndexedConversationHistory = async (
+    libraryID: number,
+    query: string,
+  ): Promise<{
+    entries: ConversationHistoryEntry[];
+    resultsByKey: Map<number, HistorySearchResult>;
+  }> => {
+    const matches = await searchConversationIndex({
+      system: getConversationSystem(),
+      libraryID,
+      query,
+      limit: Math.max(GLOBAL_HISTORY_LIMIT, 100),
+      refresh: true,
+    });
+    const entries: ConversationHistoryEntry[] = [];
+    const documents = new Map<number, HistorySearchDocument>();
+    for (const match of matches) {
+      const entry = createHistorySearchEntryFromIndexMatch(match);
+      if (!entry || pendingHistoryDeletionKeys.has(entry.conversationKey)) {
+        continue;
+      }
+      const document = createHistorySearchDocument(entry, [
+        { text: match.bodyText },
+      ]);
+      cacheHistorySearchDocument(entry, document);
+      documents.set(entry.conversationKey, document);
+      entries.push(entry);
+    }
+    const rawResults = buildHistorySearchResults(
+      entries,
+      normalizeHistorySearchQuery(query),
+      documents,
+    );
+    const resultsByKey = new Map<number, HistorySearchResult>();
+    for (const result of rawResults) {
+      resultsByKey.set(result.entry.conversationKey, result);
+    }
+    return {
+      entries: rawResults.map((result) => result.entry),
+      resultsByKey,
+    };
+  };
+
   const buildHistorySearchDocument = async (
     entry: ConversationHistoryEntry,
   ): Promise<HistorySearchDocument> => {
-    const messages = isClaudeConversationSystem()
-      ? await loadClaudeConversation(
-          entry.conversationKey,
-          PERSISTED_HISTORY_LIMIT,
-        )
-      : isCodexConversationSystem()
-        ? await loadCodexConversation(
-            entry.conversationKey,
-            PERSISTED_HISTORY_LIMIT,
-          )
-        : await loadConversation(
-            entry.conversationKey,
-            PERSISTED_HISTORY_LIMIT,
-          );
+    const messages = await conversationRepository.loadMessages({
+      system: getConversationSystem(),
+      conversationKey: entry.conversationKey,
+      limit: PERSISTED_HISTORY_LIMIT,
+    });
     return createHistorySearchDocument(entry, messages);
   };
 
@@ -1079,8 +1074,11 @@ export function createHistoryLifecycleController(
       return;
     }
 
+    const hasIndexedSearchResults =
+      searchActive && historySearchResultsByKey.size > 0;
     const searchDocumentsReady = searchActive
-      ? allEntries.every((entry) => hasUsableHistorySearchDocument(entry))
+      ? hasIndexedSearchResults ||
+        allEntries.every((entry) => hasUsableHistorySearchDocument(entry))
       : true;
     if (searchActive && !searchDocumentsReady) {
       const loadingRow = createElement(
@@ -1095,11 +1093,13 @@ export function createHistoryLifecycleController(
       return;
     }
     const rawSearchResults = searchActive
-      ? buildHistorySearchResults(
-          allEntries,
-          normalizedSearchQuery,
-          getHistorySearchDocumentMap(allEntries),
-        )
+      ? hasIndexedSearchResults
+        ? Array.from(historySearchResultsByKey.values())
+        : buildHistorySearchResults(
+            allEntries,
+            normalizedSearchQuery,
+            getHistorySearchDocumentMap(allEntries),
+          )
       : [];
     const searchResultsByKey = new Map<number, HistorySearchResult>();
     for (const result of rawSearchResults) {
@@ -1311,6 +1311,7 @@ export function createHistoryLifecycleController(
     historySearchExpanded = false;
     historySearchQuery = "";
     historySearchLoading = false;
+    historySearchResultsByKey = new Map();
     renderGlobalHistoryMenu();
     if (
       historyToggleBtn &&
@@ -1327,6 +1328,7 @@ export function createHistoryLifecycleController(
       normalizeHistorySearchQuery(historySearchQuery);
     if (!normalizedSearchQuery) {
       historySearchEntries = [];
+      historySearchResultsByKey = new Map();
       historySearchLoading = false;
       renderGlobalHistoryMenu();
       if (
@@ -1350,9 +1352,32 @@ export function createHistoryLifecycleController(
     }
     restoreHistorySearchInputFocus();
 
+    const libraryID = getCurrentLibraryID();
+    try {
+      const indexed = libraryID
+        ? await searchIndexedConversationHistory(libraryID, historySearchQuery)
+        : { entries: [], resultsByKey: new Map<number, HistorySearchResult>() };
+      if (requestId !== historySearchLoadSeq) return;
+      historySearchEntries = indexed.entries;
+      historySearchResultsByKey = indexed.resultsByKey;
+      historySearchLoading = false;
+      renderGlobalHistoryMenu();
+      if (
+        historyToggleBtn &&
+        historyMenu &&
+        historyMenu.style.display !== "none"
+      ) {
+        positionMenuBelowButton(body, historyMenu, historyToggleBtn);
+      }
+      restoreHistorySearchInputFocus();
+      return;
+    } catch (err) {
+      ztoolkit.log("LLM: DB-backed conversation history search failed", err);
+      historySearchResultsByKey = new Map();
+    }
+
     let entries: ConversationHistoryEntry[] = [];
     try {
-      const libraryID = getCurrentLibraryID();
       entries = libraryID
         ? await loadSearchableConversationHistory(libraryID)
         : [];
@@ -1364,6 +1389,7 @@ export function createHistoryLifecycleController(
     historySearchEntries = entries.filter(
       (entry) => !pendingHistoryDeletionKeys.has(entry.conversationKey),
     );
+    historySearchResultsByKey = new Map();
 
     const missingEntries = historySearchEntries.filter(
       (entry) => !hasUsableHistorySearchDocument(entry),
@@ -1445,7 +1471,8 @@ export function createHistoryLifecycleController(
                 ? Math.floor(getConversationKey(item))
                 : 0;
             if (activePaperKey > 0) {
-              await ensureClaudeConversationCatalogEntry({
+              await ensureConversationCatalogEntry({
+                system: "claude_code",
                 conversationKey: activePaperKey,
                 libraryID,
                 kind: "paper",
@@ -1483,6 +1510,7 @@ export function createHistoryLifecycleController(
                 kind: "paper",
                 section: "paper",
                 sectionTitle: "Paper Chat",
+                conversationID: summary.conversationID,
                 conversationKey: normalizedKey,
                 libraryID,
                 title: summary.title,
@@ -1509,7 +1537,8 @@ export function createHistoryLifecycleController(
                 ? Math.floor(getConversationKey(item))
                 : 0;
             if (activePaperKey > 0) {
-              await ensureCodexConversationCatalogEntry({
+              await ensureConversationCatalogEntry({
+                system: "codex",
                 conversationKey: activePaperKey,
                 libraryID,
                 kind: "paper",
@@ -1547,6 +1576,7 @@ export function createHistoryLifecycleController(
                 kind: "paper",
                 section: "paper",
                 sectionTitle: "Paper Chat",
+                conversationID: summary.conversationID,
                 conversationKey: normalizedKey,
                 libraryID,
                 title: summary.title,
@@ -1600,6 +1630,7 @@ export function createHistoryLifecycleController(
                 kind: "paper",
                 section: "paper",
                 sectionTitle: "Paper Chat",
+                conversationID: summary.conversationID,
                 conversationKey: normalizedKey,
                 libraryID,
                 title: summary.title,
@@ -1657,7 +1688,8 @@ export function createHistoryLifecycleController(
         }
         if (activeGlobalKey > 0) {
           try {
-            await ensureClaudeConversationCatalogEntry({
+            await ensureConversationCatalogEntry({
+              system: "claude_code",
               conversationKey: activeGlobalKey,
               libraryID,
               kind: "global",
@@ -1671,20 +1703,15 @@ export function createHistoryLifecycleController(
         }
         if (requestId !== globalHistoryLoadSeq) return;
 
-        let historyEntries = [] as Array<
-          Awaited<
-            ReturnType<typeof getClaudeConversationSummary>
-          > extends infer T
-            ? T extends null
-              ? never
-              : T
-            : never
-        >;
+        let historyEntries: Awaited<
+          ReturnType<typeof loadClaudeConversationHistoryScope>
+        > = [];
         try {
-          historyEntries = await listClaudeGlobalConversations(
+          historyEntries = await loadClaudeConversationHistoryScope({
             libraryID,
-            GLOBAL_HISTORY_LIMIT,
-          );
+            kind: "global",
+            limit: GLOBAL_HISTORY_LIMIT,
+          });
         } catch (err) {
           ztoolkit.log(
             "LLM: Failed to load Claude global history entries",
@@ -1702,12 +1729,15 @@ export function createHistoryLifecycleController(
           if (pendingHistoryDeletionKeys.has(normalizedKey)) continue;
           if (seenGlobalKeys.has(normalizedKey)) continue;
           seenGlobalKeys.add(normalizedKey);
-          const lastActivity = Number(entry.updatedAt || entry.createdAt || 0);
-          const isDraft = entry.userTurnCount <= 0;
+          const lastActivity = Number(
+            entry.lastActivityAt || entry.createdAt || 0,
+          );
+          const isDraft = Boolean(entry.isDraft);
           globalEntries.push({
             kind: "global",
             section: "open",
             sectionTitle: "Library Chat",
+            conversationID: entry.conversationID,
             conversationKey: normalizedKey,
             libraryID,
             title: entry.title || (isDraft ? "New Claude chat" : ""),
@@ -1743,7 +1773,8 @@ export function createHistoryLifecycleController(
         }
         if (activeGlobalKey > 0) {
           try {
-            await ensureCodexConversationCatalogEntry({
+            await ensureConversationCatalogEntry({
+              system: "codex",
               conversationKey: activeGlobalKey,
               libraryID,
               kind: "global",
@@ -1754,20 +1785,15 @@ export function createHistoryLifecycleController(
         }
         if (requestId !== globalHistoryLoadSeq) return;
 
-        let historyEntries = [] as Array<
-          Awaited<
-            ReturnType<typeof getCodexConversationSummary>
-          > extends infer T
-            ? T extends null
-              ? never
-              : T
-            : never
-        >;
+        let historyEntries: Awaited<
+          ReturnType<typeof loadCodexConversationHistoryScope>
+        > = [];
         try {
-          historyEntries = await listCodexGlobalConversations(
+          historyEntries = await loadCodexConversationHistoryScope({
             libraryID,
-            GLOBAL_HISTORY_LIMIT,
-          );
+            kind: "global",
+            limit: GLOBAL_HISTORY_LIMIT,
+          });
         } catch (err) {
           ztoolkit.log("LLM: Failed to load Codex global history entries", err);
         }
@@ -1782,12 +1808,15 @@ export function createHistoryLifecycleController(
           if (pendingHistoryDeletionKeys.has(normalizedKey)) continue;
           if (seenGlobalKeys.has(normalizedKey)) continue;
           seenGlobalKeys.add(normalizedKey);
-          const lastActivity = Number(entry.updatedAt || entry.createdAt || 0);
-          const isDraft = entry.userTurnCount <= 0;
+          const lastActivity = Number(
+            entry.lastActivityAt || entry.createdAt || 0,
+          );
+          const isDraft = Boolean(entry.isDraft);
           globalEntries.push({
             kind: "global",
             section: "open",
             sectionTitle: "Library Chat",
+            conversationID: entry.conversationID,
             conversationKey: normalizedKey,
             libraryID,
             title: entry.title || (isDraft ? "New Codex chat" : ""),
@@ -1814,12 +1843,20 @@ export function createHistoryLifecycleController(
             activeGlobalConversationByLibrary.get(libraryID),
           );
           if (Number.isFinite(remembered) && remembered > 0) {
-            activeGlobalKey = Math.floor(remembered);
+            activeGlobalKey =
+              remembered === GLOBAL_CONVERSATION_KEY_BASE
+                ? buildDefaultUpstreamGlobalConversationKey(libraryID)
+                : Math.floor(remembered);
           }
         }
         if (activeGlobalKey > 0) {
           try {
-            await ensureGlobalConversationExists(libraryID, activeGlobalKey);
+            await ensureConversationCatalogEntry({
+              system: "upstream",
+              conversationKey: activeGlobalKey,
+              libraryID,
+              kind: "global",
+            });
           } catch (err) {
             ztoolkit.log(
               "LLM: Failed to ensure active global history row",
@@ -1859,6 +1896,7 @@ export function createHistoryLifecycleController(
             kind: "global",
             section: "open",
             sectionTitle: "Library Chat",
+            conversationID: entry.conversationID,
             conversationKey: normalizedKey,
             libraryID,
             title: entry.title,
@@ -1934,28 +1972,22 @@ export function createHistoryLifecycleController(
       ? Math.floor(nextConversationKey)
       : 0;
     if (normalizedConversationKey <= 0) return;
-    if (isClaudeConversationSystem()) {
-      await ensureClaudeConversationCatalogEntry({
-        conversationKey: normalizedConversationKey,
-        libraryID,
-        kind: "global",
-      });
-    } else if (isCodexConversationSystem()) {
-      await ensureCodexConversationCatalogEntry({
-        conversationKey: normalizedConversationKey,
-        libraryID,
-        kind: "global",
-      });
-    }
-    const nextItem = isClaudeConversationSystem()
+    const system = getConversationSystem();
+    await ensureConversationCatalogEntry({
+      system,
+      conversationKey: normalizedConversationKey,
+      libraryID,
+      kind: "global",
+    });
+    const nextItem = system === "claude_code"
       ? createClaudeGlobalPortalItem(libraryID, normalizedConversationKey)
-      : isCodexConversationSystem()
+      : system === "codex"
         ? createCodexGlobalPortalItem(libraryID, normalizedConversationKey)
         : createGlobalPortalItem(libraryID, normalizedConversationKey);
     setCurrentItem(nextItem as any);
     syncConversationIdentity();
     void renderShortcuts(body, item as Zotero.Item, resolveShortcutMode(item));
-    if (isClaudeConversationSystem()) {
+    if (system === "claude_code") {
       rememberClaudeConversationSelection({
         conversationKey: normalizedConversationKey,
         kind: "global",
@@ -1964,7 +1996,7 @@ export function createHistoryLifecycleController(
       void touchClaudeConversation(normalizedConversationKey, {
         updatedAt: Date.now(),
       });
-    } else if (isCodexConversationSystem()) {
+    } else if (system === "codex") {
       activeCodexGlobalConversationByLibrary.set(
         buildCodexLibraryStateKey(libraryID),
         normalizedConversationKey,
@@ -2010,184 +2042,114 @@ export function createHistoryLifecycleController(
     const paperItemID = Number(paperItem.id || 0);
     if (!Number.isFinite(paperItemID) || paperItemID <= 0) return;
 
+    const system = getConversationSystem();
     const requestedConversationKey = Number(nextConversationKey || 0);
-    if (isClaudeConversationSystem()) {
-      let targetSummary =
-        Number.isFinite(requestedConversationKey) &&
-        requestedConversationKey > 0
-          ? await getClaudeConversationSummary(
-              Math.floor(requestedConversationKey),
-            )
-          : null;
-      if (
-        targetSummary &&
-        (targetSummary.kind !== "paper" ||
-          Number(targetSummary.paperItemID || 0) !== paperItemID)
-      ) {
-        targetSummary = null;
+    const loadPaperCatalogEntry = async (
+      conversationKey: number,
+    ): Promise<ConversationCatalogEntry | null> => {
+      if (!Number.isFinite(conversationKey) || conversationKey <= 0) {
+        return null;
       }
-      if (!targetSummary) {
-        const rememberedConversationKey = Number(
+      const entry = await conversationRepository.getCatalogEntry({
+        system,
+        kind: "paper",
+        conversationKey: Math.floor(conversationKey),
+      });
+      if (
+        !entry ||
+        entry.kind !== "paper" ||
+        Number(entry.paperItemID || 0) !== paperItemID
+      ) {
+        return null;
+      }
+      return entry;
+    };
+    const resolveRememberedPaperConversationKey = (): number => {
+      if (system === "claude_code") {
+        return Number(
           resolveRememberedClaudeConversationKey({
             libraryID,
             kind: "paper",
             paperItemID,
           }) || 0,
         );
-        if (
-          Number.isFinite(rememberedConversationKey) &&
-          rememberedConversationKey > 0
-        ) {
-          const rememberedSummary = await getClaudeConversationSummary(
-            Math.floor(rememberedConversationKey),
-          );
-          if (
-            rememberedSummary &&
-            rememberedSummary.kind === "paper" &&
-            Number(rememberedSummary.paperItemID || 0) === paperItemID
-          ) {
-            targetSummary = rememberedSummary;
-          }
-        }
       }
-      if (!targetSummary) {
-        targetSummary = await ensureClaudePaperConversation(
-          libraryID,
-          paperItemID,
-        );
-      }
-      if (!targetSummary) return;
-      const resolvedConversationKey = Math.floor(targetSummary.conversationKey);
-      setCurrentItem(
-        createClaudePaperPortalItem(paperItem, resolvedConversationKey) as any,
-      );
-    } else if (isCodexConversationSystem()) {
-      let targetSummary =
-        Number.isFinite(requestedConversationKey) &&
-        requestedConversationKey > 0
-          ? await getCodexConversationSummary(
-              Math.floor(requestedConversationKey),
-            )
-          : null;
-      if (
-        targetSummary &&
-        (targetSummary.kind !== "paper" ||
-          Number(targetSummary.paperItemID || 0) !== paperItemID)
-      ) {
-        targetSummary = null;
-      }
-      if (!targetSummary) {
-        const rememberedConversationKey = Number(
+      if (system === "codex") {
+        return Number(
           activeCodexPaperConversationByPaper.get(
             buildCodexPaperStateKey(libraryID, paperItemID),
           ) ||
             getLastUsedCodexPaperConversationKey(libraryID, paperItemID) ||
             0,
         );
-        if (
-          Number.isFinite(rememberedConversationKey) &&
-          rememberedConversationKey > 0
-        ) {
-          const rememberedSummary = await getCodexConversationSummary(
-            Math.floor(rememberedConversationKey),
-          );
-          if (
-            rememberedSummary &&
-            rememberedSummary.kind === "paper" &&
-            Number(rememberedSummary.paperItemID || 0) === paperItemID
-          ) {
-            targetSummary = rememberedSummary;
-          }
-        }
       }
-      if (!targetSummary) {
-        targetSummary = await ensureCodexPaperConversation(
-          libraryID,
-          paperItemID,
-        );
-      }
-      if (!targetSummary) return;
-      const resolvedConversationKey = Math.floor(targetSummary.conversationKey);
+      return Number(
+        activePaperConversationByPaper.get(
+          buildPaperStateKey(libraryID, paperItemID),
+        ) ||
+          getLastUsedPaperConversationKey(libraryID, paperItemID) ||
+          0,
+      );
+    };
+
+    let targetSummary = await loadPaperCatalogEntry(requestedConversationKey);
+    if (!targetSummary) {
+      targetSummary = await loadPaperCatalogEntry(
+        resolveRememberedPaperConversationKey(),
+      );
+    }
+    if (!targetSummary) {
+      targetSummary = await conversationRepository.ensureCatalogEntry({
+        system,
+        kind: "paper",
+        libraryID,
+        paperItemID,
+      });
+    }
+    if (!targetSummary) return;
+
+    const resolvedConversationKey = Math.floor(targetSummary.conversationKey);
+    if (system === "claude_code") {
+      setCurrentItem(
+        createClaudePaperPortalItem(paperItem, resolvedConversationKey) as any,
+      );
+    } else if (system === "codex") {
       setCurrentItem(
         createCodexPaperPortalItem(paperItem, resolvedConversationKey) as any,
       );
     } else {
-      let targetSummary =
-        Number.isFinite(requestedConversationKey) &&
-        requestedConversationKey > 0
-          ? await getPaperConversation(Math.floor(requestedConversationKey))
-          : null;
-      if (targetSummary && targetSummary.paperItemID !== paperItemID) {
-        targetSummary = null;
-      }
-      if (!targetSummary) {
-        const rememberedConversationKey = Number(
-          activePaperConversationByPaper.get(
-            buildPaperStateKey(libraryID, paperItemID),
-          ) ||
-            getLastUsedPaperConversationKey(libraryID, paperItemID) ||
-            0,
-        );
-        if (
-          Number.isFinite(rememberedConversationKey) &&
-          rememberedConversationKey > 0
-        ) {
-          const rememberedSummary = await getPaperConversation(
-            Math.floor(rememberedConversationKey),
-          );
-          if (
-            rememberedSummary &&
-            rememberedSummary.paperItemID === paperItemID
-          ) {
-            targetSummary = rememberedSummary;
-          }
-        }
-      }
-      if (!targetSummary) {
-        targetSummary = await ensurePaperV1Conversation(libraryID, paperItemID);
-      }
-      if (!targetSummary) return;
-      const normalizedConversationKey = Math.floor(
-        targetSummary.conversationKey,
-      );
       const nextItem =
-        normalizedConversationKey === paperItemID
+        resolvedConversationKey === paperItemID
           ? paperItem
           : createPaperPortalItem(
               paperItem,
-              normalizedConversationKey,
-              targetSummary.sessionVersion,
+              resolvedConversationKey,
+              targetSummary.sessionVersion || 1,
             );
       setCurrentItem(nextItem as any);
     }
     syncConversationIdentity();
     refreshAutoLoadedPaperContextForCurrentItem();
     void renderShortcuts(body, item as Zotero.Item, resolveShortcutMode(item));
-    if (isClaudeConversationSystem()) {
+    if (system === "claude_code") {
       rememberClaudeConversationSelection({
-        conversationKey: Math.floor(getConversationKey(item as Zotero.Item)),
+        conversationKey: resolvedConversationKey,
         kind: "paper",
         libraryID,
         paperItemID,
       });
-      void touchClaudeConversation(
-        Math.floor(getConversationKey(item as Zotero.Item)),
-        {
-          updatedAt: Date.now(),
-        },
-      );
-    } else if (isCodexConversationSystem()) {
-      const normalizedConversationKey = Math.floor(
-        getConversationKey(item as Zotero.Item),
-      );
+      void touchClaudeConversation(resolvedConversationKey, {
+        updatedAt: Date.now(),
+      });
+    } else if (system === "codex") {
       activeCodexPaperConversationByPaper.set(
         buildCodexPaperStateKey(libraryID, paperItemID),
-        normalizedConversationKey,
+        resolvedConversationKey,
       );
       setLastUsedCodexPaperConversationKey(
         libraryID,
         paperItemID,
-        normalizedConversationKey,
+        resolvedConversationKey,
       );
     }
     setActiveEditSession(null);
@@ -2303,6 +2265,43 @@ export function createHistoryLifecycleController(
       return libraryID ? await loadSearchableConversationHistory(libraryID) : [];
     },
     loadDocument: (entry) => ensureHistorySearchDocument(entry),
+    searchEntries: async (query) => {
+      const libraryID = getCurrentLibraryID();
+      if (!libraryID) {
+        return {
+          entries: [],
+          resultsByKey: new Map<number, HistorySearchResult>(),
+        };
+      }
+      try {
+        return await searchIndexedConversationHistory(libraryID, query);
+      } catch (err) {
+        ztoolkit.log("LLM: DB-backed history search popup failed", err);
+        const entries = await loadSearchableConversationHistory(libraryID);
+        const documents = new Map<number, HistorySearchDocument>();
+        await Promise.all(
+          entries.map(async (entry) => {
+            documents.set(
+              entry.conversationKey,
+              await ensureHistorySearchDocument(entry),
+            );
+          }),
+        );
+        const rawResults = buildHistorySearchResults(
+          entries,
+          normalizeHistorySearchQuery(query),
+          documents,
+        );
+        const resultsByKey = new Map<number, HistorySearchResult>();
+        for (const result of rawResults) {
+          resultsByKey.set(result.entry.conversationKey, result);
+        }
+        return {
+          entries: rawResults.map((result) => result.entry),
+          resultsByKey,
+        };
+      }
+    },
     onSelect: async (entry) => {
       await switchToHistoryEntry(entry);
       if (status) setStatus(status, t("Conversation loaded"), "ready");
@@ -2326,20 +2325,17 @@ export function createHistoryLifecycleController(
     const conversationKey = pending.conversationKey;
     let paperItemID = Number(pending.paperItemID || 0) || undefined;
     if (pending.kind === "paper" && !paperItemID) {
-      if (isClaudeConversationSystem()) {
-        const summary = await getClaudeConversationSummary(conversationKey);
-        paperItemID = Number(summary?.paperItemID || 0) || undefined;
-      } else if (isCodexConversationSystem()) {
-        const summary = await getCodexConversationSummary(conversationKey);
-        paperItemID = Number(summary?.paperItemID || 0) || undefined;
-      } else {
-        const summary = await getPaperConversation(conversationKey);
-        paperItemID = Number(summary?.paperItemID || 0) || undefined;
-      }
+      const summary = await conversationRepository.getCatalogEntry({
+        system: pending.conversationSystem,
+        kind: "paper",
+        conversationKey,
+      });
+      paperItemID = Number(summary?.paperItemID || 0) || undefined;
     }
     clearPendingDeletionCaches(conversationKey);
     const result = await finalizeConversationDeletion(
       {
+        conversationID: pending.conversationID,
         conversationKey,
         kind: pending.kind,
         conversationSystem: pending.conversationSystem,
@@ -2385,25 +2381,12 @@ export function createHistoryLifecycleController(
     if (!pending) return;
     let hasError = false;
     try {
-      if (isClaudeConversationSystem()) {
-        await deleteClaudeTurnMessages(
-          pending.conversationKey,
-          pending.userTimestamp,
-          pending.assistantTimestamp,
-        );
-      } else if (isCodexConversationSystem()) {
-        await deleteCodexTurnMessages(
-          pending.conversationKey,
-          pending.userTimestamp,
-          pending.assistantTimestamp,
-        );
-      } else {
-        await deleteTurnMessages(
-          pending.conversationKey,
-          pending.userTimestamp,
-          pending.assistantTimestamp,
-        );
-      }
+      await conversationRepository.deleteTurnMessages({
+        system: pending.conversationSystem,
+        conversationKey: pending.conversationKey,
+        userTimestamp: pending.userTimestamp,
+        assistantTimestamp: pending.assistantTimestamp,
+      });
     } catch (err) {
       hasError = true;
       ztoolkit.log("LLM: Failed to delete turn messages", err);
@@ -2508,6 +2491,7 @@ export function createHistoryLifecycleController(
     refreshChatPreservingScroll();
 
     const pending: PendingTurnDeletion = {
+      conversationSystem: getConversationSystem(),
       conversationKey: target.conversationKey,
       userTimestamp: Math.floor(target.userTimestamp),
       assistantTimestamp: Math.floor(target.assistantTimestamp),
@@ -2548,6 +2532,7 @@ export function createHistoryLifecycleController(
     ztoolkit.log("LLM: Finalizing pending history deletion", {
       reason,
       kind: pending.kind,
+      conversationID: pending.conversationID,
       conversationKey: pending.conversationKey,
       libraryID: pending.libraryID,
       title: pending.title,
@@ -2580,6 +2565,7 @@ export function createHistoryLifecycleController(
     if (!pending) return;
     ztoolkit.log("LLM: Restoring pending history deletion", {
       kind: pending.kind,
+      conversationID: pending.conversationID,
       conversationKey: pending.conversationKey,
       libraryID: pending.libraryID,
       title: pending.title,
@@ -2668,13 +2654,12 @@ export function createHistoryLifecycleController(
     const nextTitle = promptConversationRename(entry);
     if (!nextTitle) return;
     try {
-      if (isClaudeConversationSystem()) {
-        await setClaudeConversationTitle(entry.conversationKey, nextTitle);
-      } else if (entry.kind === "paper") {
-        await setPaperConversationTitle(entry.conversationKey, nextTitle);
-      } else {
-        await setGlobalConversationTitle(entry.conversationKey, nextTitle);
-      }
+      await conversationRepository.setCatalogTitle({
+        system: getConversationSystem(),
+        kind: entry.kind,
+        conversationKey: entry.conversationKey,
+        title: nextTitle,
+      });
       invalidateHistorySearchDocument(entry.conversationKey);
       await refreshGlobalHistoryHeader();
       if (status) setStatus(status, t("Conversation renamed"), "ready");
@@ -2737,6 +2722,7 @@ export function createHistoryLifecycleController(
     invalidateHistorySearchDocument(entry.conversationKey);
     const pending: PendingHistoryDeletion = {
       kind: entry.kind,
+      conversationID: entry.conversationID,
       conversationKey: entry.conversationKey,
       libraryID,
       conversationSystem: getConversationSystem(),
@@ -2786,272 +2772,133 @@ export function createHistoryLifecycleController(
 
     let targetConversationKey = 0;
     let reuseReason: "active-draft" | "latest-draft" | null = null;
-
-    if (isClaudeConversationSystem()) {
-      const currentCandidate = isGlobalMode()
+    const system = getConversationSystem();
+    const currentCandidate = (() => {
+      if (system === "claude_code") {
+        return isGlobalMode()
+          ? getConversationKey(item)
+          : Number(
+              activeClaudeGlobalConversationByLibrary.get(
+                buildClaudeLibraryStateKey(libraryID),
+              ) || 0,
+            );
+      }
+      if (system === "codex") {
+        return isGlobalMode()
+          ? getConversationKey(item)
+          : Number(
+              activeCodexGlobalConversationByLibrary.get(
+                buildCodexLibraryStateKey(libraryID),
+              ) || 0,
+            );
+      }
+      return isGlobalMode() &&
+        isUpstreamGlobalConversationKey(Number(getConversationKey(item) || 0))
         ? getConversationKey(item)
-        : Number(
-            activeClaudeGlobalConversationByLibrary.get(
-              buildClaudeLibraryStateKey(libraryID),
-            ) || 0,
-          );
-      const normalizedCurrentCandidate = Number.isFinite(currentCandidate)
-        ? Math.floor(currentCandidate)
-        : 0;
-      if (
-        normalizedCurrentCandidate > 0 &&
-        normalizedCurrentCandidate !== excludeConversationKey
-      ) {
-        try {
-          const currentSummary = await getClaudeConversationSummary(
-            normalizedCurrentCandidate,
-          );
-          if (
-            isReusableConversationDraft({
-              forceFresh,
-              summary: currentSummary,
+        : Number(activeGlobalConversationByLibrary.get(libraryID) || 0);
+    })();
+    const normalizedCurrentCandidate = Number.isFinite(currentCandidate)
+      ? Math.floor(currentCandidate)
+      : 0;
+
+    if (
+      normalizedCurrentCandidate > 0 &&
+      normalizedCurrentCandidate !== excludeConversationKey
+    ) {
+      try {
+        const currentSummary = await conversationRepository.getCatalogEntry({
+          system,
+          kind: "global",
+          conversationKey: normalizedCurrentCandidate,
+        });
+        if (
+          isReusableConversationDraft({
+            forceFresh,
+            summary: currentSummary,
+            kind: "global",
+            libraryID,
+          })
+        ) {
+          targetConversationKey = normalizedCurrentCandidate;
+          reuseReason = "active-draft";
+        }
+      } catch (err) {
+        ztoolkit.log(
+          "LLM: Failed to inspect active global candidate for draft reuse",
+          err,
+        );
+      }
+    }
+
+    if (targetConversationKey <= 0) {
+      try {
+        const summaries = await conversationRepository.listCatalogEntries({
+          system,
+          kind: "global",
+          libraryID,
+          limit: GLOBAL_HISTORY_LIMIT,
+          includeEmpty: true,
+        });
+        const latestEmpty = findReusableConversationDraft({
+          forceFresh,
+          summaries,
+          kind: "global",
+          libraryID,
+        });
+        const latestEmptyKey = Number(latestEmpty?.conversationKey || 0);
+        if (
+          Number.isFinite(latestEmptyKey) &&
+          latestEmptyKey > 0 &&
+          Math.floor(latestEmptyKey) !== excludeConversationKey
+        ) {
+          targetConversationKey = Math.floor(latestEmptyKey);
+          reuseReason = "latest-draft";
+        }
+      } catch (err) {
+        ztoolkit.log(
+          "LLM: Failed to load latest empty global conversation",
+          err,
+        );
+      }
+    }
+
+    if (targetConversationKey <= 0) {
+      try {
+        targetConversationKey = Number(
+          (
+            await conversationRepository.createCatalogEntry({
+              system,
               kind: "global",
               libraryID,
             })
-          ) {
-            targetConversationKey = normalizedCurrentCandidate;
-            reuseReason = "active-draft";
-          }
-        } catch (err) {
-          ztoolkit.log(
-            "LLM: Failed to inspect active Claude candidate for draft reuse",
-            err,
-          );
-        }
+          )?.conversationKey || 0,
+        );
+      } catch (err) {
+        ztoolkit.log("LLM: Failed to create new global conversation", err);
       }
-      if (targetConversationKey <= 0) {
-        try {
-          const summaries = await listClaudeGlobalConversations(
-            libraryID,
-            GLOBAL_HISTORY_LIMIT,
-          );
-          const latestEmpty = findReusableConversationDraft({
-            forceFresh,
-            summaries,
-            kind: "global",
-            libraryID,
-          });
-          const latestEmptyKey = Number(latestEmpty?.conversationKey || 0);
-          if (
-            Number.isFinite(latestEmptyKey) &&
-            latestEmptyKey > 0 &&
-            Math.floor(latestEmptyKey) !== excludeConversationKey
-          ) {
-            targetConversationKey = Math.floor(latestEmptyKey);
-            reuseReason = "latest-draft";
-          }
-        } catch (err) {
-          ztoolkit.log(
-            "LLM: Failed to load latest empty Claude global conversation",
-            err,
-          );
-        }
-      }
-      if (targetConversationKey <= 0) {
-        try {
-          targetConversationKey = Number(
-            (await createClaudeGlobalConversation(libraryID))
-              ?.conversationKey || 0,
-          );
-        } catch (err) {
-          ztoolkit.log(
-            "LLM: Failed to create new Claude global conversation",
-            err,
-          );
-        }
-        reuseReason = null;
-      }
-      if (Math.floor(Number(targetConversationKey || 0)) === excludeConversationKey) {
-        targetConversationKey = 0;
-      }
-      if (!targetConversationKey) {
-        if (status)
-          setStatus(status, t("Failed to create conversation"), "error");
-        return false;
-      }
+      reuseReason = null;
+    }
+
+    if (Math.floor(Number(targetConversationKey || 0)) === excludeConversationKey) {
+      targetConversationKey = 0;
+    }
+    if (!targetConversationKey) {
+      if (status) setStatus(status, t("Failed to create conversation"), "error");
+      return false;
+    }
+
+    if (system === "claude_code") {
       activeClaudeGlobalConversationByLibrary.set(
         buildClaudeLibraryStateKey(libraryID),
         targetConversationKey,
       );
-    } else if (isCodexConversationSystem()) {
-      const currentCandidate = isGlobalMode()
-        ? getConversationKey(item)
-        : Number(
-            activeCodexGlobalConversationByLibrary.get(
-              buildCodexLibraryStateKey(libraryID),
-            ) || 0,
-          );
-      const normalizedCurrentCandidate = Number.isFinite(currentCandidate)
-        ? Math.floor(currentCandidate)
-        : 0;
-      if (
-        normalizedCurrentCandidate > 0 &&
-        normalizedCurrentCandidate !== excludeConversationKey
-      ) {
-        try {
-          const currentSummary = await getCodexConversationSummary(
-            normalizedCurrentCandidate,
-          );
-          if (
-            isReusableConversationDraft({
-              forceFresh,
-              summary: currentSummary,
-              kind: "global",
-              libraryID,
-            })
-          ) {
-            targetConversationKey = normalizedCurrentCandidate;
-            reuseReason = "active-draft";
-          }
-        } catch (err) {
-          ztoolkit.log(
-            "LLM: Failed to inspect active Codex candidate for draft reuse",
-            err,
-          );
-        }
-      }
-      if (targetConversationKey <= 0) {
-        try {
-          const summaries = await listCodexGlobalConversations(
-            libraryID,
-            GLOBAL_HISTORY_LIMIT,
-          );
-          const latestEmpty = findReusableConversationDraft({
-            forceFresh,
-            summaries,
-            kind: "global",
-            libraryID,
-          });
-          const latestEmptyKey = Number(latestEmpty?.conversationKey || 0);
-          if (
-            Number.isFinite(latestEmptyKey) &&
-            latestEmptyKey > 0 &&
-            Math.floor(latestEmptyKey) !== excludeConversationKey
-          ) {
-            targetConversationKey = Math.floor(latestEmptyKey);
-            reuseReason = "latest-draft";
-          }
-        } catch (err) {
-          ztoolkit.log(
-            "LLM: Failed to load latest empty Codex global conversation",
-            err,
-          );
-        }
-      }
-      if (targetConversationKey <= 0) {
-        try {
-          targetConversationKey = Number(
-            (await createCodexGlobalConversation(libraryID))?.conversationKey ||
-              0,
-          );
-        } catch (err) {
-          ztoolkit.log(
-            "LLM: Failed to create new Codex global conversation",
-            err,
-          );
-        }
-        reuseReason = null;
-      }
-      if (Math.floor(Number(targetConversationKey || 0)) === excludeConversationKey) {
-        targetConversationKey = 0;
-      }
-      if (!targetConversationKey) {
-        if (status)
-          setStatus(status, t("Failed to create conversation"), "error");
-        return false;
-      }
+    } else if (system === "codex") {
       activeCodexGlobalConversationByLibrary.set(
         buildCodexLibraryStateKey(libraryID),
         targetConversationKey,
       );
       setLastUsedCodexGlobalConversationKey(libraryID, targetConversationKey);
     } else {
-      const currentCandidate =
-        isGlobalMode() &&
-        isUpstreamGlobalConversationKey(Number(getConversationKey(item) || 0))
-          ? getConversationKey(item)
-          : Number(activeGlobalConversationByLibrary.get(libraryID) || 0);
-      const normalizedCurrentCandidate = Number.isFinite(currentCandidate)
-        ? Math.floor(currentCandidate)
-        : 0;
-      if (
-        normalizedCurrentCandidate > 0 &&
-        normalizedCurrentCandidate !== excludeConversationKey
-      ) {
-        try {
-          const currentSummary = await getGlobalConversation(
-            normalizedCurrentCandidate,
-          );
-          if (
-            isReusableConversationDraft({
-              forceFresh,
-              summary: currentSummary
-                ? { ...currentSummary, kind: "global" as const }
-                : null,
-              kind: "global",
-              libraryID,
-            })
-          ) {
-            targetConversationKey = normalizedCurrentCandidate;
-            reuseReason = "active-draft";
-          }
-        } catch (err) {
-          ztoolkit.log(
-            "LLM: Failed to inspect active candidate for draft reuse",
-            err,
-          );
-        }
-      }
-
-      if (targetConversationKey <= 0) {
-        try {
-          const latestEmpty = await getLatestEmptyGlobalConversation(libraryID);
-          const latestEmptyKey = Number(latestEmpty?.conversationKey || 0);
-          if (
-            Number.isFinite(latestEmptyKey) &&
-            latestEmptyKey > 0 &&
-            Math.floor(latestEmptyKey) !== excludeConversationKey &&
-            isReusableConversationDraft({
-              forceFresh,
-              summary: latestEmpty
-                ? { ...latestEmpty, kind: "global" as const }
-                : null,
-              kind: "global",
-              libraryID,
-            })
-          ) {
-            targetConversationKey = Math.floor(latestEmptyKey);
-            reuseReason = "latest-draft";
-          }
-        } catch (err) {
-          ztoolkit.log(
-            "LLM: Failed to load latest empty global conversation",
-            err,
-          );
-        }
-      }
-
-      if (targetConversationKey <= 0) {
-        try {
-          targetConversationKey = await createGlobalConversation(libraryID);
-        } catch (err) {
-          ztoolkit.log("LLM: Failed to create new global conversation", err);
-        }
-        reuseReason = null;
-      }
-      if (Math.floor(Number(targetConversationKey || 0)) === excludeConversationKey) {
-        targetConversationKey = 0;
-      }
-      if (!targetConversationKey) {
-        if (status)
-          setStatus(status, t("Failed to create conversation"), "error");
-        return false;
-      }
       activeGlobalConversationByLibrary.set(libraryID, targetConversationKey);
     }
 
@@ -3105,247 +2952,89 @@ export function createHistoryLifecycleController(
     let targetConversationKey = 0;
     let reuseReason: "active-draft" | "existing-draft" | null = null;
 
-    if (isClaudeConversationSystem()) {
-      const currentKey = Number(getConversationKey(item) || 0);
-      if (
-        Number.isFinite(currentKey) &&
-        currentKey > 0 &&
-        Math.floor(currentKey) !== excludeConversationKey
-      ) {
-        try {
-          const currentSummary = await getClaudeConversationSummary(currentKey);
-          if (
-            isReusableConversationDraft({
-              forceFresh,
-              summary: currentSummary,
-              kind: "paper",
-              paperItemID,
-            })
-          ) {
-            targetConversationKey = currentKey;
-            reuseReason = "active-draft";
-          }
-        } catch (err) {
-          ztoolkit.log(
-            "LLM: Failed to inspect active Claude paper conversation for draft reuse",
-            err,
-          );
-        }
-      }
-      if (targetConversationKey <= 0) {
-        try {
-          const summaries = await listClaudePaperConversations(
-            libraryID,
-            paperItemID,
-            50,
-          );
-          const emptyEntry = findReusableConversationDraft({
+    const system = getConversationSystem();
+    const currentKey = Number(getConversationKey(item) || 0);
+    if (
+      Number.isFinite(currentKey) &&
+      currentKey > 0 &&
+      Math.floor(currentKey) !== excludeConversationKey
+    ) {
+      try {
+        const currentSummary = await conversationRepository.getCatalogEntry({
+          system,
+          kind: "paper",
+          conversationKey: Math.floor(currentKey),
+        });
+        if (
+          isReusableConversationDraft({
             forceFresh,
-            summaries,
+            summary: currentSummary,
             kind: "paper",
             paperItemID,
-          });
-          const emptyConversationKey = Number(emptyEntry?.conversationKey || 0);
-          if (
-            Number.isFinite(emptyConversationKey) &&
-            emptyConversationKey > 0 &&
-            Math.floor(emptyConversationKey) !== excludeConversationKey
-          ) {
-            targetConversationKey = Math.floor(emptyConversationKey);
-            reuseReason = "existing-draft";
-          }
-        } catch (err) {
-          ztoolkit.log(
-            "LLM: Failed to list Claude paper conversations for draft reuse",
-            err,
-          );
+          })
+        ) {
+          targetConversationKey = Math.floor(currentKey);
+          reuseReason = "active-draft";
         }
+      } catch (err) {
+        ztoolkit.log(
+          "LLM: Failed to inspect active paper conversation for draft reuse",
+          err,
+        );
       }
-      if (targetConversationKey <= 0) {
-        let createdSummary: Awaited<
-          ReturnType<typeof createClaudePaperConversation>
-        > = null;
-        try {
-          createdSummary = await createClaudePaperConversation(
-            libraryID,
-            paperItemID,
-          );
-        } catch (err) {
-          ztoolkit.log(
-            "LLM: Failed to create new Claude paper conversation",
-            err,
-          );
-        }
-        if (!createdSummary?.conversationKey) {
-          if (status)
-            setStatus(status, t("Failed to create paper chat"), "error");
-          return false;
-        }
-        targetConversationKey = createdSummary.conversationKey;
-        reuseReason = null;
-      }
-    } else if (isCodexConversationSystem()) {
-      const currentKey = Number(getConversationKey(item) || 0);
-      if (
-        Number.isFinite(currentKey) &&
-        currentKey > 0 &&
-        Math.floor(currentKey) !== excludeConversationKey
-      ) {
-        try {
-          const currentSummary = await getCodexConversationSummary(currentKey);
-          if (
-            isReusableConversationDraft({
-              forceFresh,
-              summary: currentSummary,
-              kind: "paper",
-              paperItemID,
-            })
-          ) {
-            targetConversationKey = currentKey;
-            reuseReason = "active-draft";
-          }
-        } catch (err) {
-          ztoolkit.log(
-            "LLM: Failed to inspect active Codex paper conversation for draft reuse",
-            err,
-          );
-        }
-      }
-      if (targetConversationKey <= 0) {
-        try {
-          const summaries = await listCodexPaperConversations(
-            libraryID,
-            paperItemID,
-            50,
-          );
-          const emptyEntry = findReusableConversationDraft({
-            forceFresh,
-            summaries,
-            kind: "paper",
-            paperItemID,
-          });
-          const emptyConversationKey = Number(emptyEntry?.conversationKey || 0);
-          if (
-            Number.isFinite(emptyConversationKey) &&
-            emptyConversationKey > 0 &&
-            Math.floor(emptyConversationKey) !== excludeConversationKey
-          ) {
-            targetConversationKey = Math.floor(emptyConversationKey);
-            reuseReason = "existing-draft";
-          }
-        } catch (err) {
-          ztoolkit.log(
-            "LLM: Failed to list Codex paper conversations for draft reuse",
-            err,
-          );
-        }
-      }
-      if (targetConversationKey <= 0) {
-        let createdSummary: Awaited<
-          ReturnType<typeof createCodexPaperConversation>
-        > = null;
-        try {
-          createdSummary = await createCodexPaperConversation(
-            libraryID,
-            paperItemID,
-          );
-        } catch (err) {
-          ztoolkit.log(
-            "LLM: Failed to create new Codex paper conversation",
-            err,
-          );
-        }
-        if (!createdSummary?.conversationKey) {
-          if (status)
-            setStatus(status, t("Failed to create paper chat"), "error");
-          return false;
-        }
-        targetConversationKey = createdSummary.conversationKey;
-        reuseReason = null;
-      }
-    } else {
-      const currentKey = Number(getConversationKey(item) || 0);
-      if (
-        Number.isFinite(currentKey) &&
-        currentKey > 0 &&
-        Math.floor(currentKey) !== excludeConversationKey
-      ) {
-        try {
-          const currentSummary = await getPaperConversation(currentKey);
-          if (
-            isReusableConversationDraft({
-              forceFresh,
-              summary: currentSummary
-                ? { ...currentSummary, kind: "paper" as const }
-                : null,
-              kind: "paper",
-              paperItemID,
-            })
-          ) {
-            targetConversationKey = currentKey;
-            reuseReason = "active-draft";
-          }
-        } catch (err) {
-          ztoolkit.log(
-            "LLM: Failed to inspect active paper conversation for draft reuse",
-            err,
-          );
-        }
-      }
+    }
 
-      if (targetConversationKey <= 0) {
-        try {
-          const summaries = await listPaperConversations(
-            libraryID,
-            paperItemID,
-            50,
-          );
-          const emptyEntry = findReusableConversationDraft({
-            forceFresh,
-            summaries: summaries.map((summary) => ({
-              ...summary,
-              kind: "paper" as const,
-            })),
-            kind: "paper",
-            paperItemID,
-          });
-          const emptyConversationKey = Number(emptyEntry?.conversationKey || 0);
-          if (
-            Number.isFinite(emptyConversationKey) &&
-            emptyConversationKey > 0 &&
-            Math.floor(emptyConversationKey) !== excludeConversationKey
-          ) {
-            targetConversationKey = Math.floor(emptyConversationKey);
-            reuseReason = "existing-draft";
-          }
-        } catch (err) {
-          ztoolkit.log(
-            "LLM: Failed to list paper conversations for draft reuse",
-            err,
-          );
+    if (targetConversationKey <= 0) {
+      try {
+        const summaries = await conversationRepository.listCatalogEntries({
+          system,
+          kind: "paper",
+          libraryID,
+          paperItemID,
+          limit: 50,
+          includeEmpty: true,
+        });
+        const emptyEntry = findReusableConversationDraft({
+          forceFresh,
+          summaries,
+          kind: "paper",
+          paperItemID,
+        });
+        const emptyConversationKey = Number(emptyEntry?.conversationKey || 0);
+        if (
+          Number.isFinite(emptyConversationKey) &&
+          emptyConversationKey > 0 &&
+          Math.floor(emptyConversationKey) !== excludeConversationKey
+        ) {
+          targetConversationKey = Math.floor(emptyConversationKey);
+          reuseReason = "existing-draft";
         }
+      } catch (err) {
+        ztoolkit.log(
+          "LLM: Failed to list paper conversations for draft reuse",
+          err,
+        );
       }
+    }
 
-      if (targetConversationKey <= 0) {
-        let createdSummary: Awaited<
-          ReturnType<typeof createPaperConversation>
-        > = null;
-        try {
-          createdSummary = await createPaperConversation(
-            libraryID,
-            paperItemID,
-          );
-        } catch (err) {
-          ztoolkit.log("LLM: Failed to create new paper conversation", err);
-        }
-        if (!createdSummary?.conversationKey) {
-          if (status)
-            setStatus(status, t("Failed to create paper chat"), "error");
-          return false;
-        }
-        targetConversationKey = createdSummary.conversationKey;
-        reuseReason = null;
+    if (targetConversationKey <= 0) {
+      let createdSummary: ConversationCatalogEntry | null = null;
+      try {
+        createdSummary = await conversationRepository.createCatalogEntry({
+          system,
+          kind: "paper",
+          libraryID,
+          paperItemID,
+        });
+      } catch (err) {
+        ztoolkit.log("LLM: Failed to create new paper conversation", err);
       }
+      if (!createdSummary?.conversationKey) {
+        if (status) setStatus(status, t("Failed to create paper chat"), "error");
+        return false;
+      }
+      targetConversationKey = createdSummary.conversationKey;
+      reuseReason = null;
     }
     if (Math.floor(Number(targetConversationKey || 0)) === excludeConversationKey) {
       targetConversationKey = 0;
@@ -3540,9 +3229,10 @@ export function createHistoryLifecycleController(
               const activeKey = Number(
                 activeGlobalConversationByLibrary.get(libraryID) || 0,
               );
-              return isUpstreamGlobalConversationKey(activeKey)
-                ? Math.floor(activeKey)
-                : 0;
+              if (!isUpstreamGlobalConversationKey(activeKey)) return 0;
+              return activeKey === GLOBAL_CONVERSATION_KEY_BASE
+                ? buildDefaultUpstreamGlobalConversationKey(libraryID)
+                : Math.floor(activeKey);
             })();
       if (targetGlobalKey > 0) {
         void switchGlobalConversation(targetGlobalKey);

@@ -9,6 +9,7 @@ export type ConversationHistoryEntry = {
   kind: "paper" | "global";
   section: "paper" | "open";
   sectionTitle: string;
+  conversationID?: string;
   conversationKey: number;
   libraryID?: number;
   title: string;
@@ -31,6 +32,7 @@ export type HistorySwitchTarget =
 
 export type PendingHistoryDeletion = {
   kind: "paper" | "global";
+  conversationID?: string;
   conversationKey: number;
   libraryID: number;
   conversationSystem: ConversationSystem;

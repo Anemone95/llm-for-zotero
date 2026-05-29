@@ -115,6 +115,7 @@ export type ActiveNoteContext = {
 export type ConversationSystem = "upstream" | "claude_code" | "codex";
 
 export type GlobalConversationSummary = {
+  conversationID: string;
   conversationKey: number;
   libraryID: number;
   createdAt: number;
@@ -124,6 +125,7 @@ export type GlobalConversationSummary = {
 };
 
 export type PaperConversationSummary = {
+  conversationID: string;
   conversationKey: number;
   libraryID: number;
   paperItemID: number;
@@ -137,6 +139,7 @@ export type PaperConversationSummary = {
 export type ClaudeConversationKind = "global" | "paper";
 
 export type ClaudeConversationSummary = {
+  conversationID: string;
   conversationKey: number;
   libraryID: number;
   kind: ClaudeConversationKind;
@@ -158,6 +161,7 @@ export type ClaudeConversationSummary = {
 export type CodexConversationKind = "global" | "paper";
 
 export type CodexConversationSummary = {
+  conversationID: string;
   conversationKey: number;
   libraryID: number;
   kind: CodexConversationKind;

@@ -22,6 +22,7 @@ import {
   unregisterQueuedFollowUpBody,
 } from "./queuedFollowUps";
 import {
+  buildDefaultUpstreamGlobalConversationKey,
   config,
   AUTO_SCROLL_BOTTOM_THRESHOLD,
   MAX_FULL_TEXT_PAPER_CONTEXTS,
@@ -30,6 +31,7 @@ import {
   PERSISTED_HISTORY_LIMIT,
   formatFigureCountLabel,
   formatFileCountLabel,
+  GLOBAL_CONVERSATION_KEY_BASE,
   GLOBAL_HISTORY_LIMIT,
   isUpstreamGlobalConversationKey,
   PREFERENCES_PANE_ID,
@@ -225,24 +227,9 @@ import {
   removeConversationAttachmentFiles,
 } from "./attachmentStorage";
 import { clearConversationSummary as clearConversationSummaryFromCache } from "./conversationSummaryCache";
+import { conversationRepository } from "../../core/conversations/repository";
 import {
   clearConversation as clearStoredConversation,
-  clearConversationTitle,
-  createGlobalConversation,
-  createPaperConversation,
-  deleteTurnMessages,
-  deleteGlobalConversation,
-  deletePaperConversation,
-  ensureGlobalConversationExists,
-  getGlobalConversationUserTurnCount,
-  getLatestEmptyGlobalConversation,
-  loadConversation,
-  getPaperConversation,
-  listGlobalConversations,
-  listPaperConversations,
-  ensurePaperV1Conversation,
-  setGlobalConversationTitle,
-  setPaperConversationTitle,
   touchPaperConversationTitle,
   touchGlobalConversationTitle,
 } from "../../utils/chatStore";
@@ -359,6 +346,9 @@ import {
   formatPaperContextCardAttachmentLine,
   formatPaperContextChipLabel,
   formatPaperContextChipTitle,
+  hasPaperChipSourceMenuOption,
+  isPaperContextFullTextOnlySourceMode,
+  isPaperContextReaderFocusableSourceMode,
   normalizePaperContextEntries,
   resolvePaperContextDisplayMetadata,
 } from "./setupHandlers/controllers/composeContextController";
@@ -410,8 +400,6 @@ import { clearAllAgentToolCaches } from "../../agent/tools";
 import { clearAgentConversationState } from "./agentConversationCleanup";
 import { renderShortcuts } from "./shortcuts";
 import { loadConversationHistoryScope } from "./historyLoader";
-import { loadClaudeConversationHistoryScope } from "../../claudeCode/historyLoader";
-import { loadCodexConversationHistoryScope } from "../../codexAppServer/historyLoader";
 import {
   buildClaudeScope,
   getClaudeRuntimeModelEntries,
@@ -474,18 +462,7 @@ import {
 import { isClaudePaperPortalItem } from "../../claudeCode/portal";
 import {
   clearClaudeConversation,
-  createClaudeGlobalConversation,
-  createClaudePaperConversation,
-  deleteClaudeConversation,
-  deleteClaudeTurnMessages,
-  ensureClaudePaperConversation,
-  getClaudeConversationSummary,
-  listClaudeGlobalConversations,
-  listClaudePaperConversations,
-  loadClaudeConversation,
-  setClaudeConversationTitle,
   touchClaudeConversationTitle,
-  upsertClaudeConversationSummary,
 } from "../../claudeCode/store";
 import {
   createClaudeGlobalPortalItem,
@@ -493,18 +470,7 @@ import {
 } from "../../claudeCode/portal";
 import {
   clearCodexConversation,
-  createCodexGlobalConversation,
-  createCodexPaperConversation,
-  deleteCodexConversation,
-  deleteCodexTurnMessages,
-  ensureCodexPaperConversation,
-  getCodexConversationSummary,
-  listCodexGlobalConversations,
-  listCodexPaperConversations,
-  loadCodexConversation,
-  setCodexConversationTitle,
   touchCodexConversationTitle,
-  upsertCodexConversationSummary,
 } from "../../codexAppServer/store";
 import {
   createCodexGlobalPortalItem,
@@ -1125,9 +1091,10 @@ export function setupHandlers(
                 const activeKey = Number(
                   activeGlobalConversationByLibrary.get(libraryID) || 0,
                 );
-                return isUpstreamGlobalConversationKey(activeKey)
-                  ? Math.floor(activeKey)
-                  : 0;
+                if (!isUpstreamGlobalConversationKey(activeKey)) return 0;
+                return activeKey === GLOBAL_CONVERSATION_KEY_BASE
+                  ? buildDefaultUpstreamGlobalConversationKey(libraryID)
+                  : Math.floor(activeKey);
               })();
       if (nextConversationKey > 0) {
         await switchGlobalConversation(nextConversationKey);
@@ -1173,48 +1140,18 @@ export function setupHandlers(
     updateClaudeSystemToggle();
     void refreshGlobalHistoryHeader();
   };
-  const ensureClaudeConversationCatalogEntry = async (params: {
-    conversationKey: number;
-    libraryID: number;
-    kind: "global" | "paper";
-    paperItemID?: number;
-  }) => {
-    const existing = await getClaudeConversationSummary(params.conversationKey);
-    if (existing) return existing;
-    await upsertClaudeConversationSummary({
-      conversationKey: params.conversationKey,
-      libraryID: params.libraryID,
-      kind: params.kind,
-      paperItemID: params.paperItemID,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    });
-    return getClaudeConversationSummary(params.conversationKey);
-  };
-  const ensureCodexConversationCatalogEntry = async (params: {
-    conversationKey: number;
-    libraryID: number;
-    kind: "global" | "paper";
-    paperItemID?: number;
-  }) => {
-    const existing = await getCodexConversationSummary(params.conversationKey);
-    if (existing) return existing;
-    await upsertCodexConversationSummary({
-      conversationKey: params.conversationKey,
-      libraryID: params.libraryID,
-      kind: params.kind,
-      paperItemID: params.paperItemID,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    });
-    return getCodexConversationSummary(params.conversationKey);
-  };
   const isClaudeConversationDraft = async (conversationKey: number) => {
-    const summary = await getClaudeConversationSummary(conversationKey);
+    const summary = await conversationRepository.getCatalogEntry({
+      system: "claude_code",
+      conversationKey,
+    });
     return Boolean(summary && (summary.userTurnCount || 0) === 0);
   };
   const isCodexConversationDraft = async (conversationKey: number) => {
-    const summary = await getCodexConversationSummary(conversationKey);
+    const summary = await conversationRepository.getCatalogEntry({
+      system: "codex",
+      conversationKey,
+    });
     return Boolean(summary && (summary.userTurnCount || 0) === 0);
   };
   const resolveCurrentNoteParentItem = (): Zotero.Item | null => {
@@ -2120,6 +2057,13 @@ export function setupHandlers(
     itemId: number,
     paperContext: PaperContextRef,
   ): PaperContextSendMode => {
+    if (
+      isPaperContextFullTextOnlySourceMode(
+        resolvePaperContentSourceMode(itemId, paperContext),
+      )
+    ) {
+      return "full-sticky";
+    }
     const explicitMode = getPaperModeOverride(itemId, paperContext);
     if (explicitMode) return explicitMode;
     const autoLoadedPaperContext =
@@ -2845,7 +2789,9 @@ export function setupHandlers(
       `llm-paper-picker-item llm-paper-picker-group-row llm-paper-chip-menu-row ${paperSourceClassName(options?.contentSourceMode)}`,
       {
         type: "button",
-        title: `Jump to ${paperContext.title}`,
+        title: options?.sourceOption
+          ? options.description || options.title || paperContext.title
+          : `Jump to ${paperContext.title}`,
       },
     ) as HTMLButtonElement;
     if (options?.sourceOption) {
@@ -3246,9 +3192,19 @@ export function setupHandlers(
     paperContext: PaperContextRef,
     options?: { sticky?: boolean },
   ) => {
-    const menu = ensurePaperChipMenu();
     const ownerDoc = body.ownerDocument;
-    if (!menu || !ownerDoc) return;
+    if (!ownerDoc) return;
+    const currentMode =
+      (chip.dataset.contentSource as PaperContentSourceMode) ||
+      paperContext.contentSourceMode ||
+      "text";
+    const sourceOptions = buildPaperSourceOptions(paperContext);
+    if (!hasPaperChipSourceMenuOption(sourceOptions)) {
+      closePaperChipMenu();
+      return;
+    }
+    const menu = ensurePaperChipMenu();
+    if (!menu) return;
     clearPaperChipMenuHideTimer();
     if (paperChipMenuAnchor && paperChipMenuAnchor !== chip) {
       paperChipMenuAnchor.classList.remove("llm-paper-context-chip-menu-open");
@@ -3263,11 +3219,6 @@ export function setupHandlers(
     paperChipMenuSticky = options?.sticky === true;
     paperChipMenuTarget = paperContext;
     menu.innerHTML = "";
-    const currentMode =
-      (chip.dataset.contentSource as PaperContentSourceMode) ||
-      paperContext.contentSourceMode ||
-      "text";
-    const sourceOptions = buildPaperSourceOptions(paperContext);
     for (const sourceOption of sourceOptions) {
       menu.appendChild(
         buildPaperChipMenuCard(ownerDoc, sourceOption.paperContext, {
@@ -3436,11 +3387,18 @@ export function setupHandlers(
     const removable = options?.removable === true;
     const fullText = options?.fullText === true;
     const contentSourceMode = options?.contentSourceMode || "text";
+    const sourceOptions = buildPaperSourceOptions(paperContext);
+    const hasSourceMenu = hasPaperChipSourceMenuOption(sourceOptions);
+    const hasReaderFocus =
+      isPaperContextReaderFocusableSourceMode(contentSourceMode);
+    const isStaticChip = !hasSourceMenu && !hasReaderFocus;
     const chip = createElement(
       ownerDoc,
       "div",
       "llm-selected-context llm-paper-context-chip",
     );
+    chip.dataset.paperContextMenu = hasSourceMenu ? "true" : "false";
+    chip.classList.toggle("llm-paper-context-chip-static", isStaticChip);
     if (options?.autoLoaded) {
       chip.classList.add("llm-paper-context-chip-autoloaded");
       chip.dataset.autoLoaded = "true";
@@ -3529,7 +3487,8 @@ export function setupHandlers(
     chipExpanded.appendChild(
       buildPaperChipMenuCard(ownerDoc, paperContext, { contentSourceMode }),
     );
-    chip.append(chipExpanded, chipHeader);
+    chip.append(chipExpanded);
+    chip.append(chipHeader);
 
     // Restore expanded (sticky) state after re-render
     const currentExpandedId = item
@@ -6092,7 +6051,12 @@ export function setupHandlers(
       });
       const kind = resolveDisplayConversationKind(item);
       const libraryID = Number(item.libraryID || 0);
-      if (!storageSystem || !kind || !Number.isFinite(libraryID) || libraryID <= 0) {
+      if (
+        !storageSystem ||
+        !kind ||
+        !Number.isFinite(libraryID) ||
+        libraryID <= 0
+      ) {
         return true;
       }
       if (kind === "global") {
@@ -6169,11 +6133,10 @@ export function setupHandlers(
           ? clearCodexConversation(conversationKey)
           : clearStoredConversation(conversationKey),
     resetConversationTitle: (conversationKey) =>
-      isClaudeConversationSystem()
-        ? setClaudeConversationTitle(conversationKey, "")
-        : isCodexConversationSystem()
-          ? setCodexConversationTitle(conversationKey, "")
-          : clearConversationTitle(conversationKey),
+      conversationRepository.clearCatalogTitle({
+        system: getConversationSystem(),
+        conversationKey,
+      }),
     clearOwnerAttachmentRefs,
     removeConversationAttachmentFiles,
     refreshChatPreservingScroll,

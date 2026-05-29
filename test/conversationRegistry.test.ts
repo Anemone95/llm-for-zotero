@@ -1,5 +1,6 @@
 import { assert } from "chai";
 import {
+  buildConversationID,
   inferSinglePaperItemIdFromContextRows,
   registerConversationScope,
   validateConversationScope,
@@ -24,7 +25,7 @@ describe("conversation registry", function () {
         queryAsync: async (sql: string) => {
           if (
             sql.includes("FROM llm_for_zotero_conversation_registry") &&
-            sql.includes("WHERE conversation_key = ?")
+            sql.includes("WHERE legacy_conversation_key = ?")
           ) {
             return [
               {
@@ -133,7 +134,7 @@ describe("conversation registry", function () {
         queryAsync: async (sql: string, params?: unknown[]) => {
           if (
             sql.includes("FROM llm_for_zotero_conversation_registry") &&
-            sql.includes("WHERE conversation_key = ?")
+            sql.includes("WHERE legacy_conversation_key = ?")
           ) {
             return [row];
           }
@@ -142,7 +143,7 @@ describe("conversation registry", function () {
             if (sql.includes("invalid_reason = NULL")) {
               row.invalidReason = "";
             }
-            row.updatedAt = Number(params?.[7] || row.updatedAt);
+            row.updatedAt = Number(params?.[8] || row.updatedAt);
           }
           return [];
         },
@@ -169,6 +170,81 @@ describe("conversation registry", function () {
     assert.equal(row.valid, 0);
     assert.equal(row.invalidReason, "ambiguous paper context evidence");
     assert.equal(await validateConversationScope(scope), false);
+  });
+
+  it("refuses to reuse one legacy key for a different canonical chat", async function () {
+    const rows = new Map<number, Record<string, unknown>>();
+    globalScope.Zotero = {
+      Profile: {
+        dir: "/tmp/llm-for-zotero-registry-test",
+      },
+      DB: {
+        queryAsync: async (sql: string, params?: unknown[]) => {
+          const queryParams = Array.isArray(params) ? params : [];
+          if (
+            sql.includes("FROM llm_for_zotero_conversation_registry") &&
+            sql.includes("WHERE legacy_conversation_key = ?")
+          ) {
+            const row = rows.get(Number(queryParams[0]));
+            return row ? [row] : [];
+          }
+          if (sql.includes("INSERT INTO llm_for_zotero_conversation_registry")) {
+            const [
+              conversationID,
+              legacyConversationKey,
+              system,
+              kind,
+              profileSignature,
+              libraryID,
+              paperItemID,
+            ] = queryParams;
+            rows.set(Number(legacyConversationKey), {
+              conversationID,
+              conversationKey: legacyConversationKey,
+              system,
+              kind,
+              profileSignature,
+              libraryID,
+              paperItemID,
+              valid: 1,
+            });
+          }
+          return [];
+        },
+      },
+    };
+
+    const conversationKey = 2_000_000_001;
+    assert.equal(
+      await registerConversationScope({
+        conversationKey,
+        system: "upstream",
+        kind: "global",
+        profileSignature: "profile-dev",
+        libraryID: 1,
+      }),
+      true,
+    );
+    assert.equal(
+      rows.get(conversationKey)?.conversationID,
+      buildConversationID({
+        conversationKey,
+        system: "upstream",
+        kind: "global",
+        profileSignature: "profile-dev",
+        libraryID: 1,
+      }),
+    );
+    assert.equal(
+      await registerConversationScope({
+        conversationKey,
+        system: "upstream",
+        kind: "global",
+        profileSignature: "profile-dev",
+        libraryID: 2,
+      }),
+      false,
+    );
   });
 
   it("allows validation in test contexts where Zotero DB is unavailable", async function () {

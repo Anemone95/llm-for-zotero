@@ -14,11 +14,8 @@ import {
   setPendingRequestId,
 } from "./state";
 import { clearConversationSummary as clearConversationSummaryFromCache } from "./conversationSummaryCache";
-import {
-  clearConversation as clearStoredConversation,
-  deleteGlobalConversation,
-  deletePaperConversation,
-} from "../../utils/chatStore";
+import { conversationRepository } from "../../core/conversations/repository";
+import { clearConversation as clearStoredConversation } from "../../utils/chatStore";
 import {
   buildPaperStateKey,
   getLastUsedPaperConversationKey,
@@ -28,10 +25,7 @@ import {
 } from "./prefHelpers";
 import { clearOwnerAttachmentRefs } from "../../utils/attachmentRefStore";
 import { removeConversationAttachmentFiles } from "./attachmentStorage";
-import {
-  clearClaudeConversation,
-  deleteClaudeConversation,
-} from "../../claudeCode/store";
+import { clearClaudeConversation } from "../../claudeCode/store";
 import {
   buildClaudeScope,
   invalidateClaudeConversationSession,
@@ -48,10 +42,7 @@ import {
   removeLastUsedClaudeGlobalConversationKey,
   removeLastUsedClaudePaperConversationKey,
 } from "../../claudeCode/prefs";
-import {
-  clearCodexConversation,
-  deleteCodexConversation,
-} from "../../codexAppServer/store";
+import { clearCodexConversation } from "../../codexAppServer/store";
 import { archiveCodexAppServerThread } from "../../codexAppServer/nativeClient";
 import {
   activeCodexGlobalConversationByLibrary,
@@ -69,11 +60,13 @@ import {
   clearAgentConversationState,
   clearDeletedAgentConversationState,
 } from "./agentConversationCleanup";
+import { resolveConversationRefForKey } from "../../shared/conversationRef";
 import { validateConversationScope } from "../../shared/conversationRegistry";
 
 type ConversationDeletionKind = "global" | "paper";
 
 export type ConversationDeletionTarget = {
+  conversationID?: string;
   conversationKey: number;
   kind: ConversationDeletionKind;
   conversationSystem: ConversationSystem;
@@ -110,12 +103,9 @@ export type ConversationDeletionResult = {
 
 type ConversationDeletionOperations = {
   clearStoredConversation: typeof clearStoredConversation;
-  deleteGlobalConversation: typeof deleteGlobalConversation;
-  deletePaperConversation: typeof deletePaperConversation;
   clearClaudeConversation: typeof clearClaudeConversation;
-  deleteClaudeConversation: typeof deleteClaudeConversation;
   clearCodexConversation: typeof clearCodexConversation;
-  deleteCodexConversation: typeof deleteCodexConversation;
+  deleteCatalogEntry: (target: ConversationDeletionTarget) => Promise<void>;
   clearOwnerAttachmentRefs: typeof clearOwnerAttachmentRefs;
   removeConversationAttachmentFiles: typeof removeConversationAttachmentFiles;
   archiveCodexThread: (threadId: string) => Promise<void>;
@@ -145,6 +135,10 @@ function normalizePositiveInt(value: unknown): number {
 }
 
 function normalizeProviderSessionId(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeConversationID(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
@@ -194,12 +188,15 @@ function buildOperations(
 ): ConversationDeletionOperations {
   return {
     clearStoredConversation,
-    deleteGlobalConversation,
-    deletePaperConversation,
     clearClaudeConversation,
-    deleteClaudeConversation,
     clearCodexConversation,
-    deleteCodexConversation,
+    deleteCatalogEntry: async (target) => {
+      await conversationRepository.deleteCatalogEntry({
+        system: target.conversationSystem,
+        kind: target.kind,
+        conversationKey: target.conversationKey,
+      });
+    },
     clearOwnerAttachmentRefs,
     removeConversationAttachmentFiles,
     archiveCodexThread: (threadId) =>
@@ -264,15 +261,7 @@ async function deleteCatalogRow(
   operations: ConversationDeletionOperations,
   target: ConversationDeletionTarget,
 ): Promise<void> {
-  if (target.conversationSystem === "claude_code") {
-    await operations.deleteClaudeConversation(target.conversationKey);
-  } else if (target.conversationSystem === "codex") {
-    await operations.deleteCodexConversation(target.conversationKey);
-  } else if (target.kind === "global") {
-    await operations.deleteGlobalConversation(target.conversationKey);
-  } else {
-    await operations.deletePaperConversation(target.conversationKey);
-  }
+  await operations.deleteCatalogEntry(target);
 }
 
 function clearRememberedSelection(target: ConversationDeletionTarget): void {
@@ -397,13 +386,20 @@ export async function finalizeConversationDeletion(
     return result;
   }
 
+  const targetConversationID = normalizeConversationID(target.conversationID);
+  const resolvedRef = targetConversationID
+    ? null
+    : await resolveConversationRefForKey(conversationKey);
+  const conversationID = targetConversationID || resolvedRef?.conversationID || "";
   const normalizedTarget: ConversationDeletionTarget = {
     ...target,
+    conversationID: conversationID || undefined,
     conversationKey,
     libraryID,
     paperItemID: normalizePositiveInt(target.paperItemID) || undefined,
   };
   const validScope = await validateConversationScope({
+    conversationID: normalizedTarget.conversationID,
     conversationKey,
     system: normalizedTarget.conversationSystem,
     kind: normalizedTarget.kind,

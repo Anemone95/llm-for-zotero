@@ -1,10 +1,12 @@
 import {
   config,
   ASSISTANT_NOTE_MAP_PREF_KEY,
+  buildDefaultUpstreamGlobalConversationKey,
   CUSTOM_SHORTCUT_ID_PREFIX,
   FONT_SCALE_DEFAULT_PERCENT,
   FONT_SCALE_MIN_PERCENT,
   FONT_SCALE_MAX_PERCENT,
+  GLOBAL_CONVERSATION_KEY_BASE,
   isUpstreamGlobalConversationKey,
 } from "./constants";
 import type { CustomShortcut, ReasoningLevelSelection } from "./types";
@@ -525,6 +527,9 @@ export function getLockedGlobalConversationKey(
   const normalized = Number(raw);
   if (!Number.isFinite(normalized) || normalized <= 0) return null;
   const conversationKey = Math.floor(normalized);
+  if (conversationKey === GLOBAL_CONVERSATION_KEY_BASE) {
+    return buildDefaultUpstreamGlobalConversationKey(libraryID);
+  }
   return isUpstreamGlobalConversationKey(conversationKey)
     ? conversationKey
     : null;
