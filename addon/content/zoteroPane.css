@@ -5690,65 +5690,42 @@ label.llm-search-results-item:hover {
 }
 
 .llm-quote-card {
-  border: 1px solid color-mix(in srgb, var(--stroke-secondary) 78%, transparent);
-  border-radius: 6px;
-  background: color-mix(
+  --llm-quote-card-surface: color-mix(
     in srgb,
     var(--material-background) 96%,
     var(--fill-primary) 4%
   );
+  --llm-quote-card-rail: var(--color-accent);
+  border: none;
+  border-radius: 6px;
+  background: var(--llm-quote-card-surface);
+  cursor: pointer;
   overflow: hidden;
 }
 
-.llm-quote-card-header {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  grid-template-areas: "toggle title citation";
-  align-items: center;
-  column-gap: 6px;
-  row-gap: 0;
-  padding: 7px 9px;
-  cursor: pointer;
-  user-select: none;
+.llm-quote-card[data-expanded="false"] {
+  background: transparent;
 }
 
-.llm-quote-card[data-expanded="false"] .llm-quote-card-header {
-  grid-template-areas:
-    "toggle title citation"
-    ". preview preview";
-  row-gap: 4px;
+.llm-quote-card[data-expanded="false"]:hover,
+.llm-quote-card[data-expanded="false"]:focus-within {
+  background: var(--llm-quote-card-surface);
 }
 
-.llm-quote-card-header:hover {
-  background: color-mix(in srgb, var(--fill-primary) 5%, transparent);
+.llm-quote-card-content {
+  padding: 8px 10px 3px;
 }
 
-.llm-quote-card-header:focus-visible {
+.llm-quote-card-content:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: -2px;
 }
 
-.llm-quote-card-toggle {
-  grid-area: toggle;
-  color: var(--fill-secondary);
-  font-size: 11px;
-  line-height: 1;
-  width: 12px;
-  text-align: center;
-}
-
-.llm-quote-card-title {
-  grid-area: title;
-  color: var(--fill-primary);
-  font-size: var(--llm-fs-11);
-  font-weight: 600;
-  white-space: nowrap;
-}
-
 .llm-quote-card-preview {
   display: none;
-  grid-area: preview;
   min-width: 0;
+  border-left: 3px solid var(--llm-quote-card-rail);
+  padding-left: 9px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: normal;
@@ -5766,15 +5743,15 @@ label.llm-search-results-item:hover {
 }
 
 .llm-quote-card-citation {
-  grid-area: citation;
+  display: flex;
+  justify-content: flex-end;
   min-width: 0;
-  justify-self: end;
+  padding: 0 9px 7px;
 }
 
 .llm-quote-card-body {
-  border-top: 1px solid
-    color-mix(in srgb, var(--stroke-secondary) 70%, transparent);
-  padding: 8px 10px 9px 27px;
+  border-left: 3px solid var(--llm-quote-card-rail);
+  padding: 0 0 0 10px;
   color: var(--fill-secondary);
   font-style: italic;
   line-height: 1.5;

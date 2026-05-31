@@ -2563,25 +2563,16 @@ function createQuoteCardElement(params: {
 }): HTMLElement {
   const wrapper = params.ownerDoc.createElement("div");
   wrapper.className = "llm-quote-card llm-quote-citation-anchor";
-  wrapper.dataset.expanded = "true";
+  wrapper.dataset.expanded = "false";
   if (params.quoteCitationId) {
     wrapper.dataset.quoteCitationId = params.quoteCitationId;
   }
 
-  const header = params.ownerDoc.createElement("div");
-  header.className = "llm-quote-card-header";
-  header.setAttribute("role", "button");
-  header.setAttribute("tabindex", "0");
-  header.setAttribute("aria-expanded", "true");
-
-  const toggleIcon = params.ownerDoc.createElement("span");
-  toggleIcon.className = "llm-quote-card-toggle";
-  toggleIcon.setAttribute("aria-hidden", "true");
-  toggleIcon.textContent = "▾";
-
-  const title = params.ownerDoc.createElement("span");
-  title.className = "llm-quote-card-title";
-  title.textContent = "Evidence quote";
+  const content = params.ownerDoc.createElement("div");
+  content.className = "llm-quote-card-content";
+  content.setAttribute("role", "button");
+  content.setAttribute("tabindex", "0");
+  content.setAttribute("aria-expanded", "false");
 
   const preview = params.ownerDoc.createElement("span");
   preview.className = "llm-quote-card-preview";
@@ -2591,16 +2582,14 @@ function createQuoteCardElement(params: {
   citation.className = "llm-quote-card-citation";
   citation.appendChild(params.citationContent);
 
-  header.append(toggleIcon, title, preview, citation);
-
   const body = params.ownerDoc.createElement("div");
   body.className = "llm-quote-card-body";
   body.textContent = sanitizeText(params.quoteText || "").trim();
+  content.append(preview, body);
 
   const setExpanded = (expanded: boolean) => {
     wrapper.dataset.expanded = expanded ? "true" : "false";
-    header.setAttribute("aria-expanded", expanded ? "true" : "false");
-    toggleIcon.textContent = expanded ? "▾" : "▸";
+    content.setAttribute("aria-expanded", expanded ? "true" : "false");
   };
   const toggleExpanded = () => {
     setExpanded(wrapper.dataset.expanded !== "true");
@@ -2616,13 +2605,13 @@ function createQuoteCardElement(params: {
       ),
     );
   };
-  header.addEventListener("click", (event: Event) => {
+  wrapper.addEventListener("click", (event: Event) => {
     if (shouldIgnoreToggle(event.target)) return;
     event.preventDefault();
     event.stopPropagation();
     toggleExpanded();
   });
-  header.addEventListener("keydown", (event: KeyboardEvent) => {
+  content.addEventListener("keydown", (event: KeyboardEvent) => {
     if (event.key !== "Enter" && event.key !== " ") return;
     if (shouldIgnoreToggle(event.target)) return;
     event.preventDefault();
@@ -2630,7 +2619,7 @@ function createQuoteCardElement(params: {
     toggleExpanded();
   });
 
-  wrapper.append(header, body);
+  wrapper.append(content, citation);
   return wrapper;
 }
 
