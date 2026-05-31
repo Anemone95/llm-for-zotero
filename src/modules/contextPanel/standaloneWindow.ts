@@ -71,6 +71,7 @@ import {
   type HistorySearchDocument,
 } from "./setupHandlers/controllers/historySearchController";
 import { createHistorySearchPopupController } from "./setupHandlers/controllers/historySearchPopupController";
+import { primeHistoryNavigationMode } from "./historyNavigationModeSync";
 import { resolveStandalonePaperTabLabel } from "./standaloneTabLabel";
 import {
   collapseDuplicateReusableConversationDrafts,
@@ -2082,23 +2083,52 @@ export function openStandaloneChat(options?: {
               sessionVersion: sv,
             });
             if (!portalItem) return false;
-            standaloneMode = "paper";
-            currentPaperItem = paperItem;
-            currentBasePaperItem = paperItem;
-            paperTab.classList.add("active");
-            openTab.classList.remove("active");
-            syncPaperTabLabel();
-            mountChatPanel(portalItem);
+            const targetModeSnapshot = primeHistoryNavigationMode({
+              system: currentConversationSystem,
+              libraryID:
+                Number(entry.libraryID || 0) ||
+                Number(paperItem.libraryID || 0) ||
+                getCurrentLibraryScopeID(),
+              mode: "paper",
+              conversationKey: entry.conversationKey,
+              paperItemID: paperItem.id,
+            });
+            let mounted = false;
+            try {
+              standaloneMode = "paper";
+              currentPaperItem = paperItem;
+              currentBasePaperItem = paperItem;
+              paperTab.classList.add("active");
+              openTab.classList.remove("active");
+              syncPaperTabLabel();
+              mountChatPanel(portalItem);
+              mounted = true;
+            } finally {
+              if (!mounted) targetModeSnapshot.restore();
+            }
           } else {
-            standaloneMode = "open";
-            paperTab.classList.remove("active");
-            openTab.classList.add("active");
             const portalItem = buildStandalonePortalItem({
               mode: "open",
               conversationKey: entry.conversationKey,
             });
             if (!portalItem) return false;
-            mountChatPanel(portalItem);
+            const targetModeSnapshot = primeHistoryNavigationMode({
+              system: currentConversationSystem,
+              libraryID:
+                Number(entry.libraryID || 0) || getCurrentLibraryScopeID(),
+              mode: "global",
+              conversationKey: entry.conversationKey,
+            });
+            let mounted = false;
+            try {
+              standaloneMode = "open";
+              paperTab.classList.remove("active");
+              openTab.classList.add("active");
+              mountChatPanel(portalItem);
+              mounted = true;
+            } finally {
+              if (!mounted) targetModeSnapshot.restore();
+            }
           }
           return true;
         } catch (err) {

@@ -153,6 +153,7 @@ import {
   findReusableConversationDraft,
   isReusableConversationDraft,
 } from "../../standaloneConversationResolution";
+import { primeHistoryNavigationMode } from "../../historyNavigationModeSync";
 
 type StatusLevel = "ready" | "warning" | "error";
 type PendingTurnDeletion = {
@@ -2406,31 +2407,63 @@ export function createHistoryLifecycleController(
         }
         return false;
       }
-      if (navigationDecision === "select-target-paper") {
-        const selected = await maybeSelectHistoryEntryPaperItem(
-          navigationDecision,
-          paperItem,
-        );
-        if (!selected) {
-          if (status) {
-            setStatus(status, t("Could not focus this paper"), "error");
+      const targetModeSnapshot = primeHistoryNavigationMode({
+        system: getConversationSystem(),
+        libraryID:
+          normalizeHistoryPaperItemID(entry.libraryID) ||
+          normalizeHistoryPaperItemID(paperItem.libraryID) ||
+          getCurrentLibraryID(),
+        mode: "paper",
+        conversationKey: entry.conversationKey,
+        paperItemID: paperItem.id,
+      });
+      let loaded = false;
+      try {
+        if (navigationDecision === "select-target-paper") {
+          const selected = await maybeSelectHistoryEntryPaperItem(
+            navigationDecision,
+            paperItem,
+          );
+          if (!selected) {
+            if (status) {
+              setStatus(status, t("Could not focus this paper"), "error");
+            }
+            return false;
           }
-          return false;
+        }
+        loaded = await switchPaperConversation(entry.conversationKey, {
+          paperItem,
+          allowedCatalogPaperItemID:
+            normalizeHistoryPaperItemID(entry.catalogPaperItemID) ||
+            normalizeHistoryPaperItemID(entry.paperItemID) ||
+            undefined,
+        });
+        if (!loaded && status) {
+          setStatus(status, t("Could not load this conversation"), "error");
+        }
+        return loaded;
+      } finally {
+        if (!loaded) {
+          targetModeSnapshot.restore();
         }
       }
-      const loaded = await switchPaperConversation(entry.conversationKey, {
-        paperItem,
-        allowedCatalogPaperItemID:
-          normalizeHistoryPaperItemID(entry.catalogPaperItemID) ||
-          normalizeHistoryPaperItemID(entry.paperItemID) ||
-          undefined,
-      });
-      if (!loaded && status) {
-        setStatus(status, t("Could not load this conversation"), "error");
-      }
-      return loaded;
     }
-    return switchGlobalConversation(entry.conversationKey);
+    const targetModeSnapshot = primeHistoryNavigationMode({
+      system: getConversationSystem(),
+      libraryID:
+        normalizeHistoryPaperItemID(entry.libraryID) || getCurrentLibraryID(),
+      mode: "global",
+      conversationKey: entry.conversationKey,
+    });
+    let loaded = false;
+    try {
+      loaded = await switchGlobalConversation(entry.conversationKey);
+      return loaded;
+    } finally {
+      if (!loaded) {
+        targetModeSnapshot.restore();
+      }
+    }
   };
 
   const historySearchPopupController = createHistorySearchPopupController({
