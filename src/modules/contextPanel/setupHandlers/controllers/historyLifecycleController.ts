@@ -5,6 +5,7 @@ import {
   loadTruncatedConversationIndexMatches,
   searchConversationIndexWithStatus,
   type ConversationSearchIndexMatch,
+  type ConversationSearchIndexResult,
 } from "../../../../shared/conversationSearchIndex";
 import {
   conversationRepository,
@@ -154,6 +155,24 @@ import {
   isReusableConversationDraft,
 } from "../../standaloneConversationResolution";
 import { primeHistoryNavigationMode } from "../../historyNavigationModeSync";
+
+type HistorySearchIndexFallbackStatus = Pick<
+  ConversationSearchIndexResult,
+  "catalogRowCount" | "matches" | "status"
+>;
+
+export function shouldFallbackToLoadedConversationHistorySearch(
+  indexed: HistorySearchIndexFallbackStatus,
+): boolean {
+  if (indexed.status === "unavailable" || indexed.status === "stale") {
+    return true;
+  }
+  return (
+    indexed.matches.length === 0 &&
+    indexed.catalogRowCount > 0 &&
+    indexed.status !== "ready"
+  );
+}
 
 type StatusLevel = "ready" | "warning" | "error";
 type PendingTurnDeletion = {
@@ -879,14 +898,7 @@ export function createHistoryLifecycleController(
         indexed = refreshed;
       }
     }
-    if (indexed.status === "unavailable") {
-      return await searchLoadedConversationHistory(libraryID, query);
-    }
-    if (
-      indexed.matches.length === 0 &&
-      indexed.catalogRowCount > 0 &&
-      indexed.status !== "ready"
-    ) {
+    if (shouldFallbackToLoadedConversationHistorySearch(indexed)) {
       return await searchLoadedConversationHistory(libraryID, query);
     }
     const entryByKey = new Map<number, ConversationHistoryEntry>();
