@@ -1673,6 +1673,34 @@ export function renderPendingActionCard(
       continue;
     }
 
+    if (field.type === "code_preview") {
+      const label = doc.createElement("label");
+      label.className = "llm-agent-hitl-label";
+      label.textContent = field.label;
+      fieldContainer.appendChild(label);
+
+      const pre = doc.createElement("pre");
+      pre.className = "llm-agent-hitl-code-preview";
+      const code = doc.createElement("code");
+      if (field.language) {
+        code.className = `language-${field.language}`;
+        code.setAttribute("data-language", field.language);
+      }
+      code.textContent = field.value;
+      pre.appendChild(code);
+      fieldContainer.appendChild(pre);
+      fieldAccessors.push({
+        field,
+        container: fieldContainer,
+        id: field.id,
+        getValue: () => null,
+        setDisabled: () => undefined,
+        isValid: () => true,
+      });
+      card.appendChild(fieldContainer);
+      continue;
+    }
+
     if (field.type === "select") {
       const label = doc.createElement("label");
       label.className = "llm-agent-hitl-label";

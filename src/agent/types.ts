@@ -76,6 +76,12 @@ export type AgentPendingField =
       placeholder?: string;
     })
   | (AgentPendingFieldBase & {
+      type: "code_preview";
+      label: string;
+      value: string;
+      language?: string;
+    })
+  | (AgentPendingFieldBase & {
       type: "select";
       label: string;
       value?: string;

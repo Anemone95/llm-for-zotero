@@ -4441,6 +4441,37 @@ label.llm-search-results-item:hover {
   background: color-mix(in srgb, var(--fill-quaternary) 92%, black 8%);
 }
 
+.llm-agent-hitl-code-preview {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--llm-action-surface-radius);
+  border: var(--llm-action-surface-border);
+  background: color-mix(in srgb, var(--fill-quaternary) 92%, black 8%);
+  color: var(--fill-primary);
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    "Courier New", monospace;
+  font-size: var(--llm-fs-11);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  user-select: text;
+}
+
+.llm-agent-hitl-code-preview code {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  white-space: inherit;
+  overflow-wrap: inherit;
+}
+
 /* Per-paper block used by review_table when a paper title is shown. */
 .llm-agent-hitl-paper-block {
   display: flex;

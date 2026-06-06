@@ -6,6 +6,7 @@ import {
   buildAgentTraceMarkdownForRender,
   getPendingActionButtonLayout,
   renderAgentTrace,
+  renderPendingActionCard,
 } from "../src/modules/contextPanel/agentTrace/render";
 import {
   resolveAssistantResponseMenuContent,
@@ -209,6 +210,16 @@ class FakeElement {
     const matches = this.classList.contains(className) ? [this] : [];
     for (const child of this.children) {
       matches.push(...child.findAllByClass(className));
+    }
+    return matches;
+  }
+
+  findAllByTag(tagName: string): FakeElement[] {
+    const normalized = tagName.toLowerCase();
+    const matches =
+      this.tagName.toLowerCase() === normalized ? [this] : [];
+    for (const child of this.children) {
+      matches.push(...child.findAllByTag(normalized));
     }
     return matches;
   }
@@ -1804,6 +1815,47 @@ describe("agentTrace render", function () {
       hasActionChooser: false,
       showsFooterExecuteButton: true,
     });
+  });
+
+  it("renders run_command commands as a read-only code preview", function () {
+    const command = 'python3 analyze.py --input "data set.csv"';
+    const action: AgentPendingAction = {
+      toolName: "run_command",
+      title: "Run shell command",
+      description: "Execute a command on your local machine.",
+      confirmLabel: "Run",
+      cancelLabel: "Cancel",
+      fields: [
+        {
+          type: "code_preview",
+          id: "command",
+          label: "Command",
+          value: command,
+          language: "sh",
+        },
+        {
+          type: "text",
+          id: "cwd",
+          label: "Working directory",
+          value: "/tmp/project",
+        },
+      ],
+    };
+
+    const card = renderPendingActionCard(fakeDocument, {
+      requestId: "run-command-preview",
+      action,
+    }) as unknown as FakeElement;
+    const preview = card.findByClass("llm-agent-hitl-code-preview");
+    const code = preview?.findAllByTag("code")[0];
+    const inputs = card.findAllByTag("input");
+
+    assert.exists(preview);
+    assert.exists(code);
+    assert.equal(code?.textContent, command);
+    assert.equal(code?.attributes["data-language"], "sh");
+    assert.lengthOf(inputs, 1);
+    assert.equal((inputs[0] as FakeElement & { value?: string }).value, "/tmp/project");
   });
 
   it("removes repetitive filler chatter between tool steps", function () {

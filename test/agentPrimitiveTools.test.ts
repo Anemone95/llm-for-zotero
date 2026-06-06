@@ -1270,6 +1270,28 @@ describe("primitive agent tools", function () {
     }
   });
 
+  it("run_command confirmation uses a code preview for the command", function () {
+    const tool = createRunCommandTool();
+    const command = 'python3 analyze.py --input "data set.csv"';
+    const validated = tool.validate({
+      command,
+      cwd: "/tmp/project",
+    });
+    assert.isTrue(validated.ok);
+    if (!validated.ok) return;
+
+    const pending = tool.createPendingAction?.(validated.value, baseContext);
+    const commandField = pending?.fields[0] as Extract<
+      NonNullable<typeof pending>["fields"][number],
+      { type: "code_preview" }
+    >;
+
+    assert.equal(commandField.type, "code_preview");
+    assert.equal(commandField.label, "Command");
+    assert.equal(commandField.value, command);
+    assert.equal(commandField.language, "sh");
+  });
+
   it("run_command and file_io keep unknown writes gated after confirmation", async function () {
     const commandTool = createRunCommandTool();
     const fileTool = createFileIOTool();
