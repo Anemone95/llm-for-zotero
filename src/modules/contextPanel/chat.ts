@@ -6860,6 +6860,8 @@ export async function sendQuestion(
     reasoning,
     advanced,
   });
+  const shouldPersistTurn =
+    effectiveRequestConfig.providerProtocol !== "web_sync";
   const isCodexNativeTurn =
     effectiveConversationSystem === "codex" &&
     effectiveRequestConfig.authMode === "codex_app_server";
@@ -7128,32 +7130,34 @@ export async function sendQuestion(
   } else {
     history.push(userMessage);
   }
-  void persistConversationMessage(
-    conversationKey,
-    {
-      role: "user",
-      text: userMessage.text,
-      timestamp: userMessage.timestamp,
-      runMode: userMessage.runMode,
-      agentRunId: userMessage.agentRunId,
-      selectedText: userMessage.selectedText,
-      selectedTexts: userMessage.selectedTexts,
-      selectedTextSources: userMessage.selectedTextSources,
-      selectedTextPaperContexts: userMessage.selectedTextPaperContexts,
-      paperContexts: userMessage.paperContexts,
-      fullTextPaperContexts: userMessage.fullTextPaperContexts,
-      citationPaperContexts: userMessage.citationPaperContexts,
-      selectedCollectionContexts: userMessage.selectedCollectionContexts,
-      selectedTagContexts: userMessage.selectedTagContexts,
-      screenshotImages: userMessage.screenshotImages,
-      attachments: userMessage.attachments,
-      modelAttachments: userMessage.modelAttachments,
-      modelName: userMessage.modelName,
-      modelEntryId: userMessage.modelEntryId,
-      modelProviderLabel: userMessage.modelProviderLabel,
-    },
-    effectiveStorageSystem,
-  );
+  if (shouldPersistTurn) {
+    void persistConversationMessage(
+      conversationKey,
+      {
+        role: "user",
+        text: userMessage.text,
+        timestamp: userMessage.timestamp,
+        runMode: userMessage.runMode,
+        agentRunId: userMessage.agentRunId,
+        selectedText: userMessage.selectedText,
+        selectedTexts: userMessage.selectedTexts,
+        selectedTextSources: userMessage.selectedTextSources,
+        selectedTextPaperContexts: userMessage.selectedTextPaperContexts,
+        paperContexts: userMessage.paperContexts,
+        fullTextPaperContexts: userMessage.fullTextPaperContexts,
+        citationPaperContexts: userMessage.citationPaperContexts,
+        selectedCollectionContexts: userMessage.selectedCollectionContexts,
+        selectedTagContexts: userMessage.selectedTagContexts,
+        screenshotImages: userMessage.screenshotImages,
+        attachments: userMessage.attachments,
+        modelAttachments: userMessage.modelAttachments,
+        modelName: userMessage.modelName,
+        modelEntryId: userMessage.modelEntryId,
+        modelProviderLabel: userMessage.modelProviderLabel,
+      },
+      effectiveStorageSystem,
+    );
+  }
 
   const assistantMessage: Message = {
     ...optimisticAssistantMessage,
@@ -7190,6 +7194,7 @@ export async function sendQuestion(
   const persistAssistantOnce = async () => {
     if (assistantPersisted) return;
     assistantPersisted = true;
+    if (!shouldPersistTurn) return;
     await persistConversationMessage(
       conversationKey,
       {
