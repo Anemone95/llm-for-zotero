@@ -156,6 +156,7 @@ import {
   findLatestRetryPair,
   type EditLatestTurnMarker,
 } from "./chat";
+import { getWorkflowTestSendInterceptor } from "./workflowTestHooks";
 import {
   getActiveContextAttachmentFromTabs,
   addSelectedTextContext,
@@ -5872,7 +5873,14 @@ export function setupHandlers(
     },
     getLatestEditablePair,
     editLatestUserMessageAndRetry,
-    sendQuestion,
+    sendQuestion: async (opts) => {
+      const workflowTestSendInterceptor = getWorkflowTestSendInterceptor();
+      if (workflowTestSendInterceptor) {
+        await workflowTestSendInterceptor(opts);
+        return;
+      }
+      await sendQuestion(opts);
+    },
     retainClaudeRuntime: async (sendBody, sendItem) => {
       await retainClaudeRuntimeForBody(sendBody, sendItem);
     },
