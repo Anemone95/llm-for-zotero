@@ -9,7 +9,6 @@ import {
   registerReaderSelectionTracking,
   openStandaloneChat,
 } from "./modules/contextPanel";
-import { installWorkflowTestHarness } from "./modules/contextPanel/workflowTestHarness";
 import { resolveActiveLibraryID } from "./modules/contextPanel/portalScope";
 import { invalidatePaperSearchCache } from "./modules/contextPanel/paperSearch";
 import { initChatStore } from "./utils/chatStore";
@@ -261,7 +260,12 @@ async function onStartup() {
 
   // Mark initialized as true to confirm plugin loading status
   // outside of the plugin (e.g. scaffold testing process)
-  installWorkflowTestHarness(addon);
+  if (__env__ === "test" || __env__ === "development") {
+    const { installWorkflowTestHarness } = await import(
+      "./modules/contextPanel/workflowTestHarness"
+    );
+    installWorkflowTestHarness(addon);
+  }
   addon.data.initialized = true;
 
   scheduleDeferredStartupWork(conversationStoreReadiness);

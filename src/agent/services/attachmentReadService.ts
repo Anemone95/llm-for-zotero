@@ -1,8 +1,6 @@
 import { readAttachmentBytes } from "../../modules/contextPanel/attachmentStorage";
-import {
-  extractTextAttachmentContent,
-  type TextAttachmentSourceMode,
-} from "../../modules/contextPanel/textAttachmentExtraction";
+import { extractTextAttachmentContent } from "../../modules/contextPanel/textAttachmentExtraction";
+import type { TextAttachmentSourceMode } from "../../modules/contextPanel/contextAttachmentTypes";
 import { resolveContextAttachmentSupportFromMetadata } from "../../modules/contextPanel/contextAttachmentSupport";
 import {
   formatAttachmentSourceType,

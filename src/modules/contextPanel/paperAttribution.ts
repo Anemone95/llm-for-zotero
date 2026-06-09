@@ -3,7 +3,7 @@ import {
   resolveContextAttachmentSupport,
 } from "./contextAttachmentSupport";
 import { formatContextAttachmentSourceType } from "./contextSourceModes";
-import type { TextAttachmentSourceMode } from "./textAttachmentExtraction";
+import type { TextAttachmentSourceMode } from "./contextAttachmentTypes";
 import type { PaperContentSourceMode, PaperContextRef } from "./types";
 
 function normalizeText(value: unknown): string {

@@ -2,7 +2,7 @@ import { assert } from "chai";
 import type {
   WorkflowTestApi,
   WorkflowTestFixture,
-} from "../src/modules/contextPanel/workflowTestHarness";
+} from "../src/modules/contextPanel/workflowTestTypes";
 
 function getWorkflowTestApi(): WorkflowTestApi {
   const api = (Zotero as any).LLMForZotero?.api?.workflowTest;

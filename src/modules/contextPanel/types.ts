@@ -1,5 +1,5 @@
 import type { ReasoningLevel as LLMReasoningLevel } from "../../utils/llmClient";
-import type { ContextAttachmentSupport } from "./contextAttachmentSupport";
+import type { ContextAttachmentSupport } from "./contextAttachmentTypes";
 import type {
   SelectedTextSource,
   ChatAttachmentCategory,

@@ -3,7 +3,7 @@ import { ColumnOptions, DialogHelper } from "zotero-plugin-toolkit";
 import hooks from "./hooks";
 import { createZToolkit } from "./utils/ztoolkit";
 import type { getAgentApi } from "./agent";
-import type { WorkflowTestApi } from "./modules/contextPanel/workflowTestHarness";
+import type { WorkflowTestApi } from "./modules/contextPanel/workflowTestTypes";
 
 class Addon {
   public data: {
