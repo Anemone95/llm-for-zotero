@@ -3046,10 +3046,7 @@ function formatCodexNativeDiagnosticsStatus(
     diagnostics.historyVerified === undefined
       ? ""
       : `, history ${diagnostics.historyVerified ? "verified" : "unverified"}`;
-  const lifecycleLabel = diagnostics.lifecycleState
-    ? `, ${diagnostics.lifecycleState}`
-    : "";
-  return `Codex app-server ${threadShort} (${source}), library ${libraryLabel}, ${mcpLabel}${historyLabel}${lifecycleLabel}`;
+  return `Codex app-server ${threadShort} (${source}), library ${libraryLabel}, ${mcpLabel}${historyLabel}`;
 }
 
 function buildCodexNativeSkillContext(params: {
@@ -3059,6 +3056,7 @@ function buildCodexNativeSkillContext(params: {
   selectedTextPaperContexts?: (PaperContextRef | undefined)[];
   paperContexts?: PaperContextRef[];
   fullTextPaperContexts?: PaperContextRef[];
+  pinnedPaperContexts?: PaperContextRef[];
   selectedCollectionContexts?: CollectionContextRef[];
   selectedTagContexts?: TagContextRef[];
   screenshots?: string[];
@@ -3082,6 +3080,9 @@ function buildCodexNativeSkillContext(params: {
       : undefined,
     fullTextPaperContexts: params.fullTextPaperContexts?.length
       ? params.fullTextPaperContexts
+      : undefined,
+    pinnedPaperContexts: params.pinnedPaperContexts?.length
+      ? params.pinnedPaperContexts
       : undefined,
     selectedCollectionContexts: params.selectedCollectionContexts?.length
       ? params.selectedCollectionContexts
@@ -5954,6 +5955,7 @@ export async function retryLatestAssistantResponse(
                 retryPair.userMessage.selectedTextPaperContexts,
               paperContexts: contextPlan.paperContexts,
               fullTextPaperContexts: contextPlan.fullTextPaperContexts,
+              pinnedPaperContexts: retryPair.userMessage.pinnedPaperContexts,
               selectedCollectionContexts,
               selectedTagContexts,
               screenshots: allImages,
@@ -8040,6 +8042,7 @@ export async function sendQuestion(
               selectedTextPaperContexts: selectedTextPaperContextsForMessage,
               paperContexts: contextPlan.paperContexts,
               fullTextPaperContexts: contextPlan.fullTextPaperContexts,
+              pinnedPaperContexts: userMessage.pinnedPaperContexts,
               selectedCollectionContexts: selectedCollectionContextsForMessage,
               selectedTagContexts: selectedTagContextsForMessage,
               screenshots: allSendImages,

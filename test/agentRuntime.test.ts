@@ -3,10 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AgentRuntime } from "../src/agent/runtime";
-import {
-  clearAgentReadLedger,
-  clearAgentResourceLifecycleState,
-} from "../src/agent/context/resourceLifecycle";
+import { clearAgentReadLedger } from "../src/agent/context/resourceContextPlan";
 import { clearAgentCoverageLedger } from "../src/agent/context/coverageLedger";
 import { getAgentRunTrace } from "../src/agent/store/traceStore";
 import { clearAgentTranscriptStore } from "../src/agent/store/transcriptStore";
@@ -135,7 +132,6 @@ class MockAdapter implements AgentModelAdapter {
 
 describe("AgentRuntime", function () {
   beforeEach(function () {
-    clearAgentResourceLifecycleState();
     clearAgentReadLedger();
     clearAgentCoverageLedger();
     clearAgentTranscriptStore();
@@ -1680,7 +1676,7 @@ describe("AgentRuntime", function () {
     }
   });
 
-  it("emits resource lifecycle events and advances state only after completed runs", async function () {
+  it("emits current context events and renders context on repeated turns", async function () {
     const restoreDb = installMockDb();
     try {
       const request: AgentRuntimeRequest = {
@@ -1729,18 +1725,18 @@ describe("AgentRuntime", function () {
           firstEvents.push(event);
         },
       });
-      const firstLifecycleEvent = firstEvents.find(
+      const firstContextEvent = firstEvents.find(
         (event) =>
           event.type === "provider_event" &&
-          event.providerType === "agent_resource_lifecycle",
+          event.providerType === "agent_context_envelope",
       );
       assert.deepInclude(
-        firstLifecycleEvent?.type === "provider_event"
-          ? firstLifecycleEvent.payload
+        firstContextEvent?.type === "provider_event"
+          ? firstContextEvent.payload
           : {},
         {
-          lifecycleState: "setup-required",
-          contextInjection: "full",
+          selectedPaperCount: 1,
+          fullTextPaperCount: 0,
         },
       );
 
@@ -1785,21 +1781,26 @@ describe("AgentRuntime", function () {
           secondEvents.push(event);
         },
       });
-      const secondLifecycleEvent = secondEvents.find(
+      const secondContextEvent = secondEvents.find(
         (event) =>
           event.type === "provider_event" &&
-          event.providerType === "agent_resource_lifecycle",
+          event.providerType === "agent_context_envelope",
       );
       assert.deepInclude(
-        secondLifecycleEvent?.type === "provider_event"
-          ? secondLifecycleEvent.payload
+        secondContextEvent?.type === "provider_event"
+          ? secondContextEvent.payload
           : {},
         {
-          lifecycleState: "thin-followup",
-          contextInjection: "thin",
+          selectedPaperCount: 1,
+          fullTextPaperCount: 0,
         },
       );
-      assert.include(secondInitialUserMessage, "same Zotero resources");
+      assert.include(
+        secondInitialUserMessage,
+        "Zotero context for this turn:",
+      );
+      assert.include(secondInitialUserMessage, "Paper 1:");
+      assert.include(secondInitialUserMessage, 'title="Lifecycle Paper"');
 
       const failingRuntime = new AgentRuntime({
         registry: new AgentToolRegistry(),
@@ -1870,18 +1871,18 @@ describe("AgentRuntime", function () {
           retryEvents.push(event);
         },
       });
-      const retryLifecycleEvent = retryEvents.find(
+      const retryContextEvent = retryEvents.find(
         (event) =>
           event.type === "provider_event" &&
-          event.providerType === "agent_resource_lifecycle",
+          event.providerType === "agent_context_envelope",
       );
       assert.deepInclude(
-        retryLifecycleEvent?.type === "provider_event"
-          ? retryLifecycleEvent.payload
+        retryContextEvent?.type === "provider_event"
+          ? retryContextEvent.payload
           : {},
         {
-          lifecycleState: "setup-required",
-          contextInjection: "full",
+          selectedPaperCount: 1,
+          fullTextPaperCount: 0,
         },
       );
     } finally {

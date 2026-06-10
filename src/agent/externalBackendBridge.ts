@@ -47,6 +47,10 @@ import type {
   AgentRuntimeRequest,
 } from "./types";
 import type { PaperContentSourceMode, PaperContextRef } from "../shared/types";
+import {
+  buildTurnContextEnvelope,
+  renderTurnContextEnvelopeForModel,
+} from "./context/turnContextEnvelope";
 
 export type RunTurnParams = {
   request: AgentRuntimeRequest;
@@ -201,6 +205,7 @@ type ContextEnvelope = {
   pinnedPaperCount: number;
   attachmentCount: number;
   screenshotCount: number;
+  visibleContext?: string;
   selectedTexts: Array<{
     source: string;
     text: string;
@@ -1347,6 +1352,9 @@ function normalizeTagRefs(
 }
 
 function buildContextEnvelope(request: AgentRuntimeRequest): ContextEnvelope {
+  const turnContextEnvelope = buildTurnContextEnvelope(request);
+  const visibleContext =
+    renderTurnContextEnvelopeForModel(turnContextEnvelope) || undefined;
   const selectedTexts = Array.isArray(request.selectedTexts)
     ? request.selectedTexts
     : [];
@@ -1434,6 +1442,7 @@ function buildContextEnvelope(request: AgentRuntimeRequest): ContextEnvelope {
     screenshotCount: Array.isArray(request.screenshots)
       ? request.screenshots.length
       : 0,
+    visibleContext,
     selectedTexts: selectedTextRows,
     selectedPapers,
     selectedCollections,

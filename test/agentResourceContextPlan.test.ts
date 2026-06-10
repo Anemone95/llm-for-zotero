@@ -5,12 +5,9 @@ import {
   buildAgentResourceSignatureFromSnapshot,
   buildAgentResourceSnapshot,
   clearAgentReadLedger,
-  clearAgentResourceLifecycleState,
   commitAgentReadActivities,
-  commitAgentResourceContextPlan,
   diffAgentResourceSnapshots,
-  resolveAgentResourceLifecycleState,
-} from "../src/agent/context/resourceLifecycle";
+} from "../src/agent/context/resourceContextPlan";
 import {
   clearPersistedAgentEvidence,
   hydrateAgentEvidenceCache,
@@ -161,9 +158,8 @@ function allSystemText(messages: AgentModelMessage[]): string {
     .join("\n\n");
 }
 
-describe("agent resource lifecycle", function () {
+describe("agent resource context plan", function () {
   beforeEach(async function () {
-    clearAgentResourceLifecycleState();
     clearAgentReadLedger();
     clearAgentCoverageLedger();
     await clearAgentMemory(101);
@@ -315,93 +311,20 @@ describe("agent resource lifecycle", function () {
     assert.include(delta.changed[0].line, "Updated Title");
   });
 
-  it("resolves lifecycle states conservatively", function () {
-    const initial = buildAgentResourceSnapshot(request());
-    const initialSignature = buildAgentResourceSignatureFromSnapshot(initial);
-    const lifecycleEntry = {
-      resourceSnapshot: initial,
-      resourceSignature: initialSignature,
-      lastCompletedAt: 1,
-    };
-
-    assert.equal(
-      resolveAgentResourceLifecycleState({
-        resourceSnapshot: initial,
-        resourceSignature: initialSignature,
-      }),
-      "setup-required",
-    );
-    assert.equal(
-      resolveAgentResourceLifecycleState({
-        lifecycleEntry,
-        resourceSnapshot: initial,
-        resourceSignature: initialSignature,
-      }),
-      "thin-followup",
-    );
-
-    const changedPaper = buildAgentResourceSnapshot({
-      ...request(),
-      selectedPaperContexts: [paper(2, 20, "Another Paper")],
-    });
-    assert.equal(
-      resolveAgentResourceLifecycleState({
-        lifecycleEntry,
-        resourceSnapshot: changedPaper,
-        resourceSignature:
-          buildAgentResourceSignatureFromSnapshot(changedPaper),
-      }),
-      "resources-delta",
-    );
-
-    const changedBase = buildAgentResourceSnapshot(
-      request({ activeItemId: 999 }),
-    );
-    assert.equal(
-      resolveAgentResourceLifecycleState({
-        lifecycleEntry,
-        resourceSnapshot: changedBase,
-        resourceSignature: buildAgentResourceSignatureFromSnapshot(changedBase),
-      }),
-      "resources-changed",
-    );
-    assert.equal(
-      resolveAgentResourceLifecycleState({
-        lifecycleEntry,
-        resourceSnapshot: initial,
-        resourceSignature: initialSignature,
-        forcedSkillIds: ["write-note"],
-      }),
-      "resources-changed",
-    );
-
-    const fullTextChanged = buildAgentResourceSnapshot(
-      request({ fullTextPaperContexts: [paper(3, 30, "Full Text")] }),
-    );
-    assert.equal(
-      resolveAgentResourceLifecycleState({
-        lifecycleEntry,
-        resourceSnapshot: fullTextChanged,
-        resourceSignature:
-          buildAgentResourceSignatureFromSnapshot(fullTextChanged),
-      }),
-      "resources-changed",
-    );
-  });
-
-  it("renders full context on first turns", async function () {
+  it("renders current context on every turn", async function () {
     const req = request();
     const plan = buildAgentResourceContextPlan(req);
     const messages = await renderedInitialMessages(req, plan);
     const stableText = stableSystemText(messages);
     const userText = messageText(messages[messages.length - 1]);
 
-    assert.equal(plan.lifecycleState, "setup-required");
-    assert.equal(plan.injection, "full");
     assert.include(stableText, "Stable Zotero resource context:");
     assert.include(stableText, "Current Zotero context summary:");
     assert.include(stableText, "Retrieval-only paper refs:");
     assert.include(stableText, "Baseline Paper");
+    assert.include(userText, "Zotero context for this turn:");
+    assert.include(userText, "Paper 1:");
+    assert.include(userText, 'title="Baseline Paper"');
     assert.notInclude(userText, "Retrieval-only paper refs:");
     assert.include(userText, "User request:\nWhat should I do next?");
   });
@@ -454,35 +377,32 @@ describe("agent resource lifecycle", function () {
     );
   });
 
-  it("renders thin context for same-resource follow-ups", async function () {
-    const req = request();
-    const first = buildAgentResourceContextPlan(req);
-    commitAgentResourceContextPlan(first);
-
-    const second = buildAgentResourceContextPlan({
+  it("renders full current context for repeated resources", async function () {
+    const req = request({
+      selectedPaperContexts: [
+        paper(1, 10, "Baseline Paper"),
+        paper(2, 20, "Second Paper"),
+      ],
+    });
+    const plan = buildAgentResourceContextPlan({
       ...req,
       userText: "Now summarize the implication.",
     });
     const text = await renderedUserMessage(
       { ...req, userText: "Now summarize the implication." },
-      second,
+      plan,
     );
 
-    assert.equal(second.lifecycleState, "thin-followup");
-    assert.equal(second.injection, "thin");
-    assert.include(text, "same Zotero resources");
-    assert.notInclude(text, "Retrieval-only paper refs:");
+    assert.include(text, "Zotero context for this turn:");
+    assert.include(text, "Paper 1:");
+    assert.include(text, 'title="Baseline Paper"');
+    assert.include(text, "Paper 2:");
+    assert.include(text, 'title="Second Paper"');
+    assert.include(text, "the second paper");
     assert.include(text, "User request:\nNow summarize the implication.");
   });
 
-  it("renders delta context for selected paper and collection changes", async function () {
-    const firstReq = request({
-      selectedCollectionContexts: [
-        { collectionId: 1, libraryID: 1, name: "Old Collection" },
-      ],
-    });
-    commitAgentResourceContextPlan(buildAgentResourceContextPlan(firstReq));
-
+  it("renders full current context for selected paper and collection changes", async function () {
     const secondReq = request({
       selectedPaperContexts: [paper(2, 20, "New Paper")],
       selectedCollectionContexts: [
@@ -492,18 +412,17 @@ describe("agent resource lifecycle", function () {
     const second = buildAgentResourceContextPlan(secondReq);
     const text = await renderedUserMessage(secondReq, second);
 
-    assert.equal(second.lifecycleState, "resources-delta");
-    assert.equal(second.injection, "delta");
-    assert.include(
-      text,
-      "Zotero resource update for this continued agent turn",
-    );
+    assert.include(text, "Zotero context for this turn:");
+    assert.include(text, "Paper 1:");
+    assert.include(text, 'title="New Paper"');
+    assert.include(text, "Collection 1:");
+    assert.include(text, 'name="New Collection"');
     assert.include(text, "New Paper");
-    assert.include(text, "Old Collection");
     assert.include(text, "New Collection");
+    assert.notInclude(text, "Old Collection");
   });
 
-  it("forces full injection for contentful resources", function () {
+  it("renders contentful resources directly in the current turn", async function () {
     const cases: Array<Partial<AgentRuntimeRequest>> = [
       { selectedTexts: ["quoted text"] },
       {
@@ -531,38 +450,36 @@ describe("agent resource lifecycle", function () {
     ];
 
     for (const override of cases) {
-      clearAgentResourceLifecycleState();
-      const initialReq = request(override);
-      commitAgentResourceContextPlan(buildAgentResourceContextPlan(initialReq));
-      const followup = buildAgentResourceContextPlan({
-        ...initialReq,
+      const req = request({
+        ...override,
         userText: "follow up",
       });
-      assert.equal(followup.lifecycleState, "thin-followup");
-      assert.equal(followup.injection, "full");
+      const text = await renderedUserMessage(
+        req,
+        buildAgentResourceContextPlan(req),
+      );
+      assert.include(text, "Zotero context for this turn:");
+      assert.include(text, "User request:\nfollow up");
     }
   });
 
-  it("uses thin follow-ups for repeated full-text resources when prompt cache is available", async function () {
-    const initialReq = request({
+  it("keeps repeated full-text resources visible when prompt cache is available", async function () {
+    const followupReq = request({
       model: "gpt-5.4",
       apiBase: "https://api.openai.com/v1/responses",
       providerProtocol: "responses_api",
+      selectedPaperContexts: [paper(9, 90, "Full Text Paper")],
       fullTextPaperContexts: [paper(9, 90, "Full Text Paper")],
-    });
-    commitAgentResourceContextPlan(buildAgentResourceContextPlan(initialReq));
-
-    const followupReq = {
-      ...initialReq,
       userText: "Now compare the implication.",
-    };
+    });
     const followup = buildAgentResourceContextPlan(followupReq);
     const text = await renderedUserMessage(followupReq, followup);
 
-    assert.equal(followup.lifecycleState, "thin-followup");
-    assert.equal(followup.injection, "thin");
-    assert.include(text, "same Zotero resources");
-    assert.notInclude(text, "Full-text paper refs for this turn:");
+    assert.include(text, "Zotero context for this turn:");
+    assert.include(text, "Paper 1:");
+    assert.include(text, 'title="Full Text Paper"');
+    assert.include(text, 'source="selected, full-text"');
+    assert.include(text, "User request:\nNow compare the implication.");
   });
 
   it("preserves paper_read evidence snippets for cache-friendly follow-ups", async function () {

@@ -1,14 +1,17 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { assert } from "chai";
 import {
-  buildCodexNativeResourceContextBlockForTests,
-  buildCodexNativeResourceSignatureForTests,
   buildCodexNativeScopedMcpScopeForTests,
+  buildCodexNativeVisibleTurnContextBlockForTests,
   buildZoteroEnvironmentManifest,
   compactCodexAppServerConversation,
   compactCodexAppServerThread,
   NO_CODEX_APP_SERVER_THREAD_TO_COMPACT_MESSAGE,
   resolveCodexNativeApprovalRequest,
   resolveSafeCodexNativeApprovalRequest,
+  runCodexAppServerNativeTurn,
 } from "../src/codexAppServer/nativeClient";
 import {
   buildCodexNativePriorReadContextBlock,
@@ -19,6 +22,8 @@ import {
   CodexAppServerProcess,
   destroyCachedCodexAppServerProcess,
 } from "../src/utils/codexAppServerProcess";
+
+const here = dirname(fileURLToPath(import.meta.url));
 
 describe("Codex app-server native client", function () {
   afterEach(function () {
@@ -277,43 +282,14 @@ describe("Codex app-server native client", function () {
     assert.notInclude(manifest, "use shell creatively");
   });
 
-  it("describes selected tag resources in Codex native context", function () {
-    const block = buildCodexNativeResourceContextBlockForTests({
-      selectedTagContexts: [
-        {
-          name: "Stable",
-          normalizedName: "stable",
-          libraryID: 1,
-        },
-        {
-          name: "Untagged",
-          libraryID: 1,
-          scope: "untagged",
-        },
-      ],
-    });
-
-    assert.include(block, "Selected Zotero tag resources available this turn");
-    assert.include(block, 'name="Stable"');
-    assert.include(block, 'scope="untagged"');
-    assert.include(block, "Treat tag membership as the selected resource pool");
-    assert.notInclude(block, "Selected Zotero collection resources");
-  });
-
-  it("includes selected tags in Codex native resource signatures", function () {
-    const scope = {
-      conversationKey: 1,
-      libraryID: 1,
-      kind: "global" as const,
-    };
-    const baseSignature = buildCodexNativeResourceSignatureForTests({
-      scope,
-      profileSignature: "profile-native-tag-test",
-      skillContext: {},
-    });
-    const tagSignature = buildCodexNativeResourceSignatureForTests({
-      scope,
-      profileSignature: "profile-native-tag-test",
+  it("renders selected tag resources in Codex native visible context", function () {
+    const block = buildCodexNativeVisibleTurnContextBlockForTests({
+      scope: {
+        conversationKey: 1,
+        libraryID: 1,
+        libraryName: "My Library",
+        kind: "global",
+      },
       skillContext: {
         selectedTagContexts: [
           {
@@ -321,14 +297,245 @@ describe("Codex app-server native client", function () {
             normalizedName: "stable",
             libraryID: 1,
           },
+          {
+            name: "Untagged",
+            libraryID: 1,
+            scope: "untagged",
+          },
         ],
       },
     });
 
-    assert.notEqual(baseSignature, tagSignature);
-    assert.include(tagSignature, '"tags"');
-    assert.include(tagSignature, "Stable");
-    assert.include(tagSignature, '"tag:1:stable"');
+    assert.include(block, "Zotero context for this turn");
+    assert.include(block, "Library scope");
+    assert.include(block, "Tag 1");
+    assert.include(block, "Tag 2");
+    assert.include(block, 'name="Stable"');
+    assert.include(block, 'scope="untagged"');
+    assert.include(block, 'source="selected resource pool"');
+    assert.notInclude(block, "Collection 1");
+  });
+
+  it("renders pinned papers and selected collections in visible context", function () {
+    const block = buildCodexNativeVisibleTurnContextBlockForTests({
+      scope: {
+        conversationKey: 1,
+        libraryID: 1,
+        libraryName: "My Library",
+        kind: "paper",
+        paperTitle: "Active Drift Paper",
+        paperContext: {
+          itemId: 10,
+          contextItemId: 11,
+          title: "Active Drift Paper",
+          firstCreator: "Micou",
+          year: "2026",
+        },
+      },
+      skillContext: {
+        selectedPaperContexts: [
+          {
+            itemId: 10,
+            contextItemId: 11,
+            title: "Active Drift Paper",
+            firstCreator: "Micou",
+            year: "2026",
+          },
+        ],
+        pinnedPaperContexts: [
+          {
+            itemId: 20,
+            contextItemId: 21,
+            title: "Self-healing codes",
+            firstCreator: "Rule",
+            year: "2022",
+          },
+        ],
+        selectedCollectionContexts: [
+          { collectionId: 8, libraryID: 1, name: "Representation Drift" },
+        ],
+        selectedTagContexts: [
+          {
+            name: "Learning",
+            normalizedName: "learning",
+            libraryID: 1,
+          },
+        ],
+      },
+    });
+
+    assert.include(block, "Paper 1");
+    assert.include(block, 'title="Active Drift Paper"');
+    assert.include(block, "Paper 2");
+    assert.include(block, 'title="Self-healing codes"');
+    assert.include(block, "Collection 1");
+    assert.include(block, 'name="Representation Drift"');
+    assert.include(block, "Tag 1");
+    assert.include(block, 'name="Learning"');
+    assert.include(block, '"the second paper"');
+  });
+
+  it("prefixes current two-paper context into resumed Codex native turn input", async function () {
+    const processKey = "native-visible-context-turn-test";
+    const originalSpawn = CodexAppServerProcess.spawn;
+    const originalZotero = globalThis.Zotero;
+    let proc!: CodexAppServerProcess;
+    let turnStartParams: Record<string, unknown> | undefined;
+
+    proc = CodexAppServerProcess.forTest({
+      stdin: {
+        write: (chunk: string) => {
+          const request = JSON.parse(chunk) as {
+            id: number;
+            method: string;
+            params?: Record<string, unknown>;
+          };
+          const handleMessage = (
+            proc as unknown as {
+              handleMessage: (msg: Record<string, unknown>) => void;
+            }
+          ).handleMessage.bind(proc);
+          if (request.method === "thread/resume") {
+            setTimeout(
+              () =>
+                handleMessage({
+                  id: request.id,
+                  result: { thread: { id: "thread-visible" } },
+                }),
+              0,
+            );
+            return;
+          }
+          if (request.method === "turn/start") {
+            turnStartParams = request.params;
+            setTimeout(
+              () =>
+                handleMessage({
+                  id: request.id,
+                  result: { turn: { id: "turn-visible" } },
+                }),
+              0,
+            );
+            setTimeout(
+              () =>
+                handleMessage({
+                  method: "turn/completed",
+                  params: {
+                    turn: { id: "turn-visible", status: "completed" },
+                  },
+                }),
+              5,
+            );
+            return;
+          }
+          if (request.method === "thread/read") {
+            setTimeout(
+              () => handleMessage({ id: request.id, result: { turns: [] } }),
+              0,
+            );
+          }
+        },
+      },
+      kill: () => {},
+    });
+    CodexAppServerProcess.spawn = async () => proc;
+    (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero = {
+      Prefs: {
+        get: (key: string) =>
+          key.endsWith(".codexAppServerZoteroMcpToolsEnabled")
+            ? false
+            : undefined,
+      },
+    };
+
+    try {
+      await runCodexAppServerNativeTurn({
+        scope: {
+          profileSignature: "profile-visible-test",
+          conversationKey: 6_000_000_030,
+          libraryID: 1,
+          libraryName: "My Library",
+          kind: "paper",
+          paperItemID: 10,
+          paperTitle:
+            "Statistics of cortical representational drift can enable robust readout",
+        },
+        model: "gpt-5.5",
+        messages: [
+          {
+            role: "system",
+            content: "SECRET SYSTEM PROMPT: do not show in chat trace.",
+          },
+          {
+            role: "user",
+            content:
+              "does it make the two papers connected to each other?",
+          },
+        ],
+        skillContext: {
+          selectedPaperContexts: [
+            {
+              itemId: 10,
+              contextItemId: 11,
+              title:
+                "Statistics of cortical representational drift can enable robust readout",
+              firstCreator: "Micou",
+              year: "2026",
+            },
+          ],
+          pinnedPaperContexts: [
+            {
+              itemId: 20,
+              contextItemId: 21,
+              title:
+                "Self-healing codes: How stable neural populations can track continually reconfiguring neural representations",
+              firstCreator: "Rule",
+              year: "2022",
+            },
+          ],
+        },
+        hooks: {
+          loadProviderSessionId: async () => "thread-visible",
+          persistProviderSessionId: async () => undefined,
+        },
+        processKey,
+      });
+    } finally {
+      CodexAppServerProcess.spawn = originalSpawn;
+      (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero =
+        originalZotero;
+      destroyCachedCodexAppServerProcess(processKey, proc);
+    }
+
+    assert.isOk(turnStartParams);
+    const inputText = JSON.stringify(turnStartParams?.input);
+    assert.include(inputText, "Zotero context for this turn");
+    assert.include(inputText, "Paper 1", inputText);
+    assert.include(
+      inputText,
+      "Statistics of cortical representational drift can enable robust readout",
+    );
+    assert.include(inputText, "Paper 2");
+    assert.include(inputText, "Self-healing codes");
+    assert.include(
+      inputText,
+      "does it make the two papers connected to each other?",
+    );
+    assert.notInclude(inputText, "SECRET SYSTEM PROMPT");
+    assert.notInclude(inputText, "Zotero environment for this turn");
+    assert.notInclude(inputText, "Notes directory configuration");
+  });
+
+  it("does not contain the removed Codex native resource lifecycle states", function () {
+    const source = readFileSync(
+      resolve(here, "../src/codexAppServer/nativeClient.ts"),
+      "utf8",
+    );
+
+    assert.notInclude(source, "thin-followup");
+    assert.notInclude(source, "resources-delta");
+    assert.notInclude(source, "resources-changed");
+    assert.notInclude(source, "CodexNativeLifecycle");
   });
 
   it("builds Codex native scoped MCP payload with canonical paper contexts", function () {

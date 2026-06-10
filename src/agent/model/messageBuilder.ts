@@ -22,10 +22,10 @@ import {
 } from "../../modules/contextPanel/quoteCitations";
 import {
   buildAgentStableResourceContextBlock,
-  renderAgentResourceContextPlan,
   type AgentResourceContextPlan,
-} from "../context/resourceLifecycle";
+} from "../context/resourceContextPlan";
 import { buildAgentCoverageContextBlock } from "../context/coverageLedger";
+import { buildVisibleTurnContextBlock } from "../context/turnContextEnvelope";
 
 export function isMultimodalRequestSupported(
   request: AgentRuntimeRequest,
@@ -103,6 +103,10 @@ function buildFullUserMessage(
   } = {},
 ): AgentModelMessage {
   const contextLines: string[] = [];
+  const visibleTurnContext = buildVisibleTurnContextBlock(request);
+  if (visibleTurnContext) {
+    contextLines.push(visibleTurnContext);
+  }
   if (request.activeNoteContext) {
     const note = request.activeNoteContext;
     contextLines.push(
@@ -221,17 +225,6 @@ function buildUserMessage(
     turnGuidanceBlock?: string;
   } = {},
 ): AgentModelMessage {
-  if (
-    resourceContextPlan &&
-    (resourceContextPlan.injection === "thin" ||
-      resourceContextPlan.injection === "delta")
-  ) {
-    return renderAgentResourceContextPlan(
-      resourceContextPlan,
-      request,
-      options,
-    );
-  }
   return buildFullUserMessage(request, {
     priorReadBlock: resourceContextPlan?.priorReadBlock,
     coverageBlock: options.coverageBlock,
@@ -295,22 +288,9 @@ function buildTurnGuidanceBlock(instructions: string[]): string {
   return ["Current-turn dynamic agent guidance:", ...lines].join("\n\n");
 }
 
-function buildAutoReadInstruction(
-  request: AgentRuntimeRequest,
-  resourceContextPlan?: AgentResourceContextPlan,
-): string {
+function buildAutoReadInstruction(request: AgentRuntimeRequest): string {
   const fullTextPapers = request.fullTextPaperContexts || [];
   if (!fullTextPapers.length) return "";
-  if (
-    resourceContextPlan?.lifecycleState === "thin-followup" &&
-    resourceContextPlan.injection === "thin"
-  ) {
-    return (
-      "TURN RULE: The same full-text paper resources remain in this conversation. " +
-      "Reuse the prior paper_read context already in the conversation when it is sufficient. " +
-      "Call paper_read({ mode:'targeted', query:'...' }) only if the follow-up asks for evidence that has not already been read."
-    );
-  }
   const allHaveMineruCache = fullTextPapers.every((entry) =>
     Boolean(entry.mineruCacheDir),
   );
@@ -418,10 +398,7 @@ export async function buildAgentInitialMessages(
   } = {},
 ): Promise<AgentModelMessage[]> {
   const memoryBlock = await buildAgentMemoryBlock(request.conversationKey);
-  const autoReadInstruction = buildAutoReadInstruction(
-    request,
-    resourceContextPlan,
-  );
+  const autoReadInstruction = buildAutoReadInstruction(request);
   const workflowParityInstructions = [
     buildFigureMineruInstruction(request, matchedSkillIds),
     buildWriteNoteFileInstruction(request, matchedSkillIds),
