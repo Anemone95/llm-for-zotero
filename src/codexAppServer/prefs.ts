@@ -154,6 +154,14 @@ export function setCodexZoteroMcpToolsEnabled(enabled: boolean): void {
   setPref("codexAppServerZoteroMcpToolsEnabled", Boolean(enabled));
 }
 
+export function isNativeZoteroMcpToolsEnabled(): boolean {
+  return isCodexZoteroMcpToolsEnabled();
+}
+
+export function setNativeZoteroMcpToolsEnabled(enabled: boolean): void {
+  setCodexZoteroMcpToolsEnabled(enabled);
+}
+
 export function getCodexNativeSkillRoutingModePref(): CodexNativeSkillRoutingMode {
   const raw = getStringPref("codexNativeSkillRoutingMode").trim().toLowerCase();
   if (raw === "deterministic" || raw === "classifier" || raw === "hybrid") {

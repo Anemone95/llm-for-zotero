@@ -4,6 +4,35 @@ import type {
   WorkflowTestFixture,
 } from "../src/modules/contextPanel/workflowTestTypes";
 
+const PREF_PREFIX = "extensions.zotero.llmforzotero";
+const CLAUDE_MODE_PREFS = {
+  enableClaudeCodeMode: true,
+  conversationSystem: "claude_code",
+};
+
+async function withPrefs<T>(
+  prefs: Record<string, unknown>,
+  task: () => Promise<T>,
+): Promise<T> {
+  const previous = new Map<string, unknown>();
+  for (const [key, value] of Object.entries(prefs)) {
+    const fullKey = `${PREF_PREFIX}.${key}`;
+    previous.set(fullKey, Zotero.Prefs.get(fullKey, true));
+    Zotero.Prefs.set(fullKey, value, true);
+  }
+  try {
+    return await task();
+  } finally {
+    for (const [fullKey, value] of previous) {
+      if (value === undefined) {
+        Zotero.Prefs.clear?.(fullKey, true);
+      } else {
+        Zotero.Prefs.set(fullKey, value, true);
+      }
+    }
+  }
+}
+
 function getWorkflowTestApi(): WorkflowTestApi {
   const api = (Zotero as any).LLMForZotero?.api?.workflowTest;
   assert.isOk(api, "workflow test API should be installed");
@@ -97,5 +126,39 @@ describe("workflow: selected item context send", function () {
       await diagnosticsMessage(api, panel.panelId),
     );
     assert.deepEqual(api.getLastSend(), send);
+  });
+
+  it("sends Claude Code paper turns through the original agent-mode envelope", async function () {
+    await withPrefs(CLAUDE_MODE_PREFS, async () => {
+      fixture = await api.createPaperWithPdfFixture({
+        title: "Claude Workflow Parent Paper",
+        pdfTitle: "Claude Workflow Main PDF",
+      });
+
+      const panel = await api.renderPanelForItem(fixture.parentItemId);
+      const send = await api.ask(panel.panelId, "Summarize this paper");
+
+      assert.equal(
+        send.runtimeMode,
+        "agent",
+        await diagnosticsMessage(api, panel.panelId),
+      );
+      assert.equal(
+        send.modelProviderLabel,
+        "Claude Code",
+        await diagnosticsMessage(api, panel.panelId),
+      );
+      assert.equal(send.question, "Summarize this paper");
+      assert.equal(
+        send.contextSource?.paperContext?.itemId,
+        fixture.parentItemId,
+        await diagnosticsMessage(api, panel.panelId),
+      );
+      assert.equal(
+        send.contextSource?.paperContext?.contextItemId,
+        fixture.pdfAttachmentId,
+        await diagnosticsMessage(api, panel.panelId),
+      );
+    });
   });
 });

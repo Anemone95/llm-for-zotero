@@ -2,6 +2,7 @@ import { assert } from "chai";
 import {
   buildCodexNativeResourceContextBlockForTests,
   buildCodexNativeResourceSignatureForTests,
+  buildCodexNativeScopedMcpScopeForTests,
   buildZoteroEnvironmentManifest,
   compactCodexAppServerConversation,
   compactCodexAppServerThread,
@@ -259,10 +260,19 @@ describe("Codex app-server native client", function () {
       mcpReady: true,
     });
     assert.include(manifest, "You are Codex");
-    assert.include(manifest, "Zotero resources and MCP tools are available when useful");
-    assert.include(manifest, "Use tools only when they materially improve the answer");
+    assert.include(
+      manifest,
+      "Zotero resources and MCP tools are available when useful",
+    );
+    assert.include(
+      manifest,
+      "Use tools only when they materially improve the answer",
+    );
     assert.include(manifest, "quote anchors like [[quote:Q_x7a2]]");
-    assert.include(manifest, "Do not call tools solely to discover quotes or page numbers");
+    assert.include(
+      manifest,
+      "Do not call tools solely to discover quotes or page numbers",
+    );
     assert.notInclude(manifest, "page N");
     assert.notInclude(manifest, "use shell creatively");
   });
@@ -286,10 +296,7 @@ describe("Codex app-server native client", function () {
     assert.include(block, "Selected Zotero tag resources available this turn");
     assert.include(block, 'name="Stable"');
     assert.include(block, 'scope="untagged"');
-    assert.include(
-      block,
-      "Treat tag membership as the selected resource pool",
-    );
+    assert.include(block, "Treat tag membership as the selected resource pool");
     assert.notInclude(block, "Selected Zotero collection resources");
   });
 
@@ -322,6 +329,71 @@ describe("Codex app-server native client", function () {
     assert.include(tagSignature, '"tags"');
     assert.include(tagSignature, "Stable");
     assert.include(tagSignature, '"tag:1:stable"');
+  });
+
+  it("builds Codex native scoped MCP payload with canonical paper contexts", function () {
+    const selectedPaper = {
+      itemId: 11,
+      contextItemId: 12,
+      title: "Selected Native Paper",
+      attachmentTitle: "Selected Native PDF",
+      citationKey: "nativeSelected2026",
+      firstCreator: "Ng",
+      year: "2026",
+      contentSourceMode: "mineru" as const,
+      mineruCacheDir: "/tmp/mineru-cache/native-selected",
+    };
+    const fullTextPaper = {
+      itemId: 21,
+      contextItemId: 22,
+      title: "Full Text Native Paper",
+      attachmentTitle: "Full Text Native PDF",
+      firstCreator: "Lee",
+      year: "2025",
+      contentSourceMode: "markdown" as const,
+      mineruCacheDir: "/tmp/mineru-cache/native-full-text",
+    };
+    const pinnedPaper = {
+      itemId: 31,
+      contextItemId: 32,
+      title: "Pinned Native Paper",
+      attachmentTitle: "Pinned Native PDF",
+      firstCreator: "Chen",
+      year: "2024",
+      contentSourceMode: "text" as const,
+      mineruCacheDir: "/tmp/mineru-cache/native-pinned",
+    };
+
+    const scope = buildCodexNativeScopedMcpScopeForTests({
+      scope: {
+        conversationKey: 1,
+        libraryID: 1,
+        kind: "global",
+      },
+      profileSignature: "profile-native-paper-scope",
+      userText: "read these papers",
+      skillContext: {
+        selectedPaperContexts: [selectedPaper],
+        fullTextPaperContexts: [fullTextPaper],
+        pinnedPaperContexts: [pinnedPaper],
+        selectedCollectionContexts: [
+          { collectionId: 9, libraryID: 1, name: "Native Collection" },
+        ],
+        selectedTagContexts: [
+          { name: "Stable", normalizedName: "stable", libraryID: 1 },
+        ],
+      },
+    });
+
+    assert.deepEqual(scope.selectedPaperContexts, [selectedPaper]);
+    assert.deepEqual(scope.fullTextPaperContexts, [fullTextPaper]);
+    assert.deepEqual(scope.pinnedPaperContexts, [pinnedPaper]);
+    assert.deepEqual(scope.selectedCollectionContexts, [
+      { collectionId: 9, libraryID: 1, name: "Native Collection" },
+    ]);
+    assert.deepEqual(scope.selectedTagContexts, [
+      { name: "Stable", normalizedName: "stable", libraryID: 1 },
+    ]);
   });
 
   it("records successful native paper reads for context reuse hints", function () {

@@ -21,6 +21,7 @@ import {
   ZOTERO_MCP_SERVER_NAME,
   registerScopedZoteroMcpScope,
   setActiveZoteroMcpScope,
+  type ZoteroMcpActiveScope,
   type ZoteroMcpConfirmationRequest,
   type ZoteroMcpToolActivityEvent,
 } from "../agent/mcp/server";
@@ -409,9 +410,7 @@ function buildTagResourceRecords(
         tag.normalizedName || tag.name,
       ).toLowerCase();
       const scope =
-        tag.scope === "allTagged" || tag.scope === "untagged"
-          ? tag.scope
-          : "";
+        tag.scope === "allTagged" || tag.scope === "untagged" ? tag.scope : "";
       const includeAutomatic = tag.includeAutomatic === true;
       const key = scope
         ? `tag-scope:${libraryID}:${scope}:${includeAutomatic ? "auto" : "manual"}`
@@ -1243,6 +1242,33 @@ export function buildCodexNativeResourceContextBlockForTests(
 const buildCodexNativeResourceContextBlock =
   buildCodexNativeResourceContextBlockForTests;
 
+function buildCodexNativeScopedMcpScope(params: {
+  scope: CodexNativeConversationScope;
+  profileSignature: string;
+  userText: string;
+  skillContext?: CodexNativeSkillContext;
+}): ZoteroMcpActiveScope {
+  return {
+    ...params.scope,
+    profileSignature: params.profileSignature,
+    userText: params.userText,
+    selectedPaperContexts: params.skillContext?.selectedPaperContexts,
+    fullTextPaperContexts: params.skillContext?.fullTextPaperContexts,
+    pinnedPaperContexts: params.skillContext?.pinnedPaperContexts,
+    selectedCollectionContexts: params.skillContext?.selectedCollectionContexts,
+    selectedTagContexts: params.skillContext?.selectedTagContexts,
+  };
+}
+
+export function buildCodexNativeScopedMcpScopeForTests(params: {
+  scope: CodexNativeConversationScope;
+  profileSignature: string;
+  userText: string;
+  skillContext?: CodexNativeSkillContext;
+}): ZoteroMcpActiveScope {
+  return buildCodexNativeScopedMcpScope(params);
+}
+
 function appendBoundedResourceDeltaSection(params: {
   lines: string[];
   title: string;
@@ -2041,13 +2067,14 @@ export async function runCodexAppServerNativeTurn(params: {
       resourceSnapshot,
       forcedSkillIds: params.skillContext?.forcedSkillIds,
     });
+    const scopedMcpScope = buildCodexNativeScopedMcpScope({
+      scope: scopeWithProfile,
+      profileSignature,
+      userText: latestUserText,
+      skillContext: params.skillContext,
+    });
     const scopedMcp = mcpEnabled
-      ? registerScopedZoteroMcpScope({
-          ...scopeWithProfile,
-          userText: latestUserText,
-          selectedCollectionContexts: params.skillContext?.selectedCollectionContexts,
-          selectedTagContexts: params.skillContext?.selectedTagContexts,
-        })
+      ? registerScopedZoteroMcpScope(scopedMcpScope)
       : null;
     const mcpThreadConfig = scopedMcp
       ? buildCodexZoteroMcpThreadConfig({
@@ -2065,25 +2092,12 @@ export async function runCodexAppServerNativeTurn(params: {
     let mcpWarning = "";
     let mcpStatus: CodexNativeMcpSetupStatus | undefined;
     const clearMcpScope = mcpEnabled
-      ? setActiveZoteroMcpScope({
-          ...params.scope,
-          profileSignature,
-          userText: latestUserText,
-          selectedCollectionContexts: params.skillContext?.selectedCollectionContexts,
-          selectedTagContexts: params.skillContext?.selectedTagContexts,
-        })
+      ? setActiveZoteroMcpScope(scopedMcpScope)
       : () => undefined;
     const clearMcpConfirmationHandler =
       mcpEnabled && params.onMcpConfirmationRequest
         ? addZoteroMcpConfirmationHandler(
-            {
-              ...params.scope,
-              profileSignature,
-              userText: latestUserText,
-              selectedCollectionContexts:
-                params.skillContext?.selectedCollectionContexts,
-              selectedTagContexts: params.skillContext?.selectedTagContexts,
-            },
+            scopedMcpScope,
             params.onMcpConfirmationRequest,
           )
         : () => undefined;

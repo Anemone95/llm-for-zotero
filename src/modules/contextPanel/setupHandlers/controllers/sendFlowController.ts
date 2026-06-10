@@ -219,7 +219,8 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       );
       const selectedTagContexts = deps.getSelectedTagContexts(item.id);
       const usesPluginAgentMode =
-        deps.isAgentMode() && !deps.isCodexConversationSystem();
+        (deps.isAgentMode() || deps.isClaudeConversationSystem()) &&
+        !deps.isCodexConversationSystem();
       // Plugin Agent mode uses text/MinerU pipeline by default, but if the user
       // explicitly forced PDF mode on a paper, honour that choice.
       const pdfModePaperContexts = deps.getPdfModePaperContexts(

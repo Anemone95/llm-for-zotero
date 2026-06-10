@@ -581,17 +581,17 @@ const zhCN: Record<string, string> = {
     "可选。留空会自动检测。也可以输入绝对路径，例如 /usr/local/bin/codex 或 ~/.local/bin/codex。",
   "Test connection": "测试连接",
   "Zotero MCP tools": "Zotero MCP 工具",
-  "Lets native Codex use a curated local MCP server for Zotero library and PDF reading. Write and destructive tools are not exposed in this mode.":
-    "允许原生 Codex 使用精选的本地 MCP 服务来读取 Zotero 文献库和 PDF。此模式不会暴露写入或破坏性工具。",
-  "Enable Zotero MCP tools for native Codex turns":
-    "为原生 Codex 回合启用 Zotero MCP 工具",
+  "Lets native Codex and Claude Code use a curated local MCP server for Zotero library/PDF reading and guarded Zotero operations. Write and destructive tools still use Zotero confirmation or tool-specific safety checks.":
+    "允许原生 Codex 和 Claude Code 使用精选的本地 MCP 服务读取 Zotero 文献库/PDF，并执行受保护的 Zotero 操作。写入和破坏性工具仍会使用 Zotero 确认或工具专属安全检查。",
+  "Enable Zotero MCP tools for native Codex and Claude Code turns":
+    "为原生 Codex 和 Claude Code 回合启用 Zotero MCP 工具",
   "Install/update Zotero MCP config": "安装/更新 Zotero MCP 配置",
-  "Zotero writes a local bearer-token protected MCP entry into Codex config and asks app-server to reload MCP servers. User-level Codex skills, plugins, and other MCP setup remain owned by Codex.":
-    "Zotero 会把受本地 bearer token 保护的 MCP 条目写入 Codex 配置，并请求 app-server 重新加载 MCP 服务。用户级 Codex skills、插件和其他 MCP 设置仍由 Codex 管理。",
-  "Zotero MCP tools will be configured before native Codex turns.":
-    "将在原生 Codex 回合前配置 Zotero MCP 工具。",
-  "Zotero MCP tools disabled for native Codex turns.":
-    "已禁用原生 Codex 回合中的 Zotero MCP 工具。",
+  "For Codex, Zotero writes a local bearer-token protected MCP entry into Codex config and asks app-server to reload MCP servers. Claude Code receives a scoped MCP server directly for each turn. User-level Codex skills, plugins, and other MCP setup remain owned by Codex.":
+    "对于 Codex，Zotero 会把受本地 bearer token 保护的 MCP 条目写入 Codex 配置，并请求 app-server 重新加载 MCP 服务。Claude Code 会在每个回合直接收到带作用域的 MCP 服务。用户级 Codex skills、插件和其他 MCP 设置仍由 Codex 管理。",
+  "Zotero MCP tools enabled for native Codex and Claude Code turns.":
+    "已为原生 Codex 和 Claude Code 回合启用 Zotero MCP 工具。",
+  "Zotero MCP tools disabled for native Codex and Claude Code turns.":
+    "已禁用原生 Codex 和 Claude Code 回合中的 Zotero MCP 工具。",
   "Configuring Zotero MCP tools…": "正在配置 Zotero MCP 工具…",
   "Zotero MCP connected with %n tools.": "Zotero MCP 已连接 %n 个工具。",
   "Zotero MCP config written. Codex is reloading tools.":

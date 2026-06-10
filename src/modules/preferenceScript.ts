@@ -160,11 +160,11 @@ import {
   getCodexBinaryPathPref,
   getCodexReasoningModePref,
   getCodexRuntimeModelPref,
-  isCodexZoteroMcpToolsEnabled,
   isCodexAppServerModeEnabled,
+  isNativeZoteroMcpToolsEnabled,
   setCodexAppServerModeEnabled,
   setCodexBinaryPathPref,
-  setCodexZoteroMcpToolsEnabled,
+  setNativeZoteroMcpToolsEnabled,
   setCodexReasoningModePref,
   setCodexRuntimeModelPref,
 } from "../codexAppServer/prefs";
@@ -2461,13 +2461,13 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
   };
 
   if (codexAppServerMcpEnableInput) {
-    codexAppServerMcpEnableInput.checked = isCodexZoteroMcpToolsEnabled();
+    codexAppServerMcpEnableInput.checked = isNativeZoteroMcpToolsEnabled();
     codexAppServerMcpEnableInput.addEventListener("change", () => {
-      setCodexZoteroMcpToolsEnabled(codexAppServerMcpEnableInput.checked);
+      setNativeZoteroMcpToolsEnabled(codexAppServerMcpEnableInput.checked);
       renderCodexMcpStatus(
         codexAppServerMcpEnableInput.checked
-          ? t("Zotero MCP tools will be configured before native Codex turns.")
-          : t("Zotero MCP tools disabled for native Codex turns."),
+          ? t("Zotero MCP tools enabled for native Codex and Claude Code turns.")
+          : t("Zotero MCP tools disabled for native Codex and Claude Code turns."),
       );
     });
   }
@@ -2481,7 +2481,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           const status = await installOrUpdateCodexZoteroMcpConfig({
             codexPath: getConfiguredCodexAppServerBinaryPath(),
           });
-          setCodexZoteroMcpToolsEnabled(true);
+          setNativeZoteroMcpToolsEnabled(true);
           if (codexAppServerMcpEnableInput) {
             codexAppServerMcpEnableInput.checked = true;
           }
@@ -2509,7 +2509,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     });
   }
 
-  if (codexAppServerMcpStatus && isCodexZoteroMcpToolsEnabled()) {
+  if (codexAppServerMcpStatus && isNativeZoteroMcpToolsEnabled()) {
     renderCodexMcpStatus(t("Checking Zotero MCP setup…"));
     void readCodexNativeMcpSetupStatus({
       codexPath: getConfiguredCodexAppServerBinaryPath(),

@@ -840,6 +840,34 @@ describe("sendFlowController", function () {
     assert.equal(lastSend.lastRuntimeMode, "agent");
   });
 
+  it("sends Claude Code turns with the original agent-style request envelope", async function () {
+    const { controller, getLastSend } = createBaseDeps({
+      isClaudeConversationSystem: () => true,
+      getSelectedCollectionContexts: () => [selectedCollection],
+      getSelectedTagContexts: () => [selectedTag],
+      getSelectedProfile: () => ({
+        entryId: "claude_code::haiku",
+        model: "haiku",
+        apiBase: "",
+        apiKey: "",
+        providerLabel: "Claude Code",
+        authMode: "api_key",
+        providerProtocol: "anthropic_messages",
+      }),
+    });
+
+    await controller.doSend();
+    const lastSend = getLastSend();
+
+    assert.equal(lastSend.lastSentQuestion, "ask question");
+    assert.equal(lastSend.lastRuntimeMode, "agent");
+    assert.equal(lastSend.lastSentModelProviderLabel, "Claude Code");
+    assert.deepEqual(lastSend.lastSentCollectionContexts, [
+      selectedCollection,
+    ]);
+    assert.deepEqual(lastSend.lastSentTagContexts, [selectedTag]);
+  });
+
   it("routes Codex sends through native chat mode with app-server metadata", async function () {
     const { controller, getLastSend } = createBaseDeps({
       getSelectedTextContextEntries: () => [],
