@@ -8,12 +8,18 @@ import {
 import type { ResolvedContextSource, SendQuestionOptions } from "./types";
 import type {
   WorkflowTestApi,
+  WorkflowTestAttachmentFixture,
   WorkflowTestDiagnostics,
   WorkflowTestFixture,
   WorkflowTestPanel,
+  WorkflowTestStandaloneDiagnostics,
 } from "./workflowTestTypes";
 import { ensureConversationLoaded, getConversationKey } from "./chat";
 import { resolveContextSourceItemAsync } from "./contextResolution";
+import {
+  notifyStandaloneItemChanged as notifyStandaloneItemChangedRuntime,
+  openStandaloneChat,
+} from "./standaloneWindow";
 import { setWorkflowTestSendInterceptor } from "./workflowTestHooks";
 
 type PanelRecord = {
@@ -66,6 +72,11 @@ function getTempPath(filename: string): string {
     : `${tempDir.replace(/[\\/]+$/u, "")}/${filename}`;
 }
 
+function sanitizeTempFilename(filename: string): string {
+  const sanitized = filename.replace(/[^A-Za-z0-9._-]+/gu, "_");
+  return sanitized || "attachment.dat";
+}
+
 function minimalPdfBytes(title: string): Uint8Array {
   const safeTitle = title.replace(/[()\\]/gu, " ").slice(0, 80);
   const pdf = [
@@ -90,8 +101,13 @@ function minimalPdfBytes(title: string): Uint8Array {
   return new TextEncoder().encode(pdf);
 }
 
-async function writeTempPdf(title: string): Promise<string> {
-  const path = getTempPath(`llm-for-zotero-workflow-${Date.now()}.pdf`);
+async function writeTempFile(
+  filename: string,
+  data: Uint8Array,
+): Promise<string> {
+  const path = getTempPath(
+    `llm-for-zotero-workflow-${Date.now()}-${sanitizeTempFilename(filename)}`,
+  );
   const ioUtils = (
     globalThis as unknown as {
       IOUtils?: {
@@ -100,8 +116,12 @@ async function writeTempPdf(title: string): Promise<string> {
     }
   ).IOUtils;
   if (!ioUtils?.write) throw new Error("IOUtils.write is unavailable");
-  await ioUtils.write(path, minimalPdfBytes(title));
+  await ioUtils.write(path, data);
   return path;
+}
+
+async function writeTempPdf(title: string): Promise<string> {
+  return writeTempFile("paper.pdf", minimalPdfBytes(title));
 }
 
 async function removePathIfPossible(path: string): Promise<void> {
@@ -175,6 +195,39 @@ async function createPaperWithPdfFixture(input: {
   };
 }
 
+async function createStandaloneAttachmentFixture(input: {
+  title: string;
+  filename: string;
+  contentType: string;
+  text?: string;
+}): Promise<WorkflowTestAttachmentFixture> {
+  assertWorkflowTestEnabled();
+  const filename = sanitizeTempFilename(input.filename);
+  const lowerFilename = filename.toLowerCase();
+  const lowerContentType = input.contentType.toLowerCase();
+  const bytes =
+    lowerContentType === "application/pdf" || lowerFilename.endsWith(".pdf")
+      ? minimalPdfBytes(input.title)
+      : new TextEncoder().encode(input.text || input.title || filename);
+  const tempPath = await writeTempFile(filename, bytes);
+  const attachment = await Zotero.Attachments.importFromFile({
+    file: tempPath,
+    title: input.title,
+    contentType: input.contentType,
+  });
+  const attachmentItemId = Math.floor(Number(attachment.id));
+  if (!Number.isFinite(attachmentItemId) || attachmentItemId <= 0) {
+    throw new Error("Failed to import workflow test standalone attachment");
+  }
+  return {
+    attachmentItemId,
+    tempPath,
+    title: input.title,
+    filename,
+    contentType: input.contentType,
+  };
+}
+
 async function renderPanelForItem(itemId: number): Promise<WorkflowTestPanel> {
   assertWorkflowTestEnabled();
   const item = Zotero.Items.get(itemId);
@@ -217,6 +270,212 @@ async function ask(
   return waitForLastSend();
 }
 
+function parsePositiveInt(value: unknown): number | undefined {
+  const parsed = Number(value || 0);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined;
+}
+
+function getStandaloneWindowForTest(): Window | null {
+  const win =
+    (addon as unknown as { data?: { standaloneWindow?: Window } }).data
+      ?.standaloneWindow || null;
+  return win && !win.closed ? win : null;
+}
+
+async function selectZoteroItemForWorkflow(itemId: number): Promise<void> {
+  const panes: unknown[] = [];
+  try {
+    panes.push(Zotero.getActiveZoteroPane?.());
+  } catch (_error) {
+    void _error;
+  }
+  try {
+    panes.push(Zotero.getMainWindow?.()?.ZoteroPane);
+  } catch (_error) {
+    void _error;
+  }
+  for (const pane of panes) {
+    const typed = pane as
+      | {
+          selectItems?: (
+            ids: number[],
+            options?: { selectInLibrary?: boolean },
+          ) => Promise<unknown> | unknown;
+          selectItem?: (
+            id: number,
+            selectInLibrary?: boolean,
+          ) => Promise<unknown> | unknown;
+        }
+      | null
+      | undefined;
+    if (typeof typed?.selectItems === "function") {
+      await typed.selectItems([itemId], { selectInLibrary: true });
+      return;
+    }
+    if (typeof typed?.selectItem === "function") {
+      await typed.selectItem(itemId, true);
+      return;
+    }
+  }
+}
+
+async function waitForStandaloneReady(): Promise<Document> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 7000) {
+    const win = getStandaloneWindowForTest();
+    const doc = win?.document;
+    const root = doc?.getElementById("llmforzotero-standalone-chat-root");
+    const paperTab = doc?.querySelector(
+      ".llm-standalone-tab[data-tab='paper']",
+    );
+    const panelRoot = doc?.querySelector(".llm-standalone-content #llm-main");
+    if (doc && root && paperTab && panelRoot) {
+      return doc;
+    }
+    await Zotero.Promise.delay(25);
+  }
+  throw new Error("Timed out waiting for standalone workflow window");
+}
+
+function readStandaloneDiagnostics(): WorkflowTestStandaloneDiagnostics {
+  const win = getStandaloneWindowForTest();
+  const doc = win?.document || null;
+  const activeTab = doc?.querySelector(
+    ".llm-standalone-tab.active",
+  ) as HTMLElement | null;
+  const paperTab = doc?.querySelector(
+    ".llm-standalone-tab[data-tab='paper']",
+  ) as HTMLElement | null;
+  const openTab = doc?.querySelector(
+    ".llm-standalone-tab[data-tab='open']",
+  ) as HTMLElement | null;
+  const contentArea = doc?.querySelector(
+    ".llm-standalone-content",
+  ) as HTMLElement | null;
+  const panelRoot = contentArea?.querySelector(
+    "#llm-main",
+  ) as HTMLElement | null;
+  const statusEl = contentArea?.querySelector(
+    "#llm-status",
+  ) as HTMLElement | null;
+  const titleEl = doc?.querySelector(
+    ".llm-standalone-content-title-text",
+  ) as HTMLElement | null;
+  const mountedItem = contentArea
+    ? activeContextPanels.get(contentArea)?.() || null
+    : null;
+  const rawItem = contentArea
+    ? activeContextPanelRawItems.get(contentArea) || null
+    : null;
+  const activeTabName =
+    activeTab?.dataset.tab === "paper"
+      ? "paper"
+      : activeTab?.dataset.tab === "open"
+        ? "open"
+        : null;
+  return {
+    activeTab: activeTabName,
+    conversationKey: parsePositiveInt(panelRoot?.dataset.itemId),
+    activeItemId: parsePositiveInt(mountedItem?.id),
+    rawContextItemId:
+      parsePositiveInt(rawItem?.id) ||
+      parsePositiveInt(panelRoot?.dataset.rawContextItemId),
+    basePaperItemId: parsePositiveInt(panelRoot?.dataset.basePaperItemId),
+    contextItemId: parsePositiveInt(panelRoot?.dataset.contextItemId),
+    conversationKind: panelRoot?.dataset.conversationKind || undefined,
+    titleText: titleEl?.textContent?.trim() || undefined,
+    paperTabText: paperTab?.textContent?.trim() || undefined,
+    openTabText: openTab?.textContent?.trim() || undefined,
+    statusText: statusEl?.textContent?.trim() || undefined,
+    lastSend,
+  };
+}
+
+async function getStandaloneDiagnostics(): Promise<WorkflowTestStandaloneDiagnostics> {
+  if (getStandaloneWindowForTest()) {
+    await waitForStandaloneReady().catch(() => undefined);
+  }
+  return readStandaloneDiagnostics();
+}
+
+async function openStandaloneForItem(
+  itemId: number,
+): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  const item = Zotero.Items.get(itemId);
+  if (!item) throw new Error(`Unable to find Zotero item ${itemId}`);
+  await closeStandalone();
+  await selectZoteroItemForWorkflow(itemId).catch(() => undefined);
+  openStandaloneChat({ initialItem: item });
+  await waitForStandaloneReady();
+  await Zotero.Promise.delay(150);
+  return readStandaloneDiagnostics();
+}
+
+async function clickStandaloneTab(
+  tab: "paper" | "open",
+): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const button = doc.querySelector(
+    `.llm-standalone-tab[data-tab='${tab}']`,
+  ) as HTMLButtonElement | null;
+  if (!button) throw new Error(`Standalone ${tab} tab was not rendered`);
+  button.click();
+  await Zotero.Promise.delay(250);
+  return readStandaloneDiagnostics();
+}
+
+async function askStandalone(text: string): Promise<SendQuestionOptions> {
+  assertWorkflowTestEnabled();
+  lastSend = null;
+  const doc = await waitForStandaloneReady();
+  const input = doc.querySelector(
+    ".llm-standalone-content #llm-input",
+  ) as HTMLTextAreaElement | null;
+  if (!input) throw new Error("Standalone workflow input box was not rendered");
+  input.value = text;
+  const eventCtor = doc.defaultView?.Event ?? Event;
+  input.dispatchEvent(new eventCtor("input", { bubbles: true }));
+  const sendBtn = doc.querySelector(
+    ".llm-standalone-content #llm-send",
+  ) as HTMLButtonElement | null;
+  if (!sendBtn)
+    throw new Error("Standalone workflow send button was not rendered");
+  const startedAt = Date.now();
+  while (sendBtn.disabled && Date.now() - startedAt < 5000) {
+    await Zotero.Promise.delay(25);
+  }
+  sendBtn.click();
+  return waitForLastSend();
+}
+
+async function notifyStandaloneItemChanged(
+  itemId: number | null,
+): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  const item = itemId ? Zotero.Items.get(itemId) || null : null;
+  if (itemId && !item) throw new Error(`Unable to find Zotero item ${itemId}`);
+  if (itemId) {
+    await selectZoteroItemForWorkflow(itemId).catch(() => undefined);
+  }
+  notifyStandaloneItemChangedRuntime(item);
+  await Zotero.Promise.delay(250);
+  return readStandaloneDiagnostics();
+}
+
+async function closeStandalone(): Promise<void> {
+  assertWorkflowTestEnabled();
+  const win = getStandaloneWindowForTest();
+  if (win) {
+    win.close();
+  }
+  const startedAt = Date.now();
+  while (getStandaloneWindowForTest() && Date.now() - startedAt < 3000) {
+    await Zotero.Promise.delay(25);
+  }
+}
+
 async function getDiagnostics(
   panelId?: string,
 ): Promise<WorkflowTestDiagnostics> {
@@ -241,6 +500,7 @@ async function getDiagnostics(
 
 async function reset(): Promise<void> {
   assertWorkflowTestEnabled();
+  await closeStandalone();
   lastSend = null;
   for (const panel of panels.values()) {
     activeContextPanels.delete(panel.body);
@@ -253,8 +513,15 @@ async function reset(): Promise<void> {
   });
 }
 
-async function cleanupFixture(fixture: WorkflowTestFixture): Promise<void> {
+async function cleanupFixture(
+  fixture: WorkflowTestFixture | WorkflowTestAttachmentFixture,
+): Promise<void> {
   assertWorkflowTestEnabled();
+  if ("attachmentItemId" in fixture) {
+    await trashItemIfPossible(fixture.attachmentItemId);
+    await removePathIfPossible(fixture.tempPath);
+    return;
+  }
   await trashItemIfPossible(fixture.pdfAttachmentId);
   await trashItemIfPossible(fixture.parentItemId);
   await removePathIfPossible(fixture.tempPdfPath);
@@ -267,8 +534,15 @@ export function installWorkflowTestHarness(targetAddon: {
   targetAddon.api.workflowTest = {
     reset,
     createPaperWithPdfFixture,
+    createStandaloneAttachmentFixture,
     renderPanelForItem,
     ask,
+    openStandaloneForItem,
+    clickStandaloneTab,
+    askStandalone,
+    notifyStandaloneItemChanged,
+    getStandaloneDiagnostics,
+    closeStandalone,
     getLastSend: () => lastSend,
     getDiagnostics,
     cleanupFixture,

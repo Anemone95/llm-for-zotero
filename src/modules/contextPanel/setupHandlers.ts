@@ -300,6 +300,7 @@ import {
   resolveConversationSystemForItem,
   resolveDisplayConversationKind,
   resolveConversationBaseItem,
+  resolvePaperChatSourceItem,
   resolveInitialPanelItemState,
   resolveActiveLibraryID,
   resolvePreferredConversationSystem,
@@ -1175,19 +1176,18 @@ export function setupHandlers(
     const parentItem = Zotero.Items.get(noteSession.parentItemId) || null;
     return parentItem?.isRegularItem?.() ? parentItem : null;
   };
-  const resolveRegularPaperBaseItem = (
+  const resolvePaperChatBaseItem = (
     candidate: Zotero.Item | null | undefined,
   ): Zotero.Item | null => {
-    const resolved = resolveConversationBaseItem(candidate);
-    return resolved?.isRegularItem?.() ? resolved : null;
+    return resolvePaperChatSourceItem(candidate);
   };
   const resolveActiveReaderPaperBaseItem = (): Zotero.Item | null => {
     const activeContext = getActiveContextAttachmentFromTabs();
     const resolvedFromContext =
       activeContext && activeContext.parentID
         ? Zotero.Items.get(activeContext.parentID) || null
-        : null;
-    return resolvedFromContext?.isRegularItem?.() ? resolvedFromContext : null;
+        : activeContext;
+    return resolvePaperChatSourceItem(resolvedFromContext);
   };
   const resolveCurrentPaperBaseItem = (): Zotero.Item | null => {
     const noteSession = resolveCurrentNoteSession();
@@ -1203,14 +1203,12 @@ export function setupHandlers(
     }
     const resolvedBaseItem = chooseCurrentPaperBaseItemForMode({
       isGlobalMode: isGlobalMode(),
-      liveRawBaseItem: resolveRegularPaperBaseItem(resolveLiveRawPanelItem()),
+      liveRawBaseItem: resolvePaperChatBaseItem(resolveLiveRawPanelItem()),
       activeReaderBaseItem: resolveActiveReaderPaperBaseItem(),
-      cachedBasePaperItem: basePaperItem?.isRegularItem?.()
-        ? basePaperItem
-        : null,
-      currentItemBaseItem: resolveRegularPaperBaseItem(item),
+      cachedBasePaperItem: resolvePaperChatBaseItem(basePaperItem),
+      currentItemBaseItem: resolvePaperChatBaseItem(item),
     });
-    if (resolvedBaseItem?.isRegularItem?.()) {
+    if (resolvedBaseItem) {
       basePaperItem = resolvedBaseItem;
       return resolvedBaseItem;
     }

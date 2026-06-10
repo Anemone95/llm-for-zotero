@@ -133,6 +133,8 @@ const zhCN: Record<string, string> = {
   "Started new conversation": "已开始新对话",
   "Open a paper to start a paper chat": "打开一篇论文以开始论文对话",
   "No active paper for paper chat": "没有活跃的论文用于论文对话",
+  "Open a supported Zotero document to start a paper chat":
+    "打开一个受支持的 Zotero 文档以开始论文对话",
   "Failed to create paper chat": "创建论文对话失败",
   "Reused existing new chat": "已复用现有新对话",
   "Started new paper chat": "已开始新的论文对话",
