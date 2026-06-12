@@ -3,12 +3,13 @@ import {
   copyGeneratedImageToClipboard,
   copyRenderedMarkdownToClipboard,
   copyTextToClipboard,
+  resolveAssistantResponseMenuContent,
 } from "../../chat";
+import { getMessageCitationPaperContexts } from "../../citationContexts";
 import {
   buildChatHistoryNotePayload,
-  createNoteFromAssistantText,
+  createAssistantResponseNote,
   createNoteFromChatHistory,
-  createStandaloneNoteFromAssistantText,
   createStandaloneNoteFromChatHistory,
 } from "../../notes";
 import { isGlobalPortalItem } from "../../portalScope";
@@ -20,19 +21,28 @@ import type {
   GeneratedChatImage,
   QuoteCitation,
 } from "../../../../shared/types";
-import type { ChatRuntimeMode, Message } from "../../types";
+import type { ChatRuntimeMode, Message, PaperContextRef } from "../../types";
 
-type ResponseMenuTarget = {
+export type ResponseMenuTarget = {
   item: Zotero.Item;
   contentText: string;
+  queryText?: string;
   modelName: string;
   conversationKey?: number;
   userTimestamp?: number;
   assistantTimestamp?: number;
-  paperContexts?: import("../../types").PaperContextRef[];
+  paperContexts?: PaperContextRef[];
   quoteCitations?: QuoteCitation[];
   generatedImages?: GeneratedChatImage[];
 } | null;
+
+type ResponseActionKind = "copy" | "note" | "delete";
+
+type ResponseTurnReference = {
+  conversationKey: number;
+  userTimestamp: number;
+  assistantTimestamp: number;
+};
 
 type PromptMenuTarget = {
   item: Zotero.Item;
@@ -97,6 +107,293 @@ function stopFloatingMenuPropagation(menu: HTMLDivElement): void {
   });
 }
 
+function parsePositiveFiniteNumber(value: unknown): number {
+  const parsed = Number(value || 0);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return Math.floor(parsed);
+}
+
+function normalizeResponseTurnReference(
+  input: Partial<ResponseTurnReference> | null | undefined,
+): ResponseTurnReference | null {
+  const conversationKey = parsePositiveFiniteNumber(input?.conversationKey);
+  const userTimestamp = parsePositiveFiniteNumber(input?.userTimestamp);
+  const assistantTimestamp = parsePositiveFiniteNumber(
+    input?.assistantTimestamp,
+  );
+  if (!conversationKey || !userTimestamp || !assistantTimestamp) return null;
+  return { conversationKey, userTimestamp, assistantTimestamp };
+}
+
+function findResponseTurnPair(
+  history: Message[],
+  reference: ResponseTurnReference,
+): { userMessage: Message; assistantMessage: Message } | null {
+  for (let index = 0; index < history.length - 1; index += 1) {
+    const userMessage = history[index];
+    const assistantMessage = history[index + 1];
+    if (
+      userMessage?.role !== "user" ||
+      assistantMessage?.role !== "assistant"
+    ) {
+      continue;
+    }
+    if (
+      Math.floor(userMessage.timestamp) === reference.userTimestamp &&
+      Math.floor(assistantMessage.timestamp) === reference.assistantTimestamp
+    ) {
+      return { userMessage, assistantMessage };
+    }
+  }
+  return null;
+}
+
+export function buildResponseActionTargetFromHistory(params: {
+  item: Zotero.Item;
+  history: Message[];
+  conversationKey: number;
+  userTimestamp: number;
+  assistantTimestamp: number;
+}): ResponseMenuTarget {
+  const reference = normalizeResponseTurnReference(params);
+  if (!reference) return null;
+  const pair = findResponseTurnPair(params.history, reference);
+  if (!pair) return null;
+  const menuContent = resolveAssistantResponseMenuContent(
+    pair.assistantMessage,
+  );
+  if (!menuContent) return null;
+  return {
+    item: params.item,
+    contentText: menuContent.contentText,
+    queryText: pair.userMessage.text || "",
+    modelName: pair.assistantMessage.modelName?.trim() || "unknown",
+    conversationKey: reference.conversationKey,
+    userTimestamp: reference.userTimestamp,
+    assistantTimestamp: reference.assistantTimestamp,
+    paperContexts: getMessageCitationPaperContexts(pair.userMessage),
+    quoteCitations: pair.assistantMessage.quoteCitations,
+    generatedImages: menuContent.generatedImages,
+  };
+}
+
+function getResponseActionKind(
+  value: string | undefined,
+): ResponseActionKind | null {
+  if (value === "copy" || value === "note" || value === "delete") {
+    return value;
+  }
+  return null;
+}
+
+function getResponseTurnReferenceFromButton(
+  button: HTMLButtonElement,
+): ResponseTurnReference | null {
+  return normalizeResponseTurnReference({
+    conversationKey: Number(button.dataset.conversationKey || 0),
+    userTimestamp: Number(button.dataset.userTimestamp || 0),
+    assistantTimestamp: Number(button.dataset.assistantTimestamp || 0),
+  });
+}
+
+function buildToolbarResponseActionTarget(
+  deps: MenuActionControllerDeps,
+  button: HTMLButtonElement,
+): ResponseMenuTarget {
+  const item = deps.getItem();
+  const reference = getResponseTurnReferenceFromButton(button);
+  if (!item || !reference) return null;
+  if (deps.getConversationKey(item) !== reference.conversationKey) return null;
+  return buildResponseActionTargetFromHistory({
+    item,
+    history: deps.getHistory(reference.conversationKey),
+    conversationKey: reference.conversationKey,
+    userTimestamp: reference.userTimestamp,
+    assistantTimestamp: reference.assistantTimestamp,
+  });
+}
+
+async function copyResponseTarget(
+  deps: MenuActionControllerDeps,
+  target: ResponseMenuTarget,
+  setStatusMessage: (
+    message: string,
+    level: "ready" | "warning" | "error",
+  ) => void,
+): Promise<void> {
+  if (!target) return;
+  if (target.contentText.trim()) {
+    await copyRenderedMarkdownToClipboard(
+      deps.body,
+      target.contentText,
+      target.quoteCitations,
+    );
+    setStatusMessage(t("Copied response"), "ready");
+  } else if (target.generatedImages?.length) {
+    const result = await copyGeneratedImageToClipboard(
+      deps.body,
+      target.generatedImages[0]!,
+    );
+    setStatusMessage(
+      result === "image" ? "Copied image" : "Copied image source",
+      "ready",
+    );
+  }
+}
+
+async function saveResponseTargetAsNote(
+  deps: MenuActionControllerDeps,
+  target: ResponseMenuTarget,
+  setStatusMessage: (
+    message: string,
+    level: "ready" | "warning" | "error",
+  ) => void,
+): Promise<void> {
+  if (!target) {
+    deps.logError("LLM: Note save - no responseMenuTarget", null);
+    return;
+  }
+  const {
+    item: targetItem,
+    contentText,
+    queryText,
+    modelName,
+    paperContexts,
+    quoteCitations,
+    generatedImages,
+  } = target;
+  if (!targetItem || (!contentText && !generatedImages?.length)) {
+    deps.logError("LLM: Note save - missing item or response content", null);
+    return;
+  }
+  try {
+    const targetNoteSession = deps.resolveActiveNoteSession(targetItem);
+    if (
+      deps.isGlobalMode() ||
+      isGlobalPortalItem(targetItem) ||
+      isClaudeGlobalPortalItem(targetItem) ||
+      targetNoteSession?.noteKind === "standalone"
+    ) {
+      const libraryID =
+        Number.isFinite(targetItem.libraryID) && targetItem.libraryID > 0
+          ? Math.floor(targetItem.libraryID)
+          : deps.getCurrentLibraryID();
+      await createAssistantResponseNote({
+        destination: { kind: "standalone", libraryID },
+        contentText,
+        queryText,
+        modelName,
+        paperContexts,
+        quoteCitations,
+        generatedImages,
+      });
+      setStatusMessage(t("Created a new note"), "ready");
+      return;
+    }
+    await createAssistantResponseNote({
+      destination: { kind: "item", item: targetItem },
+      contentText,
+      queryText,
+      modelName,
+      paperContexts,
+      quoteCitations,
+      generatedImages,
+    });
+    setStatusMessage(t("Created a new note"), "ready");
+  } catch (err) {
+    deps.logError("Create note failed:", err);
+    setStatusMessage(t("Failed to create note"), "error");
+  }
+}
+
+async function queueResponseTurnDeletion(
+  deps: MenuActionControllerDeps,
+  reference: Partial<ResponseTurnReference> | null | undefined,
+  setStatusMessage: (
+    message: string,
+    level: "ready" | "warning" | "error",
+  ) => void,
+): Promise<void> {
+  const normalized = normalizeResponseTurnReference(reference);
+  const item = deps.getItem();
+  if (!normalized || !item) return;
+  if (deps.getConversationKey(item) !== normalized.conversationKey) {
+    setStatusMessage(t("Delete target changed"), "error");
+    return;
+  }
+  const pair = findResponseTurnPair(
+    deps.getHistory(normalized.conversationKey),
+    normalized,
+  );
+  if (!pair) {
+    setStatusMessage(t("No deletable turn found"), "error");
+    return;
+  }
+  if (pair.assistantMessage.streaming) {
+    setStatusMessage(t("Cannot delete while generating"), "ready");
+    return;
+  }
+  await deps.queueTurnDeletion(normalized);
+}
+
+function getToolbarResponseActionButton(
+  target: EventTarget | null,
+): HTMLButtonElement | null {
+  const element = target as Element | null;
+  if (!element || typeof element.closest !== "function") return null;
+  return element.closest(".llm-message-action") as HTMLButtonElement | null;
+}
+
+function attachToolbarResponseActions(
+  deps: MenuActionControllerDeps,
+  setStatusMessage: (
+    message: string,
+    level: "ready" | "warning" | "error",
+  ) => void,
+): void {
+  const body = deps.body as Element & {
+    __llmResponseActionListenerAttached?: boolean;
+  };
+  if (body.__llmResponseActionListenerAttached) return;
+  body.__llmResponseActionListenerAttached = true;
+  deps.body.addEventListener("click", async (event: Event) => {
+    const button = getToolbarResponseActionButton(event.target);
+    if (!button || button.disabled) return;
+    const action = getResponseActionKind(button.dataset.responseAction);
+    if (!action) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    if (typeof event.stopImmediatePropagation === "function") {
+      event.stopImmediatePropagation();
+    }
+    deps.closeResponseMenu();
+    deps.closePromptMenu();
+    deps.closeExportMenu();
+
+    try {
+      if (action === "delete") {
+        await queueResponseTurnDeletion(
+          deps,
+          getResponseTurnReferenceFromButton(button),
+          setStatusMessage,
+        );
+        return;
+      }
+      const target = buildToolbarResponseActionTarget(deps, button);
+      if (!target) return;
+      if (action === "copy") {
+        await copyResponseTarget(deps, target, setStatusMessage);
+      } else {
+        await saveResponseTargetAsNote(deps, target, setStatusMessage);
+      }
+    } catch (err) {
+      deps.logError("Response action failed:", err);
+      setStatusMessage(t("Response action failed"), "error");
+    }
+  });
+}
+
 export function attachMenuActionController(
   deps: MenuActionControllerDeps,
 ): void {
@@ -106,6 +403,8 @@ export function attachMenuActionController(
   ) => {
     if (deps.status) setStatus(deps.status, message, level);
   };
+
+  attachToolbarResponseActions(deps, setStatusMessage);
 
   if (
     deps.responseMenu &&
@@ -120,117 +419,21 @@ export function attachMenuActionController(
       e.stopPropagation();
       const target = deps.getResponseMenuTarget();
       deps.closeResponseMenu();
-      if (!target) return;
-      if (target.contentText.trim()) {
-        await copyRenderedMarkdownToClipboard(
-          deps.body,
-          target.contentText,
-          target.quoteCitations,
-        );
-        setStatusMessage(t("Copied response"), "ready");
-      } else if (target.generatedImages?.length) {
-        const result = await copyGeneratedImageToClipboard(
-          deps.body,
-          target.generatedImages[0]!,
-        );
-        setStatusMessage(
-          result === "image" ? "Copied image" : "Copied image source",
-          "ready",
-        );
-      }
+      await copyResponseTarget(deps, target, setStatusMessage);
     });
     deps.responseMenuNoteBtn.addEventListener("click", async (e: Event) => {
       e.preventDefault();
       e.stopPropagation();
       const target = deps.getResponseMenuTarget();
       deps.closeResponseMenu();
-      if (!target) {
-        deps.logError("LLM: Note save - no responseMenuTarget", null);
-        return;
-      }
-      const {
-        item: targetItem,
-        contentText,
-        modelName,
-        paperContexts,
-        quoteCitations,
-        generatedImages,
-      } = target;
-      if (!targetItem || (!contentText && !generatedImages?.length)) {
-        deps.logError("LLM: Note save - missing item or response content", null);
-        return;
-      }
-      try {
-        const targetNoteSession = deps.resolveActiveNoteSession(targetItem);
-        if (
-          deps.isGlobalMode() ||
-          isGlobalPortalItem(targetItem) ||
-          isClaudeGlobalPortalItem(targetItem) ||
-          targetNoteSession?.noteKind === "standalone"
-        ) {
-          const libraryID =
-            Number.isFinite(targetItem.libraryID) && targetItem.libraryID > 0
-              ? Math.floor(targetItem.libraryID)
-              : deps.getCurrentLibraryID();
-          await createStandaloneNoteFromAssistantText(
-            libraryID,
-            contentText,
-            modelName,
-            paperContexts,
-            quoteCitations,
-            generatedImages,
-          );
-          setStatusMessage(t("Created a new note"), "ready");
-          return;
-        }
-        const saveResult = await createNoteFromAssistantText(
-          targetItem,
-          contentText,
-          modelName,
-          paperContexts,
-          {
-            appendToTrackedNote: true,
-            rememberCreatedNote: true,
-            quoteCitations,
-            generatedImages,
-          },
-        );
-        setStatusMessage(
-          saveResult === "appended"
-            ? t("Appended to existing note")
-            : t("Created a new note"),
-          "ready",
-        );
-      } catch (err) {
-        deps.logError("Create note failed:", err);
-        setStatusMessage(t("Failed to create note"), "error");
-      }
+      await saveResponseTargetAsNote(deps, target, setStatusMessage);
     });
     deps.responseMenuDeleteBtn?.addEventListener("click", async (e: Event) => {
       e.preventDefault();
       e.stopPropagation();
       const target = deps.getResponseMenuTarget();
       deps.closeResponseMenu();
-      if (!target || !deps.getItem()) return;
-      const conversationKey = Number(target.conversationKey || 0);
-      const userTimestamp = Number(target.userTimestamp || 0);
-      const assistantTimestamp = Number(target.assistantTimestamp || 0);
-      if (
-        !Number.isFinite(conversationKey) ||
-        conversationKey <= 0 ||
-        !Number.isFinite(userTimestamp) ||
-        userTimestamp <= 0 ||
-        !Number.isFinite(assistantTimestamp) ||
-        assistantTimestamp <= 0
-      ) {
-        setStatusMessage(t("No deletable turn found"), "error");
-        return;
-      }
-      await deps.queueTurnDeletion({
-        conversationKey: Math.floor(conversationKey),
-        userTimestamp: Math.floor(userTimestamp),
-        assistantTimestamp: Math.floor(assistantTimestamp),
-      });
+      await queueResponseTurnDeletion(deps, target, setStatusMessage);
     });
   }
 

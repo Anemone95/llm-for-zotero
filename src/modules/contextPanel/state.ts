@@ -160,6 +160,7 @@ export function initFontScale(): void {
 export let responseMenuTarget: {
   item: Zotero.Item;
   contentText: string;
+  queryText?: string;
   modelName: string;
   conversationKey?: number;
   userTimestamp?: number;

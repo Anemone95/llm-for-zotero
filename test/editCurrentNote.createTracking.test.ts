@@ -2,9 +2,8 @@ import { assert } from "chai";
 import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
 import { ZoteroGateway } from "../src/agent/services/zoteroGateway";
 import {
-  createNoteFromAssistantText,
+  createAssistantResponseNote,
   createNoteFromChatHistory,
-  createStandaloneNoteFromAssistantText,
 } from "../src/modules/contextPanel/notes";
 import {
   getTrackedAssistantNoteForParent,
@@ -314,58 +313,49 @@ describe("editCurrentNote create tracking", function () {
     assert.match(String((error as Error).message), /multiple child notes/);
   });
 
-  it("response-menu note saves still opt into the tracked append chain", async function () {
-    const first = await createNoteFromAssistantText(
-      parentItem,
-      "First response",
-      "gpt-5.4",
-      undefined,
-      {
-        appendToTrackedNote: true,
-        rememberCreatedNote: true,
-      },
-    );
-    const second = await createNoteFromAssistantText(
-      parentItem,
-      "Second response",
-      "gpt-5.4",
-      undefined,
-      {
-        appendToTrackedNote: true,
-        rememberCreatedNote: true,
-      },
-    );
+  it("assistant response note saves create fresh item notes", async function () {
+    const first = await createAssistantResponseNote({
+      destination: { kind: "item", item: parentItem },
+      queryText: "First question",
+      contentText: "First response",
+      modelName: "gpt-5.4",
+    });
+    const second = await createAssistantResponseNote({
+      destination: { kind: "item", item: parentItem },
+      queryText: "Second question",
+      contentText: "Second response",
+      modelName: "gpt-5.4",
+    });
 
-    assert.equal(first, "created");
-    assert.equal(second, "appended");
-    assert.lengthOf(childNotes(9), 1);
-    assert.equal(getTrackedAssistantNoteForParent(9)?.id, childNotes(9)[0].id);
+    assert.equal(first.status, "created");
+    assert.equal(second.status, "created");
+    assert.lengthOf(childNotes(9), 2);
+    assert.isNull(getTrackedAssistantNoteForParent(9));
+    assert.include(childNotes(9)[0].getNote(), "First question");
     assert.include(childNotes(9)[0].getNote(), "First response");
-    assert.include(childNotes(9)[0].getNote(), "Second response");
+    assert.include(childNotes(9)[1].getNote(), "Second question");
+    assert.include(childNotes(9)[1].getNote(), "Second response");
   });
 
   it("response-menu note creation embeds generated images as Zotero note attachments", async function () {
-    const result = await createNoteFromAssistantText(
-      parentItem,
-      "Generated a figure.",
-      "Codex",
-      undefined,
-      {
-        appendToTrackedNote: true,
-        rememberCreatedNote: true,
-        generatedImages: [
-          {
-            id: "img-1",
-            label: "spine.png",
-            path: "/tmp/spine.png",
-          },
-        ],
-      },
-    );
+    const result = await createAssistantResponseNote({
+      destination: { kind: "item", item: parentItem },
+      queryText: "Generate a spine figure.",
+      contentText: "Generated a figure.",
+      modelName: "Codex",
+      generatedImages: [
+        {
+          id: "img-1",
+          label: "spine.png",
+          path: "/tmp/spine.png",
+        },
+      ],
+    });
 
-    assert.equal(result, "created");
+    assert.equal(result.status, "created");
     assert.lengthOf(childNotes(9), 1);
     const note = childNotes(9)[0];
+    assert.include(note.getNote(), "Generate a spine figure.");
     assert.include(note.getNote(), "Generated a figure.");
     assert.include(note.getNote(), 'data-attachment-key="IMG100_1"');
     assert.notInclude(note.getNote(), "Generated image embedded");
@@ -374,65 +364,58 @@ describe("editCurrentNote create tracking", function () {
     assert.deepEqual(importedImagePaths, ["/tmp/spine.png"]);
   });
 
-  it("tracked response-menu note appends embed generated images into the existing note", async function () {
-    await createNoteFromAssistantText(
-      parentItem,
-      "First response",
-      "Codex",
-      undefined,
-      {
-        appendToTrackedNote: true,
-        rememberCreatedNote: true,
-      },
-    );
+  it("response-menu generated images attach to the newly created item note", async function () {
+    await createAssistantResponseNote({
+      destination: { kind: "item", item: parentItem },
+      queryText: "First question",
+      contentText: "First response",
+      modelName: "Codex",
+    });
 
-    const result = await createNoteFromAssistantText(
-      parentItem,
-      "Second response",
-      "Codex",
-      undefined,
-      {
-        appendToTrackedNote: true,
-        rememberCreatedNote: true,
-        generatedImages: [
-          {
-            id: "img-2",
-            label: "diagram.png",
-            path: "/tmp/diagram.png",
-          },
-        ],
-      },
-    );
+    const result = await createAssistantResponseNote({
+      destination: { kind: "item", item: parentItem },
+      queryText: "Second question",
+      contentText: "Second response",
+      modelName: "Codex",
+      generatedImages: [
+        {
+          id: "img-2",
+          label: "diagram.png",
+          path: "/tmp/diagram.png",
+        },
+      ],
+    });
 
-    assert.equal(result, "appended");
-    assert.lengthOf(childNotes(9), 1);
-    const note = childNotes(9)[0];
-    assert.include(note.getNote(), "First response");
+    assert.equal(result.status, "created");
+    assert.lengthOf(childNotes(9), 2);
+    const note = childNotes(9)[1];
+    assert.notInclude(note.getNote(), "First response");
+    assert.include(note.getNote(), "Second question");
     assert.include(note.getNote(), "Second response");
-    assert.include(note.getNote(), 'data-attachment-key="IMG100_1"');
-    assert.deepEqual(importedImageParents, [100]);
+    assert.include(note.getNote(), 'data-attachment-key="IMG101_1"');
+    assert.deepEqual(importedImageParents, [101]);
   });
 
   it("standalone response notes embed generated images", async function () {
-    await createStandaloneNoteFromAssistantText(
-      1,
-      "Standalone generated figure.",
-      "Codex",
-      undefined,
-      undefined,
-      [
+    await createAssistantResponseNote({
+      destination: { kind: "standalone", libraryID: 1 },
+      queryText: "Generate a standalone figure.",
+      contentText: "Standalone generated figure.",
+      modelName: "Codex",
+      generatedImages: [
         {
           id: "img-standalone",
           label: "standalone.png",
           path: "/tmp/standalone.png",
         },
       ],
-    );
+    });
 
     const note = Array.from(savedItems.values()).find(
       (item) => (item as any).isNote?.() && !item.parentID,
     ) as unknown as MockNoteItem | undefined;
     assert.isOk(note);
+    assert.include(note!.getNote(), "Generate a standalone figure.");
     assert.include(note!.getNote(), "Standalone generated figure.");
     assert.include(note!.getNote(), 'data-attachment-key="IMG100_1"');
     assert.deepEqual(importedImageParents, [100]);

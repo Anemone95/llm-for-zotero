@@ -388,7 +388,13 @@ function buildAssistantNoteHtml(
   paperContexts?: PaperContextRef[],
   quoteCitations?: QuoteCitation[],
   generatedImagesHtml = "",
+  queryText = "",
 ): string {
+  const query = replaceQuoteCitationPlaceholdersForMarkdown(
+    sanitizeText(queryText || "").trim(),
+    quoteCitations,
+    { unresolved: "omit" },
+  );
   const response = replaceQuoteCitationPlaceholdersForMarkdown(
     sanitizeText(stripTrailingPluginFooter(contentText || "")).trim(),
     quoteCitations,
@@ -396,11 +402,18 @@ function buildAssistantNoteHtml(
   );
   const source = modelName.trim() || "unknown";
   const timestamp = getCurrentLocalTimestamp();
+  let queryHtml = query ? renderRawNoteHtml(query) : "";
   let responseHtml = response ? renderRawNoteHtml(response) : "";
+  if (queryHtml) {
+    queryHtml = injectCitationLinksIntoNoteHtml(queryHtml, paperContexts);
+  }
   if (responseHtml) {
     responseHtml = injectCitationLinksIntoNoteHtml(responseHtml, paperContexts);
   }
-  return `<p><strong>${escapeNoteHtml(timestamp)}</strong></p><p><strong>${escapeNoteHtml(source)}:</strong></p><div>${responseHtml}${generatedImagesHtml}</div>${NOTE_FOOTER_HTML}`;
+  const queryBlock = queryHtml
+    ? `<p><strong>User query:</strong></p><div>${queryHtml}</div>`
+    : "";
+  return `<p><strong>${escapeNoteHtml(timestamp)}</strong></p>${queryBlock}<p><strong>Model response:</strong> ${escapeNoteHtml(source)}</p><div>${responseHtml}${generatedImagesHtml}</div>${NOTE_FOOTER_HTML}`;
 }
 
 function renderChatMessageHtmlForNote(
@@ -799,6 +812,94 @@ function appendAssistantAnswerToNoteHtml(
   return `${base}<hr/>${addition}`;
 }
 
+export type AssistantResponseNoteDestination =
+  | { kind: "item"; item: Zotero.Item }
+  | { kind: "standalone"; libraryID: number };
+
+export type AssistantResponseNoteResult = {
+  status: "created";
+  destination: AssistantResponseNoteDestination["kind"];
+  noteId?: number;
+};
+
+export async function createAssistantResponseNote(params: {
+  destination: AssistantResponseNoteDestination;
+  contentText: string;
+  queryText?: string;
+  modelName: string;
+  paperContexts?: PaperContextRef[];
+  quoteCitations?: QuoteCitation[];
+  generatedImages?: GeneratedChatImage[];
+}): Promise<AssistantResponseNoteResult> {
+  let libraryID = 0;
+  let parentId: number | undefined;
+  if (params.destination.kind === "item") {
+    const parentItem = resolveParentItemForNoteTarget(params.destination.item);
+    parentId = parentItem?.id;
+    if (!parentItem || !parentId) {
+      throw new Error("No parent item available for note creation");
+    }
+    libraryID = parentItem.libraryID;
+  } else {
+    libraryID = Number.isFinite(params.destination.libraryID)
+      ? Math.floor(params.destination.libraryID)
+      : 0;
+    if (libraryID <= 0) {
+      throw new Error("Invalid library ID for standalone note creation");
+    }
+  }
+
+  const generatedImages = normalizeEmbeddableGeneratedImages(
+    params.generatedImages,
+  );
+  const buildHtml = async (noteId?: number): Promise<string> => {
+    const generatedImagesHtml =
+      noteId && generatedImages.length
+        ? await buildGeneratedImagesHtmlForNote(generatedImages, noteId)
+        : "";
+    return buildAssistantNoteHtml(
+      params.contentText,
+      params.modelName,
+      params.paperContexts,
+      params.quoteCitations,
+      generatedImagesHtml,
+      params.queryText,
+    );
+  };
+
+  const note = new Zotero.Item("note");
+  note.libraryID = libraryID;
+  if (parentId) note.parentID = parentId;
+  if (generatedImages.length) {
+    note.setNote("<p>Preparing generated images...</p>");
+  } else {
+    note.setNote(await buildHtml());
+  }
+  const saveResult = await note.saveTx();
+  const noteId =
+    typeof saveResult === "number" && saveResult > 0 ? saveResult : note.id;
+  if (generatedImages.length && noteId && noteId > 0) {
+    note.setNote(await buildHtml(noteId));
+    await note.saveTx();
+  }
+  if (noteId && noteId > 0) {
+    const target =
+      params.destination.kind === "item"
+        ? `parent ${parentId}`
+        : `library ${libraryID}`;
+    ztoolkit.log(`LLM: Created response note ${noteId} for ${target}`);
+  } else {
+    ztoolkit.log(
+      "LLM: Warning – response note was saved but could not determine note ID",
+    );
+  }
+  return {
+    status: "created",
+    destination: params.destination.kind,
+    noteId: noteId && noteId > 0 ? noteId : undefined,
+  };
+}
+
 export async function createNoteFromAssistantText(
   item: Zotero.Item,
   contentText: string,
@@ -809,6 +910,7 @@ export async function createNoteFromAssistantText(
     rememberCreatedNote?: boolean;
     quoteCitations?: QuoteCitation[];
     generatedImages?: GeneratedChatImage[];
+    queryText?: string;
   } = {},
 ): Promise<"created" | "appended"> {
   const parentItem = resolveParentItemForNoteTarget(item);
@@ -837,6 +939,7 @@ export async function createNoteFromAssistantText(
       paperContexts,
       options.quoteCitations,
       generatedImagesHtml,
+      options.queryText,
     );
   };
 
@@ -870,32 +973,19 @@ export async function createNoteFromAssistantText(
   }
 
   // No existing tracked note (or append failed) – create a brand-new note.
-  const note = new Zotero.Item("note");
-  note.libraryID = parentItem.libraryID;
-  note.parentID = parentId;
-  if (generatedImages.length) {
-    note.setNote("<p>Preparing generated images...</p>");
-  } else {
-    note.setNote(await buildHtml());
-  }
-  const saveResult = await note.saveTx();
-  // saveTx() returns the new item ID (number) on creation.
-  // Also check note.id as a fallback.
-  const newNoteId =
-    typeof saveResult === "number" && saveResult > 0 ? saveResult : note.id;
-  if (generatedImages.length && newNoteId && newNoteId > 0) {
-    note.setNote(await buildHtml(newNoteId));
-    await note.saveTx();
-  }
-  if (newNoteId && newNoteId > 0) {
+  const result = await createAssistantResponseNote({
+    destination: { kind: "item", item },
+    contentText,
+    queryText: options.queryText,
+    modelName,
+    paperContexts,
+    quoteCitations: options.quoteCitations,
+    generatedImages: options.generatedImages,
+  });
+  if (result.noteId && result.noteId > 0) {
     if (options.rememberCreatedNote) {
-      rememberAssistantNoteForParent(parentId, newNoteId);
+      rememberAssistantNoteForParent(parentId, result.noteId);
     }
-    ztoolkit.log(`LLM: Created new note ${newNoteId} for parent ${parentId}`);
-  } else {
-    ztoolkit.log(
-      "LLM: Warning – note was saved but could not determine note ID",
-    );
   }
   return "created";
 }
@@ -907,46 +997,17 @@ export async function createStandaloneNoteFromAssistantText(
   paperContexts?: PaperContextRef[],
   quoteCitations?: QuoteCitation[],
   generatedImages?: GeneratedChatImage[],
+  queryText?: string,
 ): Promise<"created"> {
-  const normalizedLibraryID = Number.isFinite(libraryID)
-    ? Math.floor(libraryID)
-    : 0;
-  if (normalizedLibraryID <= 0) {
-    throw new Error("Invalid library ID for standalone note creation");
-  }
-  const normalizedImages = normalizeEmbeddableGeneratedImages(generatedImages);
-  const note = new Zotero.Item("note");
-  note.libraryID = normalizedLibraryID;
-  if (normalizedImages.length) {
-    note.setNote("<p>Preparing generated images...</p>");
-    const saveResult = await note.saveTx();
-    const noteId =
-      typeof saveResult === "number" && saveResult > 0 ? saveResult : note.id;
-    const generatedImagesHtml =
-      noteId && noteId > 0
-        ? await buildGeneratedImagesHtmlForNote(normalizedImages, noteId)
-        : "";
-    note.setNote(
-      buildAssistantNoteHtml(
-        contentText,
-        modelName,
-        paperContexts,
-        quoteCitations,
-        generatedImagesHtml,
-      ),
-    );
-    await note.saveTx();
-  } else {
-    note.setNote(
-      buildAssistantNoteHtml(
-        contentText,
-        modelName,
-        paperContexts,
-        quoteCitations,
-      ),
-    );
-    await note.saveTx();
-  }
+  await createAssistantResponseNote({
+    destination: { kind: "standalone", libraryID },
+    contentText,
+    queryText,
+    modelName,
+    paperContexts,
+    quoteCitations,
+    generatedImages,
+  });
   return "created";
 }
 

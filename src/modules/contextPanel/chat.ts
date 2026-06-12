@@ -1308,6 +1308,8 @@ function attachAssistantResponseContextMenu(params: {
     setResponseMenuTarget({
       item,
       contentText: menuContent.contentText,
+      queryText:
+        pairedUserMessage?.role === "user" ? pairedUserMessage.text || "" : "",
       modelName: message.modelName?.trim() || "unknown",
       conversationKey,
       userTimestamp:
@@ -1324,6 +1326,41 @@ function attachAssistantResponseContextMenu(params: {
     });
     positionMenuAtPointer(body, responseMenu, me.clientX, me.clientY);
   });
+}
+
+function appendMessageMetaActionButton(params: {
+  doc: Document;
+  actions: HTMLElement;
+  className: string;
+  title: string;
+  responseAction?: "copy" | "note" | "delete";
+  conversationKey?: number;
+  userTimestamp?: number;
+  assistantTimestamp?: number;
+}): HTMLButtonElement {
+  const button = params.doc.createElement("button") as HTMLButtonElement;
+  button.type = "button";
+  button.className = `llm-message-action ${params.className}`;
+  button.title = params.title;
+  button.setAttribute("aria-label", params.title);
+  if (params.responseAction) {
+    button.dataset.responseAction = params.responseAction;
+  }
+  if (Number.isFinite(params.conversationKey)) {
+    button.dataset.conversationKey = String(
+      Math.floor(params.conversationKey!),
+    );
+  }
+  if (Number.isFinite(params.userTimestamp)) {
+    button.dataset.userTimestamp = String(Math.floor(params.userTimestamp!));
+  }
+  if (Number.isFinite(params.assistantTimestamp)) {
+    button.dataset.assistantTimestamp = String(
+      Math.floor(params.assistantTimestamp!),
+    );
+  }
+  params.actions.appendChild(button);
+  return button;
 }
 
 function getMessageSelectedTextExpandedIndex(
@@ -9633,22 +9670,75 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
     time.className = "llm-message-time";
     time.textContent = formatTime(msg.timestamp);
     meta.appendChild(time);
-    if (
-      !isUser &&
-      index === latestAssistantIndex &&
-      !msg.streaming &&
-      msg.text.trim() &&
-      !msg.compactMarker &&
-      msg.runMode !== "agent" &&
-      renderProviderProtocol !== "web_sync" // [webchat] no retry in webchat mode
-    ) {
-      const retryBtn = doc.createElement("button") as HTMLButtonElement;
-      retryBtn.type = "button";
-      retryBtn.className = "llm-retry-latest";
-      retryBtn.textContent = "↻";
-      retryBtn.title = "Retry response with another model";
-      retryBtn.setAttribute("aria-label", "Retry latest response");
-      meta.appendChild(retryBtn);
+    if (!isUser && !msg.compactMarker) {
+      const pairedUserForActions =
+        index > 0 && history[index - 1]?.role === "user"
+          ? history[index - 1]
+          : null;
+      const actionContent = resolveAssistantResponseMenuContent(msg);
+      const actionConversationKey = conversationKey;
+      const actionUserTimestamp =
+        pairedUserForActions?.role === "user"
+          ? Math.floor(pairedUserForActions.timestamp)
+          : 0;
+      const actionAssistantTimestamp = Math.floor(msg.timestamp);
+      const actions = doc.createElement("div") as HTMLDivElement;
+      actions.className = "llm-message-actions";
+
+      if (
+        index === latestAssistantIndex &&
+        !msg.streaming &&
+        msg.text.trim() &&
+        msg.runMode !== "agent" &&
+        renderProviderProtocol !== "web_sync" // [webchat] no retry in webchat mode
+      ) {
+        appendMessageMetaActionButton({
+          doc,
+          actions,
+          className: "llm-message-action-retry llm-retry-latest",
+          title: "Retry response with another model",
+        });
+      }
+
+      if (actionContent && actionUserTimestamp > 0) {
+        appendMessageMetaActionButton({
+          doc,
+          actions,
+          className: "llm-message-action-copy",
+          title: "Copy response",
+          responseAction: "copy",
+          conversationKey: actionConversationKey,
+          userTimestamp: actionUserTimestamp,
+          assistantTimestamp: actionAssistantTimestamp,
+        });
+        appendMessageMetaActionButton({
+          doc,
+          actions,
+          className: "llm-message-action-note",
+          title: "Save as note",
+          responseAction: "note",
+          conversationKey: actionConversationKey,
+          userTimestamp: actionUserTimestamp,
+          assistantTimestamp: actionAssistantTimestamp,
+        });
+      }
+
+      if (actionUserTimestamp > 0 && !msg.streaming) {
+        appendMessageMetaActionButton({
+          doc,
+          actions,
+          className: "llm-message-action-delete",
+          title: "Delete this turn",
+          responseAction: "delete",
+          conversationKey: actionConversationKey,
+          userTimestamp: actionUserTimestamp,
+          assistantTimestamp: actionAssistantTimestamp,
+        });
+      }
+
+      if (actions.childElementCount > 0) {
+        meta.appendChild(actions);
+      }
     }
 
     // [webchat] Collect status row data — rendered after meta, below the timestamp

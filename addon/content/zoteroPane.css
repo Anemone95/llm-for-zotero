@@ -3762,8 +3762,14 @@
   color: var(--fill-tertiary);
 }
 
+.llm-message-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
 .llm-edit-latest,
-.llm-retry-latest {
+.llm-message-action {
   appearance: none;
   -moz-appearance: none;
   display: inline-flex;
@@ -3789,17 +3795,51 @@
     opacity 120ms ease;
 }
 
+.llm-message-action::before {
+  content: "";
+  display: block;
+  width: 13px;
+  height: 13px;
+  background-color: currentColor;
+  mask-repeat: no-repeat;
+  mask-position: center;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  -webkit-mask-size: contain;
+}
+
+.llm-message-action-retry::before {
+  mask-image: url("icons/action-retry.svg");
+  -webkit-mask-image: url("icons/action-retry.svg");
+}
+
+.llm-message-action-copy::before {
+  mask-image: url("icons/action-copy.svg");
+  -webkit-mask-image: url("icons/action-copy.svg");
+}
+
+.llm-message-action-note::before {
+  mask-image: url("icons/action-note.svg");
+  -webkit-mask-image: url("icons/action-note.svg");
+}
+
+.llm-message-action-delete::before {
+  mask-image: url("icons/action-delete.svg");
+  -webkit-mask-image: url("icons/action-delete.svg");
+}
+
 .llm-edit-latest:hover:not(:disabled),
 .llm-edit-latest:focus-visible,
-.llm-retry-latest:hover:not(:disabled),
-.llm-retry-latest:focus-visible {
+.llm-message-action:hover:not(:disabled),
+.llm-message-action:focus-visible {
   color: var(--fill-primary);
   background: var(--fill-quaternary);
   opacity: 1;
 }
 
 .llm-edit-latest:disabled,
-.llm-retry-latest:disabled {
+.llm-message-action:disabled {
   opacity: 0.35;
   cursor: not-allowed;
 }
