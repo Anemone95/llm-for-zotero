@@ -285,7 +285,12 @@ export function attachMenuActionController(
         setStatusMessage(t("No forkable turn found"), "error");
         return;
       }
-      await deps.forkConversationFromTurn(target);
+      try {
+        await deps.forkConversationFromTurn(target);
+      } catch (err) {
+        deps.logError("Fork conversation failed:", err);
+        setStatusMessage(t("Failed to fork conversation"), "error");
+      }
     });
   }
 
@@ -322,7 +327,12 @@ export function attachMenuActionController(
         setStatusMessage(t("No forkable turn found"), "error");
         return;
       }
-      await deps.forkConversationFromTurn(target);
+      try {
+        await deps.forkConversationFromTurn(target);
+      } catch (err) {
+        deps.logError("Fork conversation failed:", err);
+        setStatusMessage(t("Failed to fork conversation"), "error");
+      }
     });
   }
 

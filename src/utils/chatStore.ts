@@ -1901,6 +1901,7 @@ export async function forkUpstreamConversationMessages(params: {
   if (!rows?.length) return 0;
 
   const targetConversationID = await resolveRegisteredConversationID(targetKey);
+  if (!targetConversationID) return 0;
   const timestampBase = Number.isFinite(Number(params.timestampBase))
     ? Math.floor(Number(params.timestampBase))
     : Date.now();

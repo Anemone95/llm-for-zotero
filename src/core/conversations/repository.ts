@@ -667,18 +667,27 @@ export const conversationRepository = {
     });
     if (!entry) return null;
 
-    const copiedMessageCount = await forkUpstreamConversationMessages({
-      sourceConversationKey,
-      targetConversationKey: entry.conversationKey,
-      throughAssistantTimestamp,
-      timestampBase: Date.now(),
-    });
-    if (copiedMessageCount <= 0) {
+    const cleanupForkEntry = async () => {
       await conversationRepository.deleteCatalogEntry({
         system: "upstream",
         kind: entry.kind,
         conversationKey: entry.conversationKey,
       });
+    };
+    let copiedMessageCount = 0;
+    try {
+      copiedMessageCount = await forkUpstreamConversationMessages({
+        sourceConversationKey,
+        targetConversationKey: entry.conversationKey,
+        throughAssistantTimestamp,
+        timestampBase: Date.now(),
+      });
+    } catch (err) {
+      await cleanupForkEntry();
+      throw err;
+    }
+    if (copiedMessageCount <= 0) {
+      await cleanupForkEntry();
       return null;
     }
 

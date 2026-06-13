@@ -315,6 +315,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     textContent: "",
   });
   topToast.style.display = "none";
+  topToast.setAttribute("role", "status");
   topToast.setAttribute("aria-live", "polite");
   topToast.setAttribute("aria-hidden", "true");
   header.appendChild(topToast);
