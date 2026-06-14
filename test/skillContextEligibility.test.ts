@@ -165,4 +165,42 @@ describe("skill context eligibility", function () {
       ["evidence-based-qa"],
     );
   });
+
+  it("prefers evidence-based paper QA over simple paper QA for automatic overlaps", function () {
+    loadBuiltInSkills();
+
+    assert.deepEqual(
+      getMatchedSkillIds({
+        userText: "what method did they use in this paper",
+        selectedPaperContexts: [paperA],
+      }),
+      ["evidence-based-qa"],
+    );
+  });
+
+  it("does not suppress explicitly selected simple paper QA", function () {
+    loadBuiltInSkills();
+
+    assert.deepEqual(
+      getMatchedSkillIds({
+        userText: "what method did they use in this paper",
+        selectedPaperContexts: [paperA],
+        forcedSkillIds: ["simple-paper-qa"],
+      }),
+      ["simple-paper-qa", "evidence-based-qa"],
+    );
+  });
+
+  it("suppresses automatic simple paper QA when evidence QA is explicit", function () {
+    loadBuiltInSkills();
+
+    assert.deepEqual(
+      getMatchedSkillIds({
+        userText: "summarize this paper",
+        selectedPaperContexts: [paperA],
+        forcedSkillIds: ["evidence-based-qa"],
+      }),
+      ["evidence-based-qa"],
+    );
+  });
 });

@@ -88,6 +88,7 @@ export function getBuiltinSkillInstruction(
 let skills: AgentSkill[] = [];
 
 const SIMPLE_PAPER_QA_SKILL_ID = "simple-paper-qa";
+const EVIDENCE_BASED_QA_SKILL_ID = "evidence-based-qa";
 const LIBRARY_ANALYSIS_SKILL_ID = "library-analysis";
 const SIMPLE_PAPER_QA_INTENT_PATTERN =
   /\b(understand|explain|walk me through|help me understand)\b.*\b(paper|ppaer|article|study)\b/i;
@@ -175,7 +176,7 @@ export function getMatchedSkillIds(
             .filter((skill) => matchesSkill(skill, request))
             .map((skill) => skill.id),
         );
-  return getAllSkills()
+  const matchedSkillIds = getAllSkills()
     .filter((skill) => {
       if (forcedIds.has(skill.id)) {
         return true;
@@ -186,4 +187,14 @@ export function getMatchedSkillIds(
       return isSkillContextEligible(skill, request);
     })
     .map((skill) => skill.id);
+
+  if (
+    matchedSkillIds.includes(EVIDENCE_BASED_QA_SKILL_ID) &&
+    matchedSkillIds.includes(SIMPLE_PAPER_QA_SKILL_ID) &&
+    !forcedIds.has(SIMPLE_PAPER_QA_SKILL_ID)
+  ) {
+    return matchedSkillIds.filter((id) => id !== SIMPLE_PAPER_QA_SKILL_ID);
+  }
+
+  return matchedSkillIds;
 }

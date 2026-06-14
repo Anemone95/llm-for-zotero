@@ -21,6 +21,7 @@ import {
 import {
   buildLegacyCodexAppServerChatInput,
   prepareCodexAppServerChatTurn,
+  type CodexAppServerUserInput,
 } from "../utils/codexAppServerInput";
 import {
   extractCodexAppServerThreadId,
@@ -188,6 +189,191 @@ function normalizeRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+type CodexNativeSkillInput = Extract<
+  CodexAppServerUserInput,
+  { type: "skill" }
+>;
+
+type CodexNativeSkillInputResolution = {
+  skillInputs: CodexNativeSkillInput[];
+  fallbackSkillIds: string[];
+};
+
+function pathSegments(value: string): string[] {
+  return value.split(/[\\/]+/).filter(Boolean);
+}
+
+function nativeSkillMetadataMatchesId(
+  metadata: CodexNativeSkillInput,
+  skillId: string,
+): boolean {
+  if (metadata.name === skillId) return true;
+  const segments = pathSegments(metadata.path);
+  const filename = segments[segments.length - 1] || "";
+  const parent = segments[segments.length - 2] || "";
+  if (/^SKILL\.md$/i.test(filename) && parent === skillId) return true;
+  return segments.includes(skillId);
+}
+
+function collectNativeSkillMetadata(
+  value: unknown,
+  entries: CodexNativeSkillInput[] = [],
+  seen = new Set<string>(),
+): CodexNativeSkillInput[] {
+  if (Array.isArray(value)) {
+    for (const entry of value) collectNativeSkillMetadata(entry, entries, seen);
+    return entries;
+  }
+  const record = normalizeRecord(value);
+  if (!Object.keys(record).length) return entries;
+
+  const name = normalizeNonEmptyString(record.name);
+  const path = normalizeNonEmptyString(record.path);
+  if (name && path && record.enabled !== false) {
+    const key = `${name}\n${path}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      entries.push({ type: "skill", name, path });
+    }
+  }
+
+  for (const nested of Object.values(record)) {
+    if (nested && typeof nested === "object") {
+      collectNativeSkillMetadata(nested, entries, seen);
+    }
+  }
+  return entries;
+}
+
+async function resolveCodexNativeSkillInputItems(params: {
+  proc: CodexAppServerProcess;
+  cwd?: string;
+  skillIds: ReadonlyArray<string>;
+}): Promise<CodexNativeSkillInputResolution> {
+  const skillIds = Array.from(new Set(params.skillIds.filter(Boolean)));
+  if (!skillIds.length) return { skillInputs: [], fallbackSkillIds: [] };
+
+  try {
+    const result = await params.proc.sendRequest("skills/list", {
+      cwds: params.cwd ? [params.cwd] : [],
+    });
+    const metadata = collectNativeSkillMetadata(result);
+    const used = new Set<number>();
+    const skillInputs: CodexNativeSkillInput[] = [];
+    const fallbackSkillIds: string[] = [];
+
+    for (const skillId of skillIds) {
+      const index = metadata.findIndex(
+        (entry, candidateIndex) =>
+          !used.has(candidateIndex) &&
+          nativeSkillMetadataMatchesId(entry, skillId),
+      );
+      if (index < 0) {
+        fallbackSkillIds.push(skillId);
+        continue;
+      }
+      used.add(index);
+      skillInputs.push(metadata[index]);
+    }
+
+    return { skillInputs, fallbackSkillIds };
+  } catch (error) {
+    ztoolkit.log(
+      "Codex app-server native: failed to resolve structured skill inputs",
+      error,
+    );
+    return { skillInputs: [], fallbackSkillIds: skillIds };
+  }
+}
+
+function stripLeadingCodexNativeSkillMentions(
+  text: string,
+  skillIds: ReadonlyArray<string>,
+): string {
+  const activeIds = new Set(skillIds);
+  if (!activeIds.size) return text;
+  let next = text;
+  for (;;) {
+    const match = next.match(/^\s*\$([A-Za-z0-9][A-Za-z0-9_-]*)(?:\s+|$)/);
+    if (!match || !activeIds.has(match[1])) return next;
+    next = next.slice(match[0].length).trimStart();
+  }
+}
+
+function stripLatestUserNativeSkillMentions(
+  messages: ChatMessage[],
+  skillIds: ReadonlyArray<string>,
+): ChatMessage[] {
+  if (!skillIds.length) return messages;
+  let stripped = false;
+  const nextMessages = messages.slice();
+  for (let index = nextMessages.length - 1; index >= 0; index -= 1) {
+    const message = nextMessages[index];
+    if (message?.role !== "user") continue;
+    if (typeof message.content === "string") {
+      const nextContent = stripLeadingCodexNativeSkillMentions(
+        message.content,
+        skillIds,
+      );
+      if (nextContent !== message.content) {
+        nextMessages[index] = { ...message, content: nextContent };
+      }
+      return nextMessages;
+    }
+    const parts = message.content.slice();
+    for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
+      const part = parts[partIndex];
+      if (part.type !== "text") continue;
+      const nextText = stripLeadingCodexNativeSkillMentions(
+        part.text || "",
+        skillIds,
+      );
+      if (nextText !== part.text) {
+        parts[partIndex] = { ...part, text: nextText };
+        stripped = true;
+      }
+      break;
+    }
+    if (stripped) nextMessages[index] = { ...message, content: parts };
+    return nextMessages;
+  }
+  return messages;
+}
+
+function prefixFallbackSkillMentions(
+  input: CodexAppServerUserInput[],
+  skillIds: ReadonlyArray<string>,
+): CodexAppServerUserInput[] {
+  const fallbackSkillIds = Array.from(new Set(skillIds.filter(Boolean)));
+  if (!fallbackSkillIds.length) return input;
+  const prefix = fallbackSkillIds.map((skillId) => `$${skillId}`).join("\n");
+  const nextInput = input.slice();
+  const textIndex = nextInput.findIndex((entry) => entry.type === "text");
+  if (textIndex < 0) {
+    return [{ type: "text", text: prefix }, ...nextInput];
+  }
+  const textInput = nextInput[textIndex] as Extract<
+    CodexAppServerUserInput,
+    { type: "text" }
+  >;
+  nextInput[textIndex] = {
+    ...textInput,
+    text: textInput.text.trim() ? `${prefix}\n\n${textInput.text}` : prefix,
+  };
+  return nextInput;
+}
+
+function applyNativeSkillInputs(params: {
+  input: CodexAppServerUserInput[];
+  resolution: CodexNativeSkillInputResolution;
+}): CodexAppServerUserInput[] {
+  const withFallback = prefixFallbackSkillMentions(
+    params.input,
+    params.resolution.fallbackSkillIds,
+  );
+  return [...params.resolution.skillInputs, ...withFallback];
 }
 
 function normalizePositiveInt(value: unknown): number | undefined {
@@ -1507,7 +1693,7 @@ export async function runCodexAppServerNativeTurn(params: {
         threadId: storedThreadId,
       });
       const resolvedSkills =
-        codexNativeSkillMode === "legacy"
+        codexNativeSkillMode !== "off"
           ? await resolveCodexNativeSkills({
               scope: scopeWithProfile,
               userText: latestUserText,
@@ -1517,6 +1703,25 @@ export async function runCodexAppServerNativeTurn(params: {
               skillContext: params.skillContext,
             })
           : { matchedSkillIds: [], instructionBlock: "" };
+      const nativeSkillInputResolution =
+        codexNativeSkillMode === "native"
+          ? await resolveCodexNativeSkillInputItems({
+              proc,
+              cwd: codexNativeRuntimeCwd,
+              skillIds: resolvedSkills.matchedSkillIds,
+            })
+          : { skillInputs: [], fallbackSkillIds: [] };
+      const skillInstructionBlock =
+        codexNativeSkillMode === "legacy"
+          ? resolvedSkills.instructionBlock
+          : "";
+      const messagesForNativeTurn =
+        codexNativeSkillMode === "native"
+          ? stripLatestUserNativeSkillMentions(
+              params.messages,
+              resolvedSkills.matchedSkillIds,
+            )
+          : params.messages;
       for (const skillId of resolvedSkills.matchedSkillIds) {
         params.onSkillActivated?.(skillId);
       }
@@ -1526,14 +1731,14 @@ export async function runCodexAppServerNativeTurn(params: {
       });
       const optimisticMcpReady = mcpEnabled;
       const developerInstructionMessages = buildNativeMessages({
-        messages: params.messages,
+        messages: messagesForNativeTurn,
         includeVisibleHistory: true,
         zoteroEnvironmentText: buildZoteroEnvironmentManifest({
           scope: scopeWithProfile,
           mcpEnabled,
           mcpReady: optimisticMcpReady,
           mcpWarning,
-          skillInstructionBlock: resolvedSkills.instructionBlock,
+          skillInstructionBlock,
         }),
       });
       const developerPreparedTurn = await prepareCodexAppServerChatTurn(
@@ -1580,14 +1785,14 @@ export async function runCodexAppServerNativeTurn(params: {
         });
       }
       const nativeMessages = buildNativeMessages({
-        messages: params.messages,
+        messages: messagesForNativeTurn,
         includeVisibleHistory: true,
         zoteroEnvironmentText: buildZoteroEnvironmentManifest({
           scope: scopeWithProfile,
           mcpEnabled,
           mcpReady,
           mcpWarning,
-          skillInstructionBlock: resolvedSkills.instructionBlock,
+          skillInstructionBlock,
           priorReadContextBlock,
           resourceContextBlock: visibleTurnContextBlock,
         }),
@@ -1606,9 +1811,16 @@ export async function runCodexAppServerNativeTurn(params: {
           buildLegacyCodexAppServerChatInput(nativeMessages),
         logContext: "native",
       });
+      const nativeInput =
+        codexNativeSkillMode === "native"
+          ? applyNativeSkillInputs({
+              input: input as CodexAppServerUserInput[],
+              resolution: nativeSkillInputResolution,
+            })
+          : input;
       return await executePreparedThread({
         thread,
-        input,
+        input: nativeInput,
         skillIds: resolvedSkills.matchedSkillIds,
       });
     } finally {
