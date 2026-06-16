@@ -2271,6 +2271,11 @@ export function detectReasoningProvider(
   if (name.startsWith("kimi")) {
     return "kimi";
   }
+  if (
+    /(^|[/:])mimo-v2(?:\.5)?(?:-(?:pro|omni|flash))?(?:\b|[.-])/.test(name)
+  ) {
+    return "mimo";
+  }
   if (/(^|[/:])(?:qwen(?:\d+)?|qwq|qvq)(?:\b|[.-])/.test(name)) {
     return "qwen";
   }

@@ -111,6 +111,7 @@ export type ReasoningProviderKind =
   | "gemini"
   | "deepseek"
   | "kimi"
+  | "mimo"
   | "qwen"
   | "grok"
   | "anthropic"
