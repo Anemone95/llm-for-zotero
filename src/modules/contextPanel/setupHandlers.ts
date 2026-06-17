@@ -6661,67 +6661,80 @@ export function setupHandlers(
     },
   });
 
+  const cancelActiveAgentAction = (options?: {
+    requireVisibleReviewCard?: boolean;
+  }): boolean => {
+    const cancelledReviewRequestIds = cancelVisiblePendingConfirmationCards(
+      chatBox || body,
+      (requestId, resolution) =>
+        getAgentApi().resolveConfirmation(requestId, resolution),
+    );
+    if (options?.requireVisibleReviewCard && !cancelledReviewRequestIds.length) {
+      return false;
+    }
+    syncHasActionCardAttr();
+    const cancelConvKey = item ? getConversationKey(item) : null;
+    if (cancelConvKey !== null) {
+      const ctrl = getAbortController(cancelConvKey);
+      if (ctrl) ctrl.abort();
+    }
+    // [webchat] Tell the browser extension to stop ChatGPT generation
+    if (isWebChatMode()) {
+      try {
+        const { relayRequestStop } = require("../../webchat/relayServer");
+        relayRequestStop();
+      } catch {
+        /* relay may not be loaded */
+      }
+    }
+    if (cancelConvKey !== null) {
+      setCancelledRequestId(cancelConvKey, getPendingRequestId(cancelConvKey));
+      clearPendingRequestIdAndSync(cancelConvKey, body, item);
+    }
+    if (status) setStatus(status, t("Cancelled"), "ready");
+    // Immediately mark the last assistant message as not streaming so any
+    // queued refresh won't bring back the loading dots.
+    if (item) {
+      const key = getConversationKey(item);
+      const history = chatHistory.get(key);
+      if (history) {
+        for (let i = history.length - 1; i >= 0; i--) {
+          if (history[i].role === "assistant") {
+            history[i].streaming = false;
+            if (!history[i].text) history[i].text = "[Cancelled]";
+            break;
+          }
+        }
+      }
+    }
+    body.querySelectorAll(".llm-typing").forEach((el: Element) => el.remove());
+    // Re-enable UI for the cancelled conversation
+    if (inputBox) inputBox.disabled = false;
+    if (sendBtn) {
+      sendBtn.style.display = "";
+      sendBtn.disabled = false;
+    }
+    if (cancelBtn) cancelBtn.style.display = "none";
+    scheduleQueuedFollowUpDrainForThread(getQueuedFollowUpThreadKey());
+    return true;
+  };
+
   // Cancel button
   if (cancelBtn) {
     cancelBtn.addEventListener("click", (e: Event) => {
       e.preventDefault();
       e.stopPropagation();
-      cancelVisiblePendingConfirmationCards(
-        chatBox || body,
-        (requestId, resolution) =>
-          getAgentApi().resolveConfirmation(requestId, resolution),
-      );
-      syncHasActionCardAttr();
-      const cancelConvKey = item ? getConversationKey(item) : null;
-      if (cancelConvKey !== null) {
-        const ctrl = getAbortController(cancelConvKey);
-        if (ctrl) ctrl.abort();
-      }
-      // [webchat] Tell the browser extension to stop ChatGPT generation
-      if (isWebChatMode()) {
-        try {
-          const { relayRequestStop } = require("../../webchat/relayServer");
-          relayRequestStop();
-        } catch {
-          /* relay may not be loaded */
-        }
-      }
-      if (cancelConvKey !== null) {
-        setCancelledRequestId(
-          cancelConvKey,
-          getPendingRequestId(cancelConvKey),
-        );
-        clearPendingRequestIdAndSync(cancelConvKey, body, item);
-      }
-      if (status) setStatus(status, t("Cancelled"), "ready");
-      // Immediately mark the last assistant message as not streaming so any
-      // queued refresh won't bring back the loading dots.
-      if (item) {
-        const key = getConversationKey(item);
-        const history = chatHistory.get(key);
-        if (history) {
-          for (let i = history.length - 1; i >= 0; i--) {
-            if (history[i].role === "assistant") {
-              history[i].streaming = false;
-              if (!history[i].text) history[i].text = "[Cancelled]";
-              break;
-            }
-          }
-        }
-      }
-      body
-        .querySelectorAll(".llm-typing")
-        .forEach((el: Element) => el.remove());
-      // Re-enable UI for the cancelled conversation
-      if (inputBox) inputBox.disabled = false;
-      if (sendBtn) {
-        sendBtn.style.display = "";
-        sendBtn.disabled = false;
-      }
-      cancelBtn.style.display = "none";
-      scheduleQueuedFollowUpDrainForThread(getQueuedFollowUpThreadKey());
+      cancelActiveAgentAction();
     });
   }
+
+  body.addEventListener("keydown", (e: Event) => {
+    const ke = e as KeyboardEvent;
+    if (ke.key !== "Escape" || ke.defaultPrevented) return;
+    if (!cancelActiveAgentAction({ requireVisibleReviewCard: true })) return;
+    e.preventDefault();
+    e.stopPropagation();
+  });
 
   // Clear button
   if (clearBtn) {
@@ -6734,6 +6747,7 @@ export function setupHandlers(
       closeHistoryNewMenu();
       closeHistoryMenu();
       activeEditSession = null;
+      if (cancelActiveAgentAction({ requireVisibleReviewCard: true })) return;
       if (!item) return;
 
       // [webchat] "Exit" button → restore previous model and leave webchat mode

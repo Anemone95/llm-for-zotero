@@ -5136,7 +5136,7 @@ label.llm-search-results-item:hover {
   grid-template-areas:
     "confirm page cancel"
     "left items right";
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px 10px;
   width: 100%;
@@ -5170,21 +5170,23 @@ label.llm-search-results-item:hover {
 
 .llm-agent-hitl-paged-confirm-btn {
   grid-area: confirm;
-  justify-self: end;
+  justify-self: start;
 }
 
 .llm-agent-hitl-paged-cancel-btn {
   grid-area: cancel;
-  justify-self: start;
+  justify-self: end;
 }
 
 .llm-agent-hitl-page-indicator {
   grid-area: page;
   flex: 0 0 auto;
+  justify-self: center;
   color: var(--fill-tertiary);
   font-size: var(--llm-fs-10);
   font-weight: 600;
   line-height: 1.2;
+  text-align: center;
   white-space: nowrap;
 }
 
@@ -5196,25 +5198,6 @@ label.llm-search-results-item:hover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-}
-
-@container (min-width: 640px) {
-  .llm-agent-hitl-paged-actions {
-    grid-template-areas: "left center right";
-    grid-template-columns: minmax(96px, 1fr) minmax(0, auto) minmax(96px, 1fr);
-    gap: 12px;
-  }
-
-  .llm-agent-hitl-paged-actions-center {
-    grid-area: center;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    justify-self: center;
-    max-width: 100%;
-  }
 }
 
 @container (max-width: 420px) {
@@ -8286,14 +8269,16 @@ label.llm-search-results-item:hover {
 /* ── Action progress indicator (in-thread "working" card) ─────────────── */
 
 .llm-action-progress-card {
-  margin: 8px 0;
-  padding: var(--llm-action-surface-padding);
-  border-radius: var(--llm-action-surface-radius);
-  border: var(--llm-action-surface-border);
-  background: var(--llm-action-surface-bg-strong);
+  margin: 8px 0 4px;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid var(--stroke-secondary);
+  background: var(--material-background);
+  color: var(--fill-primary);
   display: flex;
   flex-direction: column;
   gap: 6px;
+  flex: 0 0 auto;
 }
 
 .llm-action-progress-header {
