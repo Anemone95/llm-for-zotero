@@ -6,6 +6,7 @@ import type {
 import { formatPaperSourceLabel } from "./paperAttribution";
 import {
   findUniqueQuoteTextSearchMatch,
+  normalizeLocatorText,
   type QuoteTextSearchMatch,
 } from "./quoteTextSearch";
 
@@ -16,6 +17,11 @@ const STRUCTURED_SOURCE_MARKER_PATTERN =
   /\[\[\s*source\s*=\s*([^\]]+?)\s*\]\]/gi;
 const BRACKETED_SOURCE_METADATA_PATTERN = /\[\s*source\s*=\s*([^\]]+?)\s*\]/gi;
 const FENCED_CODE_PATTERN = /^[ \t]*(```|~~~)/;
+const SOURCE_QUOTE_ELLIPSIS_PATTERN =
+  /(?:\.{2,}|\u2026|\[\s*\.{2,}\s*\]|\[\s*\u2026\s*\])/;
+const SOURCE_QUOTE_ELLIPSIS_PATTERN_G =
+  /(?:\.{2,}|\u2026|\[\s*\.{2,}\s*\]|\[\s*\u2026\s*\])/g;
+const SOURCE_QUOTE_TOKEN_PATTERN = /[A-Za-z0-9]+/g;
 const SECTION_ONLY_LABELS = new Set([
   "abstract",
   "background",
@@ -117,7 +123,9 @@ function normalizeCitationLabelForMatch(value: unknown): string {
 }
 
 function citationInnerText(value: unknown): string {
-  return normalizeCitationLabel(value).replace(/^\(|\)$/g, "").trim();
+  return normalizeCitationLabel(value)
+    .replace(/^\(|\)$/g, "")
+    .trim();
 }
 
 export function isNonSourceQuoteLabel(value: string): boolean {
@@ -132,7 +140,10 @@ export function isNonSourceQuoteLabel(value: string): boolean {
     .replace(/^["'“”]+|["'“”]+$/g, "")
     .replace(/\s+/g, " ")
     .trim();
-  if (SECTION_ONLY_LABELS.has(inner) || SECTION_ONLY_LABELS.has(leadingSegment)) {
+  if (
+    SECTION_ONLY_LABELS.has(inner) ||
+    SECTION_ONLY_LABELS.has(leadingSegment)
+  ) {
     return true;
   }
   return (
@@ -166,9 +177,7 @@ export function isCanonicalQuoteSourceLabel(value: string): boolean {
   if (/\[[^\]]+\]/.test(inner)) return true;
   if (/^paper(?:\s+\d+)?$/i.test(inner)) return true;
   if (
-    /^[\p{L}][\p{L}'’.-]+(?:\s+(?:and|&)\s+[\p{L}][\p{L}'’.-]+)?$/u.test(
-      inner,
-    )
+    /^[\p{L}][\p{L}'’.-]+(?:\s+(?:and|&)\s+[\p{L}][\p{L}'’.-]+)?$/u.test(inner)
   ) {
     return true;
   }
@@ -516,7 +525,10 @@ export function buildQuoteSourceIndex(params: {
   const sources: QuoteSourceIndexEntry[] = [];
   const seen = new Set<string>();
   const pushSource = (entry: QuoteSourceIndexEntry | undefined) => {
-    if (!entry?.sourceText || !isCanonicalQuoteSourceLabel(entry.citationLabel)) {
+    if (
+      !entry?.sourceText ||
+      !isCanonicalQuoteSourceLabel(entry.citationLabel)
+    ) {
       return;
     }
     const key = quoteSourceKey(entry);
@@ -561,8 +573,202 @@ export function stripTrailingNonSourceQuoteLabelFromQuoteText(
 
 type QuoteSourceSearchMatch = {
   source: QuoteSourceIndexEntry;
+  sourceText: string;
   match: QuoteTextSearchMatch;
 };
+
+type SourceQuoteTokenSpan = {
+  token: string;
+  start: number;
+  end: number;
+};
+
+function locatorTokens(value: string): string[] {
+  return normalizeLocatorText(value).match(/[a-z0-9]+/g) || [];
+}
+
+function buildSourceQuoteTokenSpans(value: string): SourceQuoteTokenSpan[] {
+  const text = normalizeMultilineText(value);
+  return Array.from(text.matchAll(SOURCE_QUOTE_TOKEN_PATTERN))
+    .map((match) => {
+      const token = locatorTokens(match[0] || "")[0] || "";
+      const start = match.index || 0;
+      return {
+        token,
+        start,
+        end: start + (match[0] || "").length,
+      };
+    })
+    .filter((span) => Boolean(span.token));
+}
+
+function findTokenSequenceOccurrences(
+  spans: SourceQuoteTokenSpan[],
+  queryTokens: string[],
+): number[] {
+  if (
+    !spans.length ||
+    !queryTokens.length ||
+    queryTokens.length > spans.length
+  ) {
+    return [];
+  }
+  const starts: number[] = [];
+  const firstToken = queryTokens[0];
+  for (let start = 0; start <= spans.length - queryTokens.length; start += 1) {
+    if (spans[start].token !== firstToken) continue;
+    let matched = true;
+    for (let offset = 1; offset < queryTokens.length; offset += 1) {
+      if (spans[start + offset].token !== queryTokens[offset]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) starts.push(start);
+  }
+  return starts;
+}
+
+function expandSourceQuoteSpanStart(sourceText: string, start: number): number {
+  let cursor = start;
+  while (cursor > 0 && /["'“‘(\[]/.test(sourceText[cursor - 1])) {
+    cursor -= 1;
+  }
+  return cursor;
+}
+
+function expandSourceQuoteSpanEnd(sourceText: string, end: number): number {
+  let cursor = end;
+  while (
+    cursor < sourceText.length &&
+    /[.,;:!?"'”’)\]}]/.test(sourceText[cursor])
+  ) {
+    cursor += 1;
+  }
+  return cursor;
+}
+
+function findBestSourceQuoteSpan(params: {
+  quoteText: string;
+  sourceText: string;
+  queryText: string;
+}): string {
+  const queryTokens = locatorTokens(params.queryText);
+  if (!queryTokens.length) return "";
+  const quoteText = normalizeMultilineText(params.quoteText);
+  const sourceText = normalizeMultilineText(params.sourceText);
+  const quoteSpans = buildSourceQuoteTokenSpans(quoteText);
+  const sourceSpans = buildSourceQuoteTokenSpans(sourceText);
+  const quoteStarts = findTokenSequenceOccurrences(quoteSpans, queryTokens);
+  const sourceStarts = findTokenSequenceOccurrences(sourceSpans, queryTokens);
+  if (!quoteStarts.length || !sourceStarts.length) return "";
+
+  let best:
+    | {
+        tokenCount: number;
+        charLength: number;
+        text: string;
+      }
+    | undefined;
+  for (const quoteStart of quoteStarts) {
+    for (const sourceStart of sourceStarts) {
+      let left = 0;
+      while (
+        quoteStart - left - 1 >= 0 &&
+        sourceStart - left - 1 >= 0 &&
+        quoteSpans[quoteStart - left - 1].token ===
+          sourceSpans[sourceStart - left - 1].token
+      ) {
+        left += 1;
+      }
+
+      let right = queryTokens.length;
+      while (
+        quoteStart + right < quoteSpans.length &&
+        sourceStart + right < sourceSpans.length &&
+        quoteSpans[quoteStart + right].token ===
+          sourceSpans[sourceStart + right].token
+      ) {
+        right += 1;
+      }
+
+      const firstSourceToken = sourceSpans[sourceStart - left];
+      const lastSourceToken = sourceSpans[sourceStart + right - 1];
+      const sourceStartIndex = expandSourceQuoteSpanStart(
+        sourceText,
+        firstSourceToken.start,
+      );
+      const sourceEndIndex = expandSourceQuoteSpanEnd(
+        sourceText,
+        lastSourceToken.end,
+      );
+      const text = normalizeMultilineText(
+        sourceText.slice(sourceStartIndex, sourceEndIndex),
+      );
+      if (!text) continue;
+      const tokenCount = left + right;
+      const charLength = normalizeLocatorText(text).length;
+      if (
+        !best ||
+        tokenCount > best.tokenCount ||
+        (tokenCount === best.tokenCount && charLength > best.charLength)
+      ) {
+        best = { tokenCount, charLength, text };
+      }
+    }
+  }
+  return best?.text || "";
+}
+
+function stripSourceQuoteBoundaryEllipsis(value: string): string {
+  return normalizeMultilineText(value)
+    .replace(
+      new RegExp("^\\s*" + SOURCE_QUOTE_ELLIPSIS_PATTERN.source + "\\s*"),
+      "",
+    )
+    .replace(
+      new RegExp("\\s*" + SOURCE_QUOTE_ELLIPSIS_PATTERN.source + "\\s*$"),
+      "",
+    )
+    .trim();
+}
+
+function splitSourceQuoteEllipsisSegments(value: string): string[] {
+  const cleaned = stripSourceQuoteBoundaryEllipsis(value);
+  if (!SOURCE_QUOTE_ELLIPSIS_PATTERN.test(cleaned)) return [];
+  return cleaned
+    .split(SOURCE_QUOTE_ELLIPSIS_PATTERN_G)
+    .map((segment) => normalizeMultilineText(segment))
+    .filter((segment) => normalizeLocatorText(segment).length >= 24);
+}
+
+function reconstructSourceConfirmedQuoteText(params: {
+  quoteText: string;
+  sourceText: string;
+  match?: QuoteTextSearchMatch;
+}): string {
+  const ellipsisSegments = splitSourceQuoteEllipsisSegments(params.quoteText);
+  if (ellipsisSegments.length) {
+    const confirmedSegments = ellipsisSegments
+      .map((segment) =>
+        findBestSourceQuoteSpan({
+          quoteText: segment,
+          sourceText: params.sourceText,
+          queryText: segment,
+        }),
+      )
+      .filter(Boolean);
+    if (confirmedSegments.length) {
+      return normalizeMultilineText(confirmedSegments.join(" ... "));
+    }
+  }
+
+  return findBestSourceQuoteSpan({
+    quoteText: params.quoteText,
+    sourceText: params.sourceText,
+    queryText: params.match?.query || params.quoteText,
+  });
+}
 
 function quoteSourceIdentityKey(
   source: QuoteSourceIndexEntry,
@@ -622,17 +828,26 @@ function findUniqueQuoteSourceMatch(params: {
     debugLabel: "Quote source",
   });
   if (!match) return undefined;
-  const source = groupedSources.get(match.entryId)?.source;
-  return source ? { source, match } : undefined;
+  const group = groupedSources.get(match.entryId);
+  return group
+    ? { source: group.source, sourceText: group.texts.join("\n\n"), match }
+    : undefined;
 }
 
 function buildTrustedQuoteCitationFromSource(params: {
   quoteText: string;
   source: QuoteSourceIndexEntry;
+  sourceText: string;
   match?: QuoteTextSearchMatch;
 }): QuoteCitation | undefined {
-  return buildQuoteCitation({
+  const quoteText = reconstructSourceConfirmedQuoteText({
     quoteText: stripTrailingNonSourceQuoteLabelFromQuoteText(params.quoteText),
+    sourceText: params.sourceText,
+    match: params.match,
+  });
+  if (!quoteText) return undefined;
+  return buildQuoteCitation({
+    quoteText,
     citationLabel: params.source.citationLabel,
     sourceMatchText: params.match?.query,
     sourceMatchKind: params.match?.matchKind,
@@ -702,6 +917,7 @@ function resolveQuoteCitationForFinalizer(params: {
     ? buildTrustedQuoteCitationFromSource({
         quoteText,
         source: sourceMatch.source,
+        sourceText: sourceMatch.sourceText,
         match: sourceMatch.match,
       })
     : undefined;
@@ -722,6 +938,7 @@ function resolveUnlabeledQuoteCitationForFinalizer(params: {
     ? buildTrustedQuoteCitationFromSource({
         quoteText,
         source: sourceMatch.source,
+        sourceText: sourceMatch.sourceText,
         match: sourceMatch.match,
       })
     : undefined;
@@ -779,7 +996,9 @@ export function finalizeAssistantQuoteCitations(params: {
     params.quoteCitations,
     sourceIndex.quoteCitations,
   );
-  const markdown = sanitizeInvalidStructuredSourceMarkers(params.markdown || "");
+  const markdown = sanitizeInvalidStructuredSourceMarkers(
+    params.markdown || "",
+  );
   if (!markdown) return { markdown, quoteCitations };
   const lines = markdown.split("\n");
   const out: string[] = [];
@@ -803,9 +1022,8 @@ export function finalizeAssistantQuoteCitations(params: {
       index += 1;
     }
     const originalQuoteText = normalizeMultilineText(quoteLines.join("\n"));
-    let quoteText = stripTrailingNonSourceQuoteLabelFromQuoteText(
-      originalQuoteText,
-    );
+    let quoteText =
+      stripTrailingNonSourceQuoteLabelFromQuoteText(originalQuoteText);
 
     const trailingLabel = quoteLines.length
       ? extractLeadingParentheticalLabel(quoteLines[quoteLines.length - 1])

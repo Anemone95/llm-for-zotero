@@ -2280,9 +2280,7 @@ export function detectReasoningProvider(
   if (name.startsWith("kimi")) {
     return "kimi";
   }
-  if (
-    /(^|[/:])mimo-v2(?:\.5)?(?:-(?:pro|omni|flash))?(?:\b|[.-])/.test(name)
-  ) {
+  if (/(^|[/:])mimo-v2(?:\.5)?(?:-(?:pro|omni|flash))?(?:\b|[.-])/.test(name)) {
     return "mimo";
   }
   if (/(^|[/:])(?:qwen(?:\d+)?|qwq|qvq)(?:\b|[.-])/.test(name)) {
@@ -3495,7 +3493,7 @@ async function buildContextPlanForRequest(params: {
 function quoteSourcePaperKey(paper: PaperContextRef): string {
   return `${Math.floor(Number(paper.itemId || 0))}:${Math.floor(
     Number(paper.contextItemId || 0),
-  )}`;
+  )}:${paper.contentSourceMode || ""}`;
 }
 
 function cachedQuoteSourceText(contextItemId: number): string {
@@ -3529,19 +3527,22 @@ async function ensureQuoteSourceTextCachedForPaper(
 ): Promise<void> {
   const contextItemId = Math.floor(Number(paper.contextItemId || 0));
   if (!Number.isFinite(contextItemId) || contextItemId <= 0) return;
-  if (hasCachedQuoteSourceText(contextItemId)) return;
 
   const contextItem = resolveQuoteSourceContextItem(paper);
   if (!contextItem) return;
 
   // An empty cache entry means an earlier extraction attempt did not provide
   // searchable text. Retry here before the provenance finalizer gives up.
-  if (pdfTextCache.has(contextItemId)) {
+  if (
+    !hasCachedQuoteSourceText(contextItemId) &&
+    pdfTextCache.has(contextItemId)
+  ) {
     pdfTextCache.delete(contextItemId);
   }
 
   try {
     if ((contextItem as any).isNote?.()) {
+      if (hasCachedQuoteSourceText(contextItemId)) return;
       await ensureNoteTextCached(contextItem);
     } else {
       await ensurePDFTextCached(contextItem, {
@@ -3573,11 +3574,8 @@ async function buildQuoteSourceTextsForPaperContexts(
     uniquePapers.push(paper);
   }
 
-  await Promise.all(
-    uniquePapers.map((paper) => ensureQuoteSourceTextCachedForPaper(paper)),
-  );
-
   for (const paper of uniquePapers) {
+    await ensureQuoteSourceTextCachedForPaper(paper);
     const contextItemId = Math.floor(Number(paper.contextItemId || 0));
     if (!Number.isFinite(contextItemId) || contextItemId <= 0) continue;
     const sourceText = cachedQuoteSourceText(contextItemId);

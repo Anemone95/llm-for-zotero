@@ -98,6 +98,9 @@ describe("quote card UI contract", function () {
     assert.include(chatSource, "ensureQuoteSourceTextCachedForPaper");
     assert.include(chatSource, "assistantMarkdownNeedsQuoteSourceSearch");
     assert.include(chatSource, "await ensurePDFTextCached(contextItem");
+    assert.include(chatSource, 'paper.contentSourceMode || ""');
+    assert.include(chatSource, "!hasCachedQuoteSourceText(contextItemId) &&");
+    assert.include(chatSource, "pdfTextCache.has(contextItemId)");
     assert.include(chatSource, "await buildQuoteSourceTextsForPaperContexts");
     assert.include(chatSource, "await finalizeAssistantMessageQuoteCitations");
   });

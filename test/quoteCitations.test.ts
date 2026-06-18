@@ -234,19 +234,23 @@ describe("quoteCitations", function () {
 
     assert.match(finalized.markdown, /\[\[quote:Q_[a-z0-9]+\]\]/);
     assert.lengthOf(finalized.quoteCitations, 1);
-    assert.equal(finalized.quoteCitations[0].citationLabel, "(Busch et al., 2026)");
+    assert.equal(
+      finalized.quoteCitations[0].citationLabel,
+      "(Busch et al., 2026)",
+    );
     assert.equal(finalized.quoteCitations[0].sourceMatchKind, "exact");
   });
 
   it("repairs incomplete paper blockquotes through unique source snippets", function () {
+    const sourceText =
+      "We hypothesized that some brain states are easier for people to generate, and that tailoring training to these brain states will facilitate BCI learning.";
     const finalized = finalizeAssistantQuoteCitations({
       markdown:
         "> We hypothesized that some brain states are easier for people to generate, and that tailoring training to these brain states will facilitate BCI learning. This added sentence is not source text.",
       sourceIndex: buildQuoteSourceIndex({
         sourceTexts: [
           {
-            sourceText:
-              "We hypothesized that some brain states are easier for people to generate, and that tailoring training to these brain states will facilitate BCI learning.",
+            sourceText,
             sourceLabel: "(Busch et al., 2026)",
             contextItemId: 22,
           },
@@ -256,22 +260,38 @@ describe("quoteCitations", function () {
 
     assert.match(finalized.markdown, /\[\[quote:Q_[a-z0-9]+\]\]/);
     assert.lengthOf(finalized.quoteCitations, 1);
-    assert.equal(finalized.quoteCitations[0].citationLabel, "(Busch et al., 2026)");
+    assert.equal(
+      finalized.quoteCitations[0].citationLabel,
+      "(Busch et al., 2026)",
+    );
     assert.include(
       finalized.quoteCitations[0].sourceMatchText || "",
       "we hypothesized that some brain states are easier",
     );
+    assert.equal(finalized.quoteCitations[0].quoteText, sourceText);
+    assert.notInclude(
+      finalized.quoteCitations[0].quoteText,
+      "This added sentence is not source text",
+    );
+    assert.notInclude(
+      replaceQuoteCitationPlaceholdersForMarkdown(
+        finalized.markdown,
+        finalized.quoteCitations,
+      ),
+      "This added sentence is not source text",
+    );
   });
 
   it("repairs blockquotes when only an interior source snippet matches", function () {
+    const sourceText =
+      "The encoder learned a nonlinear mapping from brain activity to the manifold in real time.";
     const finalized = finalizeAssistantQuoteCitations({
       markdown:
         "> The assistant starts with unsupported wording. The encoder learned a nonlinear mapping from brain activity to the manifold in real time. Then it adds unsupported wording.",
       sourceIndex: buildQuoteSourceIndex({
         sourceTexts: [
           {
-            sourceText:
-              "The encoder learned a nonlinear mapping from brain activity to the manifold in real time.",
+            sourceText,
             sourceLabel: "(Busch et al., 2026)",
             contextItemId: 22,
           },
@@ -285,6 +305,11 @@ describe("quoteCitations", function () {
       "raw-middle",
       "progressive",
     ]);
+    assert.equal(finalized.quoteCitations[0].quoteText, sourceText);
+    assert.notInclude(
+      finalized.quoteCitations[0].quoteText,
+      "unsupported wording",
+    );
   });
 
   it("repairs ellipsized paper blockquotes through ordered source fragments", function () {
@@ -305,7 +330,10 @@ describe("quoteCitations", function () {
 
     assert.match(finalized.markdown, /\[\[quote:Q_[a-z0-9]+\]\]/);
     assert.lengthOf(finalized.quoteCitations, 1);
-    assert.equal(finalized.quoteCitations[0].citationLabel, "(Busch et al., 2026)");
+    assert.equal(
+      finalized.quoteCitations[0].citationLabel,
+      "(Busch et al., 2026)",
+    );
   });
 
   it("repairs ellipsized paper blockquotes when extracted fragment order differs", function () {
@@ -326,7 +354,10 @@ describe("quoteCitations", function () {
 
     assert.match(finalized.markdown, /\[\[quote:Q_[a-z0-9]+\]\]/);
     assert.lengthOf(finalized.quoteCitations, 1);
-    assert.equal(finalized.quoteCitations[0].citationLabel, "(Busch et al., 2026)");
+    assert.equal(
+      finalized.quoteCitations[0].citationLabel,
+      "(Busch et al., 2026)",
+    );
   });
 
   it("repairs ellipsized paper blockquotes across hyphenation differences", function () {
@@ -347,7 +378,10 @@ describe("quoteCitations", function () {
 
     assert.match(finalized.markdown, /\[\[quote:Q_[a-z0-9]+\]\]/);
     assert.lengthOf(finalized.quoteCitations, 1);
-    assert.equal(finalized.quoteCitations[0].citationLabel, "(Busch et al., 2026)");
+    assert.equal(
+      finalized.quoteCitations[0].citationLabel,
+      "(Busch et al., 2026)",
+    );
   });
 
   it("keeps ambiguous ellipsized quotes unanchored", function () {
@@ -407,7 +441,10 @@ describe("quoteCitations", function () {
 
     assert.match(finalized.markdown, /\[\[quote:Q_[a-z0-9]+\]\]/);
     assert.lengthOf(finalized.quoteCitations, 1);
-    assert.notInclude(finalized.quoteCitations[0].quoteText, "Supplementary Table");
+    assert.notInclude(
+      finalized.quoteCitations[0].quoteText,
+      "Supplementary Table",
+    );
     const exported = replaceQuoteCitationPlaceholdersForMarkdown(
       finalized.markdown,
       finalized.quoteCitations,
@@ -458,7 +495,10 @@ describe("quoteCitations", function () {
     });
 
     assert.include(finalized.markdown, `[[quote:${citation!.id}]]`);
-    assert.include(finalized.markdown, "And this explains why learning succeeded.");
+    assert.include(
+      finalized.markdown,
+      "And this explains why learning succeeded.",
+    );
     assert.notInclude(finalized.markdown, "(Busch et al., 2026) And");
   });
 
