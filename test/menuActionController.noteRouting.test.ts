@@ -722,6 +722,84 @@ describe("menu action controller note routing", function () {
     ]);
   });
 
+  it("maps footer fork through the registered action runner without menu buttons", async function () {
+    const body = new FakeElement();
+    const currentItem = {
+      id: 42,
+      libraryID: 1,
+    } as unknown as Zotero.Item;
+    const forks: unknown[] = [];
+    const target: ResponseActionTarget = {
+      item: currentItem,
+      contentText: "",
+      queryText: "Question",
+      modelName: "Codex",
+      conversationKey: 9,
+      userTimestamp: 100,
+      assistantTimestamp: 200,
+    };
+
+    attachMenuActionController({
+      body: body as unknown as Element,
+      status: new FakeElement() as unknown as HTMLElement,
+      responseMenu: null,
+      responseMenuCopyBtn: null,
+      responseMenuNoteBtn: null,
+      responseMenuForkBtn: null,
+      responseMenuDeleteBtn: null,
+      promptMenu: null,
+      promptMenuForkBtn: null,
+      promptMenuDeleteBtn: null,
+      exportMenu: null,
+      exportMenuCopyBtn: null,
+      exportMenuNoteBtn: null,
+      exportBtn: null,
+      popoutBtn: null,
+      settingsBtn: null,
+      preferencesPaneId: "llm-for-zotero-test",
+      getItem: () => currentItem,
+      getResponseMenuTarget: () => responseMenuTarget,
+      getPromptMenuTarget: () => null,
+      getCurrentLibraryID: () => 1,
+      getConversationSystem: () => "codex",
+      getCurrentRuntimeModeForItem: () => "agent",
+      isGlobalMode: () => true,
+      ensureConversationLoaded: async () => {},
+      getConversationKey: () => 9,
+      getHistory: () => [],
+      resolveActiveNoteSession: () => null,
+      closeResponseMenu: () => {},
+      closePromptMenu: () => {},
+      closeExportMenu: () => {},
+      closeRetryModelMenu: () => {},
+      closeSlashMenu: () => {},
+      closeHistoryNewMenu: () => {},
+      closeHistoryMenu: () => {},
+      queueTurnDeletion: async () => {},
+      forkConversationFromTurn: async (forkTarget) => {
+        forks.push(forkTarget);
+      },
+      logError: () => {},
+    });
+
+    const invoked = invokeResponseMenuActionButton({
+      body: body as unknown as Element,
+      action: "fork",
+      target,
+    });
+    await flushAsyncEvents();
+
+    assert.isTrue(invoked);
+    assert.deepEqual(forks, [
+      {
+        item: currentItem,
+        conversationKey: 9,
+        userTimestamp: 100,
+        assistantTimestamp: 200,
+      },
+    ]);
+  });
+
   it("keeps footer response actions scoped to their owning panel body", async function () {
     const bodyA = new FakeElement();
     const bodyB = new FakeElement();

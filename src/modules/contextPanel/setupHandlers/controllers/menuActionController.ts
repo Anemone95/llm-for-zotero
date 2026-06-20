@@ -38,7 +38,7 @@ export type ResponseMenuTarget = {
   generatedImages?: GeneratedChatImage[];
 } | null;
 
-type ResponseActionKind = "copy" | "note" | "delete";
+type ResponseActionKind = "copy" | "note" | "fork" | "delete";
 
 type ResponseTurnReference = {
   conversationKey: number;
@@ -60,8 +60,10 @@ type MenuActionControllerDeps = {
   responseMenu: HTMLDivElement | null;
   responseMenuCopyBtn: HTMLButtonElement | null;
   responseMenuNoteBtn: HTMLButtonElement | null;
+  responseMenuForkBtn: HTMLButtonElement | null;
   responseMenuDeleteBtn: HTMLButtonElement | null;
   promptMenu: HTMLDivElement | null;
+  promptMenuForkBtn: HTMLButtonElement | null;
   promptMenuDeleteBtn: HTMLButtonElement | null;
   exportMenu: HTMLDivElement | null;
   exportMenuCopyBtn: HTMLButtonElement | null;
@@ -89,6 +91,12 @@ type MenuActionControllerDeps = {
   closeHistoryNewMenu: () => void;
   closeHistoryMenu: () => void;
   queueTurnDeletion: (target: {
+    conversationKey: number;
+    userTimestamp: number;
+    assistantTimestamp: number;
+  }) => Promise<void>;
+  forkConversationFromTurn: (target: {
+    item: Zotero.Item;
     conversationKey: number;
     userTimestamp: number;
     assistantTimestamp: number;
@@ -348,6 +356,32 @@ async function queueResponseTurnDeletion(
   await deps.queueTurnDeletion(normalized);
 }
 
+function normalizeTurnTarget(
+  target: Pick<
+    NonNullable<ResponseMenuTarget | PromptMenuTarget>,
+    "item" | "conversationKey" | "userTimestamp" | "assistantTimestamp"
+  > | null,
+): {
+  item: Zotero.Item;
+  conversationKey: number;
+  userTimestamp: number;
+  assistantTimestamp: number;
+} | null {
+  if (!target?.item) return null;
+  const conversationKey = parsePositiveFiniteNumber(target.conversationKey);
+  const userTimestamp = parsePositiveFiniteNumber(target.userTimestamp);
+  const assistantTimestamp = parsePositiveFiniteNumber(
+    target.assistantTimestamp,
+  );
+  if (!conversationKey || !userTimestamp || !assistantTimestamp) return null;
+  return {
+    item: target.item,
+    conversationKey,
+    userTimestamp,
+    assistantTimestamp,
+  };
+}
+
 export async function runResponseMenuAction(
   deps: MenuActionControllerDeps,
   action: ResponseActionKind,
@@ -364,6 +398,15 @@ export async function runResponseMenuAction(
     }
     if (action === "note") {
       await saveResponseTargetAsNote(deps, target, setStatusMessage);
+      return;
+    }
+    if (action === "fork") {
+      const normalized = normalizeTurnTarget(target);
+      if (!normalized) {
+        setStatusMessage(t("No forkable turn found"), "error");
+        return;
+      }
+      await deps.forkConversationFromTurn(normalized);
       return;
     }
     await queueResponseTurnDeletion(deps, target, setStatusMessage);
@@ -416,6 +459,13 @@ export function attachMenuActionController(
       deps.closeResponseMenu();
       await runResponseMenuAction(deps, "delete", target, setStatusMessage);
     });
+    deps.responseMenuForkBtn?.addEventListener("click", async (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const target = deps.getResponseMenuTarget();
+      deps.closeResponseMenu();
+      await runResponseMenuAction(deps, "fork", target, setStatusMessage);
+    });
   }
 
   if (deps.promptMenu && !deps.promptMenu.dataset.listenerAttached) {
@@ -441,6 +491,22 @@ export function attachMenuActionController(
         userTimestamp: Math.floor(target.userTimestamp),
         assistantTimestamp: Math.floor(target.assistantTimestamp),
       });
+    });
+    deps.promptMenuForkBtn?.addEventListener("click", async (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const target = normalizeTurnTarget(deps.getPromptMenuTarget());
+      deps.closePromptMenu();
+      if (!target) {
+        setStatusMessage(t("No forkable turn found"), "error");
+        return;
+      }
+      try {
+        await deps.forkConversationFromTurn(target);
+      } catch (err) {
+        deps.logError("Fork conversation failed:", err);
+        setStatusMessage(t("Failed to fork conversation"), "error");
+      }
     });
   }
 

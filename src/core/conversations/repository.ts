@@ -24,6 +24,8 @@ import {
   deleteCodexTurnMessages,
   ensureCodexGlobalConversation,
   ensureCodexPaperConversation,
+  forkCodexConversationMessages,
+  getLatestCodexForkableAssistantTimestamp,
   getCodexConversationSummary,
   loadCodexConversation,
   listAllCodexPaperConversationsByLibrary,
@@ -57,6 +59,7 @@ import {
   deleteTurnMessages as deleteUpstreamTurnMessages,
   ensureGlobalConversationExists,
   ensurePaperV1Conversation,
+  forkUpstreamConversationMessages,
   getGlobalConversation,
   getPaperConversation,
   loadConversation as loadUpstreamConversation,
@@ -72,6 +75,12 @@ import {
   touchPaperConversationTitle,
   type StoredChatMessage,
 } from "../../utils/chatStore";
+import { codexAppServerForkService } from "../../codexAppServer/forkService";
+import {
+  deleteConversationForkLink,
+  recordConversationForkLink,
+  type ConversationForkLink,
+} from "../../shared/conversationForkLinks";
 
 export type ConversationCatalogKind = "global" | "paper";
 
@@ -131,6 +140,19 @@ type EnsureCatalogEntryParams = ConversationCatalogScope & {
 };
 
 type CreateCatalogEntryParams = ConversationCatalogScope;
+
+type ForkConversationParams = ConversationCatalogScope & {
+  sourceConversationKey: number;
+  throughAssistantTimestamp: number;
+  title?: string;
+};
+
+export type ForkConversationResult = {
+  entry: ConversationCatalogEntry;
+  copiedMessageCount: number;
+  targetAnchorAssistantTimestamp: number;
+  forkLink: ConversationForkLink;
+};
 
 function normalizePositiveInt(value: unknown): number {
   const parsed = Number(value);
@@ -300,7 +322,9 @@ async function repairRuntimeRegistryFromSummary(
   system: "claude_code" | "codex",
   summary: ClaudeConversationSummary | CodexConversationSummary,
 ): Promise<void> {
-  const existing = await getRegisteredConversationScope(summary.conversationKey);
+  const existing = await getRegisteredConversationScope(
+    summary.conversationKey,
+  );
   if (
     existing &&
     !existing.valid &&
@@ -330,7 +354,9 @@ async function repairUpstreamRuntimeRegistryFromEntry(
   entry: ConversationCatalogEntry,
 ): Promise<boolean> {
   if (entry.system !== "upstream") return true;
-  if (!isConversationKeyForKind("upstream", entry.kind, entry.conversationKey)) {
+  if (
+    !isConversationKeyForKind("upstream", entry.kind, entry.conversationKey)
+  ) {
     return false;
   }
   return await repairRegisteredConversationScope({
@@ -619,6 +645,175 @@ export const conversationRepository = {
       : null;
   },
 
+  async forkConversation(
+    params: ForkConversationParams,
+  ): Promise<ForkConversationResult | null> {
+    if (params.system === "claude_code") return null;
+    if (params.system !== "upstream" && params.system !== "codex") {
+      return null;
+    }
+    const libraryID = normalizePositiveInt(params.libraryID);
+    const paperItemID = normalizePositiveInt(params.paperItemID);
+    const sourceConversationKey = normalizePositiveInt(
+      params.sourceConversationKey,
+    );
+    const throughAssistantTimestamp = normalizeTimestamp(
+      params.throughAssistantTimestamp,
+    );
+    if (!libraryID || !sourceConversationKey || !throughAssistantTimestamp) {
+      return null;
+    }
+    if (params.kind === "paper" && !paperItemID) return null;
+
+    const sourceEntry = await conversationRepository.getCatalogEntry({
+      system: params.system,
+      kind: params.kind,
+      conversationKey: sourceConversationKey,
+    });
+    if (!catalogEntryMatchesScope(sourceEntry, params)) return null;
+    const sourceProviderSessionId =
+      normalizeTitle(sourceEntry.providerSessionId) || "";
+    if (params.system === "codex" && !sourceProviderSessionId) {
+      return null;
+    }
+
+    let forkedCodexThreadId: string | null = null;
+    if (params.system === "codex") {
+      const latestCodexForkableAssistantTimestamp =
+        await getLatestCodexForkableAssistantTimestamp(sourceConversationKey);
+      if (
+        latestCodexForkableAssistantTimestamp !== throughAssistantTimestamp
+      ) {
+        return null;
+      }
+      forkedCodexThreadId = await codexAppServerForkService.forkThread({
+        threadId: sourceProviderSessionId,
+      });
+      if (!forkedCodexThreadId) return null;
+    }
+
+    const entry = await conversationRepository.createCatalogEntry({
+      system: params.system,
+      kind: params.kind,
+      libraryID,
+      paperItemID,
+    });
+    if (!entry) {
+      if (forkedCodexThreadId) {
+        await codexAppServerForkService
+          .archiveThread({ threadId: forkedCodexThreadId })
+          .catch(() => {});
+      }
+      return null;
+    }
+    if (entry && params.system === "codex" && forkedCodexThreadId) {
+      const persistedProviderSession = await upsertCodexConversationSummary({
+        conversationKey: entry.conversationKey,
+        libraryID,
+        kind: entry.kind,
+        paperItemID: entry.paperItemID,
+        createdAt: entry.createdAt,
+        updatedAt: Date.now(),
+        title: entry.title,
+        providerSessionId: forkedCodexThreadId,
+      });
+      if (!persistedProviderSession) {
+        await conversationRepository.deleteCatalogEntry({
+          system: "codex",
+          kind: entry.kind,
+          conversationKey: entry.conversationKey,
+        });
+        await codexAppServerForkService
+          .archiveThread({ threadId: forkedCodexThreadId })
+          .catch(() => {});
+        return null;
+      }
+    }
+
+    const cleanupForkEntry = async () => {
+      await conversationRepository.deleteCatalogEntry({
+        system: params.system,
+        kind: entry.kind,
+        conversationKey: entry.conversationKey,
+      });
+      if (params.system === "codex" && forkedCodexThreadId) {
+        await codexAppServerForkService
+          .archiveThread({ threadId: forkedCodexThreadId })
+          .catch(() => {});
+      }
+    };
+    let copiedMessageCount = 0;
+    let targetAnchorAssistantTimestamp = 0;
+    try {
+      const copyResult =
+        params.system === "codex"
+          ? await forkCodexConversationMessages({
+              sourceConversationKey,
+              targetConversationKey: entry.conversationKey,
+              throughAssistantTimestamp,
+              timestampBase: Date.now(),
+            })
+          : await forkUpstreamConversationMessages({
+              sourceConversationKey,
+              targetConversationKey: entry.conversationKey,
+              throughAssistantTimestamp,
+              timestampBase: Date.now(),
+            });
+      copiedMessageCount = copyResult.copiedMessageCount;
+      targetAnchorAssistantTimestamp =
+        copyResult.targetAnchorAssistantTimestamp;
+    } catch (err) {
+      await cleanupForkEntry();
+      throw err;
+    }
+    if (copiedMessageCount <= 0 || targetAnchorAssistantTimestamp <= 0) {
+      await cleanupForkEntry();
+      return null;
+    }
+
+    const titleSeed =
+      normalizeTitle(params.title) ||
+      normalizeTitle(sourceEntry?.title) ||
+      "Forked chat";
+    await conversationRepository.setCatalogTitle({
+      system: params.system,
+      kind: entry.kind,
+      conversationKey: entry.conversationKey,
+      title: `Fork: ${titleSeed}`,
+    });
+
+    const refreshed = await conversationRepository.getCatalogEntry({
+      system: params.system,
+      kind: entry.kind,
+      conversationKey: entry.conversationKey,
+    });
+    const resultEntry = refreshed || entry;
+    const forkLink = await recordConversationForkLink({
+      targetConversationKey: resultEntry.conversationKey,
+      targetConversationID: resultEntry.conversationID,
+      targetSystem: params.system,
+      targetKind: resultEntry.kind,
+      sourceConversationKey,
+      sourceConversationID: sourceEntry.conversationID,
+      sourceSystem: params.system,
+      sourceKind: sourceEntry.kind,
+      sourceLibraryID: sourceEntry.libraryID,
+      sourcePaperItemID: sourceEntry.paperItemID,
+      sourceAssistantTimestamp: throughAssistantTimestamp,
+      targetAnchorAssistantTimestamp,
+      createdAt: Date.now(),
+    }).catch(async (err) => {
+      await cleanupForkEntry();
+      throw err;
+    });
+    return {
+      entry: resultEntry,
+      copiedMessageCount,
+      targetAnchorAssistantTimestamp,
+      forkLink,
+    };
+  },
+
   async listCatalogEntries(
     params: ConversationCatalogListParams,
   ): Promise<ConversationCatalogEntry[]> {
@@ -805,12 +1000,17 @@ export const conversationRepository = {
   ): Promise<void> {
     const conversationKey = normalizePositiveInt(target.conversationKey);
     if (!conversationKey) return;
+    const cleanupForkLink = async () => {
+      await deleteConversationForkLink(conversationKey).catch(() => {});
+    };
     if (target.system === "claude_code") {
       await deleteClaudeConversation(conversationKey);
+      await cleanupForkLink();
       return;
     }
     if (target.system === "codex") {
       await deleteCodexConversation(conversationKey);
+      await cleanupForkLink();
       return;
     }
     if (
@@ -818,9 +1018,11 @@ export const conversationRepository = {
       isUpstreamPaperConversationKey(conversationKey)
     ) {
       await deletePaperConversation(conversationKey);
+      await cleanupForkLink();
       return;
     }
     await deleteGlobalConversation(conversationKey);
+    await cleanupForkLink();
   },
 
   async deleteLocalConversationRows(

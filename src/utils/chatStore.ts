@@ -26,6 +26,10 @@ import {
   storedMessageDisplayOrderSql,
 } from "../shared/conversationMessageSql";
 import {
+  copyConversationMessagesThroughAssistantAnchor,
+  type ForkConversationMessagesResult,
+} from "../shared/conversationMessageForkCopy";
+import {
   buildConversationID,
   getRegisteredConversationScope,
   initConversationRegistryStore,
@@ -262,7 +266,9 @@ function normalizeLimit(limit: number, fallback: number): number {
   return Math.max(1, Math.floor(limit));
 }
 
-function normalizeOptionalLimit(limit: number | null | undefined): number | null {
+function normalizeOptionalLimit(
+  limit: number | null | undefined,
+): number | null {
   if (limit === null) return null;
   if (!Number.isFinite(Number(limit))) return null;
   const normalized = Math.floor(Number(limit));
@@ -384,6 +390,39 @@ type ConversationCatalogSeedRow = {
   createdAt?: unknown;
   title?: unknown;
 };
+
+const CHAT_MESSAGE_COPY_COLUMNS = [
+  "role",
+  "text",
+  "timestamp",
+  "run_mode",
+  "agent_run_id",
+  "selected_text",
+  "selected_texts_json",
+  "selected_text_sources_json",
+  "selected_text_paper_contexts_json",
+  "selected_text_note_contexts_json",
+  "forced_skill_ids_json",
+  "paper_contexts_json",
+  "full_text_paper_contexts_json",
+  "citation_paper_contexts_json",
+  "quote_citations_json",
+  "collection_contexts_json",
+  "tag_contexts_json",
+  "screenshot_images",
+  "attachments_json",
+  "model_attachments_json",
+  "generated_images_json",
+  "model_name",
+  "model_entry_id",
+  "model_provider_label",
+  "webchat_run_state",
+  "webchat_completion_reason",
+  "reasoning_summary",
+  "reasoning_details",
+  "context_tokens",
+  "context_window",
+] as const;
 
 function normalizeCatalogTimestamp(value: unknown): number {
   const parsed = Number(value);
@@ -1814,6 +1853,23 @@ export async function loadConversation(
   }
 
   return messages;
+}
+
+export async function forkUpstreamConversationMessages(params: {
+  sourceConversationKey: number;
+  targetConversationKey: number;
+  throughAssistantTimestamp: number;
+  timestampBase?: number;
+}): Promise<ForkConversationMessagesResult> {
+  return copyConversationMessagesThroughAssistantAnchor({
+    tableName: CHAT_MESSAGES_TABLE,
+    copyColumns: CHAT_MESSAGE_COPY_COLUMNS,
+    isValidConversationKey: isUpstreamStoreConversationKey,
+    resolveSourceSelector: resolveRepairingMessageConversationSelector,
+    resolveTargetConversationID: resolveRegisteredConversationID,
+    refreshCatalogSummary: refreshUpstreamConversationCatalogSummary,
+    refreshSearchIndex: refreshUpstreamConversationSearchIndex,
+  }, params);
 }
 
 export async function appendMessage(

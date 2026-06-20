@@ -596,6 +596,7 @@ export function setupHandlers(
     historyUndo,
     historyUndoText,
     historyUndoBtn,
+    topToast,
     claudeSystemToggleBtn,
     claudeSystemToggleIcon,
     selectTextBtn,
@@ -632,8 +633,10 @@ export function setupHandlers(
     responseMenu,
     responseMenuCopyBtn,
     responseMenuNoteBtn,
+    responseMenuForkBtn,
     responseMenuDeleteBtn,
     promptMenu,
+    promptMenuForkBtn,
     promptMenuDeleteBtn,
     exportMenu,
     exportMenuCopyBtn,
@@ -1040,6 +1043,12 @@ export function setupHandlers(
     forceFresh?: boolean,
   ) => Promise<boolean | void> = async () => {};
   let queueTurnDeletion: (target: {
+    conversationKey: number;
+    userTimestamp: number;
+    assistantTimestamp: number;
+  }) => Promise<void> = async () => {};
+  let forkConversationFromTurn: (target: {
+    item: Zotero.Item;
     conversationKey: number;
     userTimestamp: number;
     assistantTimestamp: number;
@@ -1751,8 +1760,10 @@ export function setupHandlers(
     responseMenu,
     responseMenuCopyBtn,
     responseMenuNoteBtn,
+    responseMenuForkBtn,
     responseMenuDeleteBtn,
     promptMenu,
+    promptMenuForkBtn,
     promptMenuDeleteBtn,
     exportMenu,
     exportMenuCopyBtn,
@@ -1781,6 +1792,7 @@ export function setupHandlers(
     closeHistoryNewMenu,
     closeHistoryMenu,
     queueTurnDeletion: (target) => queueTurnDeletion(target),
+    forkConversationFromTurn: (target) => forkConversationFromTurn(target),
     logError: (message, error) => {
       ztoolkit.log(message, error);
     },
@@ -4124,6 +4136,7 @@ export function setupHandlers(
     historyUndo,
     historyUndoText,
     historyUndoBtn,
+    topToast,
     modeChipBtn,
     claudeSystemToggleBtn,
     getItem: () => item,
@@ -4212,6 +4225,8 @@ export function setupHandlers(
   createAndSwitchPaperConversation =
     historyLifecycleController.createAndSwitchPaperConversation;
   queueTurnDeletion = historyLifecycleController.queueTurnDeletion;
+  forkConversationFromTurn =
+    historyLifecycleController.forkConversationFromTurn;
   clearPendingTurnDeletion =
     historyLifecycleController.clearPendingTurnDeletion;
   resetHistorySearchState = historyLifecycleController.resetHistorySearchState;
