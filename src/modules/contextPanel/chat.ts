@@ -16,7 +16,6 @@ import {
   StoredChatMessage,
 } from "../../utils/chatStore";
 import { conversationRepository } from "../../core/conversations/repository";
-import { evaluateConversationForkEligibility } from "../../core/conversations/forkEligibility";
 import {
   appendCodexMessage,
   pruneCodexConversation,
@@ -230,6 +229,7 @@ import {
   resolveConversationSystemForItem,
   resolveDisplayConversationKind,
 } from "./portalScope";
+import { shouldShowForkActionForAssistantTurn } from "./forkActionVisibility";
 import { buildChatHistoryNotePayload } from "./notes";
 import { readNoteSnapshot } from "./noteSnapshot";
 import { extractManagedBlobHash } from "./attachmentStorage";
@@ -1372,6 +1372,7 @@ function attachAssistantResponseContextMenu(params: {
     const canForkResponseTurn =
       canDeleteResponseTurn &&
       canShowForkActionForAssistantTurn(
+        body,
         item,
         conversationKey,
         message.timestamp,
@@ -1409,17 +1410,19 @@ function attachAssistantResponseContextMenu(params: {
 }
 
 function canShowForkActionForAssistantTurn(
+  body: Element,
   item: Zotero.Item,
   conversationKey: number,
   assistantTimestamp: unknown,
   assistantMessage?: Message | null,
 ): boolean {
-  return evaluateConversationForkEligibility({
-    system: resolveConversationSystemForItem(item),
+  return shouldShowForkActionForAssistantTurn({
+    body,
+    item,
     assistantTimestamp,
     assistantMessage,
     history: chatHistory.get(conversationKey) || [],
-  }).visible;
+  });
 }
 
 function appendMessageMetaActionButton(params: {
@@ -9579,6 +9582,7 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
           const canForkPromptTurn =
             canDeletePromptTurn &&
             canShowForkActionForAssistantTurn(
+              body,
               item,
               conversationKey,
               assistantPairMsg?.timestamp,
@@ -10011,6 +10015,7 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         actionUserTimestamp > 0 &&
         !msg.streaming &&
         canShowForkActionForAssistantTurn(
+          body,
           item,
           conversationKey,
           actionAssistantTimestamp,
