@@ -285,6 +285,60 @@ function injectCitationLinksIntoNoteHtml(
   // Capture the blockquote content so we can look up the citation page cache
   // (the cache is keyed by contextItemId + quote text).
   let result = html.replace(
+    /(<blockquote>)([\s\S]*?)(<\/blockquote>)/gi,
+    (_match, bqOpen: string, bqContent: string, bqClose: string) => {
+      const paragraphMatches = Array.from(
+        bqContent.matchAll(/(<p>)([\s\S]*?)(<\/p>)/gi),
+      );
+      const lastParagraph = paragraphMatches[paragraphMatches.length - 1];
+      if (!lastParagraph || lastParagraph.index === undefined) return _match;
+      const plainText = (lastParagraph[2] || "").replace(/<[^>]+>/g, "").trim();
+      if (!plainText) return _match;
+      const candidates = matchAssistantCitationCandidates(
+        plainText,
+        paperContexts,
+      );
+      if (!candidates.length) return _match;
+      const bestCandidate = candidates[0];
+      const extracted = extractStandalonePaperSourceLabel(plainText);
+      const citationStart = lastParagraph.index;
+      const citationEnd = citationStart + lastParagraph[0].length;
+      const quoteHtml = bqContent.slice(0, citationStart);
+      const quoteText = stripNoteHtml(quoteHtml);
+      const trustedQuote = findMatchingTrustedQuoteCitation({
+        quoteText,
+        citationLabel: extracted?.sourceLabel || plainText,
+        quoteCitations,
+      });
+      const lookupTexts = Array.from(
+        new Set(
+          [trustedQuote?.sourceMatchText, trustedQuote?.quoteText, quoteText]
+            .map((value) => sanitizeText(value || "").trim())
+            .filter(Boolean),
+        ),
+      );
+      let cachedPage = "";
+      for (const lookupText of lookupTexts) {
+        cachedPage =
+          lookupCachedCitationPage(bestCandidate.contextItemId, lookupText) ||
+          "";
+        if (cachedPage) break;
+      }
+      const pageLabel = cachedPage || undefined;
+      const uri = buildZoteroPdfUri(bestCandidate.contextItemId, pageLabel);
+      if (!uri) return _match;
+      const visibleCitationText = pageLabel
+        ? formatSourceLabelWithPage(
+            extracted?.sourceLabel || plainText,
+            pageLabel,
+          )
+        : extracted?.sourceLabel || plainText;
+      const linkedCitation = `${lastParagraph[1]}<a href="${escapeNoteHtml(uri)}">${escapeNoteHtml(visibleCitationText)}</a>${lastParagraph[3]}`;
+      return `${bqOpen}${quoteHtml}${linkedCitation}${bqContent.slice(citationEnd)}${bqClose}`;
+    },
+  );
+
+  result = result.replace(
     /(<blockquote>)([\s\S]*?)(<\/blockquote>\s*<p>)([\s\S]*?)(<\/p>)/gi,
     (
       _match,
@@ -313,11 +367,7 @@ function injectCitationLinksIntoNoteHtml(
       });
       const lookupTexts = Array.from(
         new Set(
-          [
-            trustedQuote?.sourceMatchText,
-            trustedQuote?.quoteText,
-            quoteText,
-          ]
+          [trustedQuote?.sourceMatchText, trustedQuote?.quoteText, quoteText]
             .map((value) => sanitizeText(value || "").trim())
             .filter(Boolean),
         ),
@@ -643,14 +693,10 @@ function formatSelectedTextLabel(
   total: number,
 ): string {
   if (source === "note") {
-    return total === 1
-      ? "Note context"
-      : `Note context (${index + 1})`;
+    return total === 1 ? "Note context" : `Note context (${index + 1})`;
   }
   if (source === "note-edit") {
-    return total === 1
-      ? "Editing focus"
-      : `Editing focus (${index + 1})`;
+    return total === 1 ? "Editing focus" : `Editing focus (${index + 1})`;
   }
   if (total === 1) return "Selected text";
   return `Selected text (${index + 1})`;
@@ -799,7 +845,11 @@ export function buildChatHistoryNotePayload(
   const textLines: string[] = [];
   const htmlBlocks: string[] = [];
   let lastUserPaperContexts: PaperContextRef[] | undefined;
-  for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
+  for (
+    let messageIndex = 0;
+    messageIndex < messages.length;
+    messageIndex += 1
+  ) {
     const msg = messages[messageIndex]!;
     // Strip any skill-added footer from assistant messages so chat-history
     // exports don't end up with "Written by LLM-for-Zotero." repeated for

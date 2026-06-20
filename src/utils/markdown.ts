@@ -1140,7 +1140,8 @@ function isLikelySourceParenthetical(value: string): boolean {
     /\bet\s+al\.?\b/i.test(inner) ||
     /\[[^\]]+\]/.test(inner) ||
     /\battachment\s+under\b/i.test(inner) ||
-    /^paper(?:\s+\d+)?$/i.test(inner)
+    /^paper(?:\s+\d+)?$/i.test(inner) ||
+    /^[\p{L}][\p{L}'’.-]+(?:\s+(?:and|&)\s+[\p{L}][\p{L}'’.-]+)?$/u.test(inner)
   );
 }
 

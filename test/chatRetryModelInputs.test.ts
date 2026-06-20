@@ -133,7 +133,6 @@ describe("chat retry model inputs", function () {
         "- **Stability Metrics:** Primary measures were compared across days.",
         "",
         `[[quote:${quoteCitation!.id}]]`,
-        "",
         "*Environment Classification:* Classifiers were trained.",
       ].join("\n"),
       [quoteCitation!],
@@ -146,17 +145,42 @@ describe("chat retry model inputs", function () {
     assert.include(payload!.renderedHtml, "<blockquote>");
     assert.include(
       payload!.renderedHtml,
-      "<p>(Carrasco et al., 2026)</p></blockquote>",
+      "<p>(Carrasco et al., 2026)</p></blockquote><p><em>Environment Classification:</em> Classifiers were trained.</p>",
     );
     assert.notInclude(
       payload!.renderedHtml,
-      "</blockquote>\n<p>(Carrasco et al., 2026)",
-    );
-    assert.include(
-      payload!.renderedHtml,
-      "<em>Environment Classification:</em>",
+      "(Carrasco et al., 2026) <em>Environment Classification:</em>",
     );
     assert.notInclude(payload!.renderedHtml, "*Environment Classification:*");
+  });
+
+  it("renders expanded quote anchors before unordered continuation text in clipboard payloads", function () {
+    const quoteCitation = buildQuoteCitation({
+      quoteText:
+        "The primary measures were the absolute change in preferred direction.",
+      citationLabel: "(Carrasco et al., 2026)",
+      contextItemId: 42,
+    });
+    assert.isDefined(quoteCitation);
+
+    const payload = buildRenderedMarkdownClipboardPayload(
+      [
+        `[[quote:${quoteCitation!.id}]]`,
+        "- **Environment Classification:** Classifiers were trained.",
+      ].join("\n"),
+      [quoteCitation!],
+    );
+
+    assert.isNotNull(payload);
+    assert.include(payload!.renderedHtml, "<blockquote>");
+    assert.include(
+      payload!.renderedHtml,
+      "</blockquote><ul><li><strong>Environment Classification:</strong> Classifiers were trained.</li></ul>",
+    );
+    assert.notInclude(
+      payload!.renderedHtml,
+      "(Carrasco et al., 2026) - <strong>Environment",
+    );
   });
 
   it("omits unresolved quote anchors in clipboard payloads", function () {

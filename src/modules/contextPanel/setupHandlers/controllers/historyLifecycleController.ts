@@ -2373,6 +2373,8 @@ export function createHistoryLifecycleController(
       webChatIsolatedConversationKeys.add(resolvedConversationKey);
       if (!hadWebChatSession) {
         chatHistory.set(resolvedConversationKey, []);
+        markNextWebChatSendAsNewChat();
+        primeFreshWebChatPaperChipState();
       }
       loadedConversationKeys.add(resolvedConversationKey);
     } else {
@@ -2919,7 +2921,8 @@ export function createHistoryLifecycleController(
   ): Promise<boolean> => {
     const pending = clearPendingTurnDeletion();
     if (!pending) return true;
-    let hasError = false;
+    let hasDeleteError = false;
+    let hasCleanupError = false;
     try {
       await conversationRepository.deleteTurnMessages({
         system: pending.conversationSystem,
@@ -2928,7 +2931,7 @@ export function createHistoryLifecycleController(
         assistantTimestamp: pending.assistantTimestamp,
       });
     } catch (err) {
-      hasError = true;
+      hasDeleteError = true;
       ztoolkit.log("LLM: Failed to delete turn messages", err);
     }
     try {
@@ -2939,18 +2942,21 @@ export function createHistoryLifecycleController(
         collectAttachmentHashesFromMessages(remainingHistory),
       );
     } catch (err) {
-      hasError = true;
+      hasCleanupError = true;
       ztoolkit.log("LLM: Failed to refresh turn attachment refs", err);
     }
     scheduleAttachmentGc();
     invalidateHistorySearchDocument(pending.conversationKey);
-    if (hasError && status) {
+    if (hasDeleteError && status) {
       setStatus(status, t("Failed to fully delete turn. Check logs."), "error");
     } else if (reason === "timeout" && status) {
       setStatus(status, t("Turn deleted"), "ready");
     }
+    if (hasCleanupError) {
+      ztoolkit.log("LLM: Turn deletion completed with stale attachment refs");
+    }
     void refreshGlobalHistoryHeader();
-    return !hasError;
+    return !hasDeleteError;
   };
 
   const undoPendingTurnDeletion = () => {

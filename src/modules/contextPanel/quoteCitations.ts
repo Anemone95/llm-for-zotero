@@ -1187,7 +1187,7 @@ function formatQuoteWithCitationInsideBlockquoteMarkdown(
     .split("\n")
     .map((line) => `> ${line}`)
     .join("\n");
-  return `${quoteLines}\n>\n> ${normalizedCitation}`;
+  return `${quoteLines}\n>\n> ${normalizedCitation}\n\n`;
 }
 
 export type UnresolvedQuoteCitationPlaceholderMode =

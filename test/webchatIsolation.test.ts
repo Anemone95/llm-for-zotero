@@ -46,7 +46,7 @@ describe("webchat isolation", function () {
     assert.isBelow(webchatGuard, globalSwitch);
   });
 
-  it("marks webchat paper switches loaded without clearing existing history", function () {
+  it("marks fresh webchat paper switches as new remote chats without clearing existing history", function () {
     const source = readFileSync(
       resolve(
         here,
@@ -71,6 +71,20 @@ describe("webchat isolation", function () {
       "chatHistory.set(resolvedConversationKey, []);",
       guardedHistorySet,
     );
+    const freshGuardEnd = webchatBlock.indexOf(
+      "}\n      loadedConversationKeys.add(resolvedConversationKey);",
+      guardedHistorySet,
+    );
+    const freshSessionBlock = webchatBlock.slice(
+      guardedHistorySet,
+      freshGuardEnd,
+    );
+    const markNewChat = freshSessionBlock.indexOf(
+      "markNextWebChatSendAsNewChat();",
+    );
+    const primeFreshChip = freshSessionBlock.indexOf(
+      "primeFreshWebChatPaperChipState();",
+    );
     const markLoaded = source.indexOf(
       "loadedConversationKeys.add(resolvedConversationKey);",
       webchatBranch,
@@ -87,10 +101,11 @@ describe("webchat isolation", function () {
     assert.isAtLeast(markIsolated, webchatBranch);
     assert.isAtLeast(guardedHistorySet, sessionGuard);
     assert.isAtLeast(setHistory, guardedHistorySet);
+    assert.isAbove(freshGuardEnd, guardedHistorySet);
+    assert.isAtLeast(markNewChat, 0);
+    assert.isAtLeast(primeFreshChip, markNewChat);
     assert.isAtLeast(markLoaded, markIsolated);
     assert.isAtLeast(normalLoad, markLoaded);
-    assert.notInclude(webchatBlock, "markNextWebChatSendAsNewChat();");
-    assert.notInclude(webchatBlock, "primeFreshWebChatPaperChipState();");
   });
 
   it("blocks persisted paper history hydration while webchat is active", function () {
@@ -253,7 +268,10 @@ describe("webchat isolation", function () {
     const warmupStart = source.indexOf(
       "// [webchat] Pre-fetch history in background",
     );
-    const warmupCall = source.indexOf("void warmUpWebChatHistory();", warmupStart);
+    const warmupCall = source.indexOf(
+      "void warmUpWebChatHistory();",
+      warmupStart,
+    );
     const warmupGuard = source.lastIndexOf(
       "if (isWebChat && !hasExistingWebChatSessionForCurrentItem()) {",
       warmupCall,

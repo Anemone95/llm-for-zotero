@@ -746,7 +746,6 @@ describe("quoteCitations", function () {
         "- **Stability Metrics:** Primary measures were compared.",
         "",
         `  [[quote:${citation!.id}]]`,
-        "",
         "- **Decoding and Classification:** Models transferred across sessions.",
       ].join("\n"),
       [citation!],

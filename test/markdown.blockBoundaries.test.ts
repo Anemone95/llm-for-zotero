@@ -171,6 +171,23 @@ describe("normalizeBlockBoundaries", function () {
       );
     });
 
+    it("inserts an unordered-list boundary after a no-year source parenthetical", function () {
+      const input =
+        "(Smith) - **Environment Classification:** Classifiers were trained.";
+      const result = normalizeBlockBoundaries(input);
+      assert.include(result, "(Smith)\n\n- **Environment Classification:**");
+    });
+
+    it("inserts an emphasized-heading boundary after a no-year source parenthetical", function () {
+      const input =
+        "(Smith and Jones) *Environment Classification:* Classifiers were trained.";
+      const result = normalizeBlockBoundaries(input);
+      assert.include(
+        result,
+        "(Smith and Jones)\n\n*Environment Classification:*",
+      );
+    });
+
     it("does not split statistical emphasis after a source parenthetical", function () {
       const input = "(Carrasco et al., 2026) *p* < 0.05 across sessions.";
       const result = normalizeBlockBoundaries(input);
@@ -300,6 +317,20 @@ describe("renderMarkdown with inline block tokens", function () {
     assert.notInclude(html, "- <strong>Environment");
   });
 
+  it("renders inline unordered-list markers after no-year source labels as list items", function () {
+    const html = renderMarkdown(
+      "(Smith) - **Environment Classification:** Classifiers were trained.",
+    );
+
+    assert.include(html, "<p>(Smith)</p>");
+    assert.include(html, "<ul>");
+    assert.include(
+      html,
+      "<li><strong>Environment Classification:</strong> Classifiers were trained.</li>",
+    );
+    assert.notInclude(html, "(Smith) - <strong>Environment");
+  });
+
   it("renders heading-like emphasized continuation after source labels", function () {
     const html = renderMarkdown(
       "(Carrasco et al., 2026) *Environment Classification:* Classifiers were trained.",
@@ -311,6 +342,19 @@ describe("renderMarkdown with inline block tokens", function () {
       "<p><em>Environment Classification:</em> Classifiers were trained.</p>",
     );
     assert.notInclude(html, "*Environment Classification:*");
+  });
+
+  it("renders heading-like emphasized continuation after no-year source labels", function () {
+    const html = renderMarkdown(
+      "(Smith) *Environment Classification:* Classifiers were trained.",
+    );
+
+    assert.include(html, "<p>(Smith)</p>");
+    assert.include(
+      html,
+      "<p><em>Environment Classification:</em> Classifiers were trained.</p>",
+    );
+    assert.notInclude(html, "(Smith) <em>Environment");
   });
 
   it("renders source-label continuation boundaries in the legacy renderer", function () {

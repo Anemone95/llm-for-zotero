@@ -33,27 +33,32 @@ function normalizeHashes(hashes: readonly string[]): string[] {
 async function ensureAttachmentRefTables(): Promise<void> {
   if (!refStoreInitTask) {
     refStoreInitTask = (async () => {
-      await Zotero.DB.queryAsync(
-        `CREATE TABLE IF NOT EXISTS ${ATTACHMENT_BLOBS_TABLE} (
+      try {
+        await Zotero.DB.queryAsync(
+          `CREATE TABLE IF NOT EXISTS ${ATTACHMENT_BLOBS_TABLE} (
           hash TEXT PRIMARY KEY,
           path TEXT NOT NULL UNIQUE,
           size_bytes INTEGER NOT NULL,
           created_at INTEGER NOT NULL
         )`,
-      );
-      await Zotero.DB.queryAsync(
-        `CREATE TABLE IF NOT EXISTS ${ATTACHMENT_REFS_TABLE} (
+        );
+        await Zotero.DB.queryAsync(
+          `CREATE TABLE IF NOT EXISTS ${ATTACHMENT_REFS_TABLE} (
           owner_type TEXT NOT NULL CHECK(owner_type IN ('conversation', 'note')),
           owner_id INTEGER NOT NULL,
           blob_hash TEXT NOT NULL,
           updated_at INTEGER NOT NULL,
           PRIMARY KEY(owner_type, owner_id, blob_hash)
         )`,
-      );
-      await Zotero.DB.queryAsync(
-        `CREATE INDEX IF NOT EXISTS ${ATTACHMENT_REFS_BLOB_INDEX}
+        );
+        await Zotero.DB.queryAsync(
+          `CREATE INDEX IF NOT EXISTS ${ATTACHMENT_REFS_BLOB_INDEX}
          ON ${ATTACHMENT_REFS_TABLE} (blob_hash)`,
-      );
+        );
+      } catch (err) {
+        refStoreInitTask = null;
+        throw err;
+      }
     })();
   }
   await refStoreInitTask;
