@@ -65,6 +65,16 @@ describe("quote card UI contract", function () {
 
     assert.include(renderSource, "createFallbackQuoteCardElement");
     assert.include(renderSource, "replaceBlockquoteWithFallbackQuoteCard");
+    assert.include(renderSource, "citationContent.textContent = citationLabel");
+    assert.include(
+      renderSource,
+      "citationLabel: extractedCitation.sourceLabel",
+    );
+    assert.include(
+      renderSource,
+      "const citationElement = createCitationButton({\n        ownerDoc,\n        body: params.body",
+    );
+    assert.include(renderSource, "citationContent: citationElement");
     assert.notInclude(renderSource, 'citationContent.textContent = "Quote"');
     assert.notInclude(
       renderSource,

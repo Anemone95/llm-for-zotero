@@ -153,6 +153,37 @@ describe("normalizeBlockBoundaries", function () {
     });
   });
 
+  describe("source-label continuation normalization", function () {
+    it("inserts an unordered-list boundary after a source parenthetical", function () {
+      const input =
+        "(Carrasco et al., 2026) - **Environment Classification:** Classifiers were trained.";
+      const result = normalizeBlockBoundaries(input);
+      assert.include(result, "(Carrasco et al., 2026)\n\n- **Environment");
+    });
+
+    it("inserts a boundary before heading-like emphasized continuation text", function () {
+      const input =
+        "(Carrasco et al., 2026) *Environment Classification:* Classifiers were trained.";
+      const result = normalizeBlockBoundaries(input);
+      assert.include(
+        result,
+        "(Carrasco et al., 2026)\n\n*Environment Classification:*",
+      );
+    });
+
+    it("does not split statistical emphasis after a source parenthetical", function () {
+      const input = "(Carrasco et al., 2026) *p* < 0.05 across sessions.";
+      const result = normalizeBlockBoundaries(input);
+      assert.equal(result, input);
+    });
+
+    it("does not split unordered-looking prose after a non-source parenthetical", function () {
+      const input = "(Figure 2) - 4.5 mm was the measured offset.";
+      const result = normalizeBlockBoundaries(input);
+      assert.equal(result, input);
+    });
+  });
+
   describe("mixed normalization", function () {
     it("handles multiple headers and blockquotes on one line", function () {
       const input =
@@ -229,7 +260,9 @@ describe("renderMarkdown with inline block tokens", function () {
   });
 
   it("preserves text-token spacing before inline bold across soft breaks", function () {
-    const html = renderMarkdown("[[quote:Q]]\nSo **one component** handles it.");
+    const html = renderMarkdown(
+      "[[quote:Q]]\nSo **one component** handles it.",
+    );
     assert.include(html, "So <strong>one component</strong>");
     assert.notInclude(html, "So<strong>one component</strong>");
   });
@@ -238,7 +271,7 @@ describe("renderMarkdown with inline block tokens", function () {
     const html = renderMarkdown(
       '(Methods, "Real-time data processing")\n4. **From scalar to avatar movement**\nThe scalar projection value is scaled.',
     );
-    assert.include(html, "<ol start=\"4\">");
+    assert.include(html, '<ol start="4">');
     assert.include(
       html,
       "<li><strong>From scalar to avatar movement</strong> The scalar projection value is scaled.</li>",
@@ -250,8 +283,50 @@ describe("renderMarkdown with inline block tokens", function () {
     const html = renderMarkdown(
       '(Methods, "Real-time data processing") 4. **From scalar to avatar movement**\nThe scalar projection value is scaled.',
     );
-    assert.include(html, "<ol start=\"4\">");
+    assert.include(html, '<ol start="4">');
     assert.notInclude(html, "4.<strong>From scalar");
+  });
+
+  it("renders inline unordered-list markers after source labels as list items", function () {
+    const html = renderMarkdown(
+      "(Carrasco et al., 2026) - **Environment Classification:** Classifiers were trained.",
+    );
+
+    assert.include(html, "<ul>");
+    assert.include(
+      html,
+      "<li><strong>Environment Classification:</strong> Classifiers were trained.</li>",
+    );
+    assert.notInclude(html, "- <strong>Environment");
+  });
+
+  it("renders heading-like emphasized continuation after source labels", function () {
+    const html = renderMarkdown(
+      "(Carrasco et al., 2026) *Environment Classification:* Classifiers were trained.",
+    );
+
+    assert.include(html, "<p>(Carrasco et al., 2026)</p>");
+    assert.include(
+      html,
+      "<p><em>Environment Classification:</em> Classifiers were trained.</p>",
+    );
+    assert.notInclude(html, "*Environment Classification:*");
+  });
+
+  it("renders source-label continuation boundaries in the legacy renderer", function () {
+    __setMarkdownParserDisabledForTest(true);
+    try {
+      const html = renderMarkdown(
+        "(Carrasco et al., 2026) - **Environment Classification:** Classifiers were trained.\n\n(Carrasco et al., 2026) *Decoding:* Models transferred across sessions.",
+      );
+
+      assert.include(html, "<ul>");
+      assert.include(html, "<strong>Environment Classification:</strong>");
+      assert.include(html, "<em>Decoding:</em>");
+      assert.notInclude(html, "*Decoding:*");
+    } finally {
+      __setMarkdownParserDisabledForTest(false);
+    }
   });
 
   it("renders markdown tables without turning divider syntax into plain text", function () {

@@ -1062,18 +1062,57 @@ export function normalizeBlockBoundaries(text: string): string {
     },
   );
 
+  // Unordered-list markers after source-like parentheticals hit the same
+  // failure mode as ordered lists, but `-` and `*` are common prose
+  // characters, so only split after labels that look like paper sources.
+  result = result.replace(
+    /(\([^()\n]{2,240}\))([ \t]+)([-*]\s+(?=\S))/g,
+    (match, before: string, spaces: string, marker: string, offset: number) => {
+      const markerIndex = offset + before.length + spaces.length;
+      if (
+        !isLikelySourceParenthetical(before) ||
+        isInsidePipeTableCell(result, markerIndex)
+      ) {
+        return match;
+      }
+      return `${before}\n\n${marker}`;
+    },
+  );
+
+  // Some model outputs start the next section as emphasized text instead of a
+  // markdown heading, e.g. `(Smith, 2026) *Environment Classification:* ...`.
+  // Split only heading-like emphasized labels with a trailing colon.
+  result = result.replace(
+    /(\([^()\n]{2,240}\))([ \t]+)((?:\*\*[^*\n]{2,120}(?::|：)\*\*|\*\*[^*\n]{2,120}\*\*(?::|：)|\*[^*\n]{2,120}(?::|：)\*|\*[^*\n]{2,120}\*(?::|：))[ \t]+(?=\S))/g,
+    (match, before: string, spaces: string, marker: string, offset: number) => {
+      const markerIndex = offset + before.length + spaces.length;
+      if (
+        !isLikelySourceParenthetical(before) ||
+        isInsidePipeTableCell(result, markerIndex)
+      ) {
+        return match;
+      }
+      return `${before}\n\n${marker}`;
+    },
+  );
+
   const lines = result.split(/\r?\n/);
   const normalizedLines: string[] = [];
   for (const line of lines) {
     const trimmed = line.trim();
     const previous = normalizedLines[normalizedLines.length - 1] || "";
     const previousTrimmed = previous.trim();
+    const previousIsParenthetical = /^\([^()\n]{2,240}\)$/.test(
+      previousTrimmed,
+    );
     if (
       trimmed &&
-      isOrderedListLine(trimmed) &&
+      previousIsParenthetical &&
       previousTrimmed &&
       !isOrderedListLine(previousTrimmed) &&
-      /^\([^()\n]{2,240}\)$/.test(previousTrimmed)
+      (isOrderedListLine(trimmed) ||
+        (isLikelySourceParenthetical(previousTrimmed) &&
+          (isUnorderedListLine(trimmed) || isEmphasizedHeadingLine(trimmed))))
     ) {
       normalizedLines.push("");
     }
@@ -1091,6 +1130,24 @@ function isOrderedListLine(trimmed: string): boolean {
 
 function isUnorderedListLine(trimmed: string): boolean {
   return /^[-*]\s+/.test(trimmed);
+}
+
+function isLikelySourceParenthetical(value: string): boolean {
+  const inner = value.replace(/^\(|\)$/g, "").trim();
+  if (!inner) return false;
+  return (
+    /\b(?:19|20)\d{2}[a-z]?\b/i.test(inner) ||
+    /\bet\s+al\.?\b/i.test(inner) ||
+    /\[[^\]]+\]/.test(inner) ||
+    /\battachment\s+under\b/i.test(inner) ||
+    /^paper(?:\s+\d+)?$/i.test(inner)
+  );
+}
+
+function isEmphasizedHeadingLine(trimmed: string): boolean {
+  return /^(?:\*\*[^*\n]{2,120}(?::|：)\*\*|\*\*[^*\n]{2,120}\*\*(?::|：)|\*[^*\n]{2,120}(?::|：)\*|\*[^*\n]{2,120}\*(?::|：))(?:\s+|$)/.test(
+    trimmed,
+  );
 }
 
 function isTableDividerLine(trimmed: string): boolean {

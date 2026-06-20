@@ -53,4 +53,22 @@ describe("quote anchor leak boundaries", function () {
     assert.notInclude(chatSource, "[quote unavailable]");
     assert.notInclude(notesSource, "[quote unavailable]");
   });
+
+  it("renders citation continuation remainders as Markdown instead of raw text", function () {
+    const citationSource = source(
+      "src/modules/contextPanel/assistantCitationLinks.ts",
+    );
+
+    assert.include(
+      citationSource,
+      "extractLeadingPaperSourceLabelWithRemainder(",
+    );
+    assert.include(
+      citationSource,
+      "renderRenderedMarkdownInto(container, safeText, ownerDoc);",
+    );
+    assert.include(citationSource, "replacementText: citationRemainder");
+    assert.notInclude(citationSource, "remainderEl.textContent");
+    assert.notInclude(citationSource, "params.citationEl.textContent");
+  });
 });

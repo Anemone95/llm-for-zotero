@@ -73,6 +73,7 @@ describe("quoteCitations", function () {
     );
 
     assert.include(rendered, "> A stable quote.");
+    assert.include(rendered, "> (Lee, 2025)");
     assert.include(rendered, "(Lee, 2025)");
     assert.notInclude(rendered, "[[quote:");
   });
@@ -730,6 +731,33 @@ describe("quoteCitations", function () {
     assert.notInclude(html, "<blockquote><blockquote>");
     assert.include(html, "<p>First source paragraph.</p>");
     assert.include(html, "<p>Second source paragraph.</p>");
+  });
+
+  it("keeps expanded quote anchors from absorbing the next unordered list item", function () {
+    const citation = buildQuoteCitation({
+      quoteText: "The absolute change in preferred direction was measured.",
+      citationLabel: "(Carrasco et al., 2026)",
+      contextItemId: 22,
+    });
+    assert.isDefined(citation);
+
+    const rendered = replaceQuoteCitationPlaceholdersForMarkdown(
+      [
+        "- **Stability Metrics:** Primary measures were compared.",
+        "",
+        `  [[quote:${citation!.id}]]`,
+        "",
+        "- **Decoding and Classification:** Models transferred across sessions.",
+      ].join("\n"),
+      [citation!],
+    );
+    const html = renderMarkdown(rendered);
+
+    assert.include(html, "<blockquote>");
+    assert.include(html, "<strong>Stability Metrics:</strong>");
+    assert.include(html, "<strong>Decoding and Classification:</strong>");
+    assert.notInclude(html, "(Carrasco et al., 2026) -");
+    assert.notInclude(html, "(Carrasco et al., 2026) *");
   });
 
   it("omits unresolved placeholders on external text surfaces", function () {

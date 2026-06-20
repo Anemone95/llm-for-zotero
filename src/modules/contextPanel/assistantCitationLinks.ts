@@ -36,6 +36,7 @@ import {
 } from "./livePdfSelectionLocator";
 import { resolveConversationBaseItem } from "./portalScope";
 import { searchPaperCandidates } from "./paperSearch";
+import { renderRenderedMarkdownInto } from "./renderedMarkdown";
 import type { Message, PaperContextRef, QuoteCitation } from "./types";
 
 type CitationParagraphJumpNavigation = {
@@ -713,8 +714,11 @@ function removeConsumedSourceBackedQuoteCitation(params: {
   extractedCitation: ExtractedCitationLabel;
   replacementText?: string | null;
 }): void {
-  if (params.replacementText) {
-    params.citationEl.textContent = params.replacementText;
+  if (params.replacementText !== undefined && params.replacementText !== null) {
+    replaceElementWithRenderedMarkdown(
+      params.citationEl,
+      params.replacementText,
+    );
   } else {
     const removalTarget = findConsumedCitationRemovalElement(
       params.citationEl,
@@ -732,6 +736,31 @@ function removeConsumedSourceBackedQuoteCitation(params: {
     next = getNextElementSibling(next);
     duplicate.parentNode?.removeChild(duplicate);
   }
+}
+
+function replaceElementWithRenderedMarkdown(
+  element: Element,
+  text: string,
+): void {
+  const parent = element.parentNode;
+  const ownerDoc = element.ownerDocument;
+  if (!parent || !ownerDoc) return;
+  const safeText = sanitizeText(text || "").trim();
+  if (!safeText) {
+    parent.removeChild(element);
+    return;
+  }
+  const container = ownerDoc.createElement("div");
+  renderRenderedMarkdownInto(container, safeText, ownerDoc);
+  const fragment = ownerDoc.createDocumentFragment();
+  if (!container.firstChild) {
+    fragment.appendChild(ownerDoc.createTextNode(safeText));
+  } else {
+    while (container.firstChild) {
+      fragment.appendChild(container.firstChild);
+    }
+  }
+  parent.replaceChild(fragment, element);
 }
 
 export function extractStandalonePaperSourceLabel(
@@ -821,6 +850,29 @@ export function extractStandalonePaperSourceLabel(
   return {
     ...parseCitationParts(citationLabel, splitMatch[2], splitMatch[3]),
   };
+}
+
+function extractLeadingPaperSourceLabelWithRemainder(value: string): {
+  extractedCitation: ExtractedCitationLabel;
+  remainder: string;
+} | null {
+  const text = sanitizeText(value || "").trim();
+  if (!text.startsWith("(")) return null;
+  let depth = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const ch = text[index];
+    if (ch === "(") depth += 1;
+    if (ch !== ")") continue;
+    depth -= 1;
+    if (depth !== 0) continue;
+    const sourceCandidate = text.slice(0, index + 1);
+    const extractedCitation =
+      extractStandalonePaperSourceLabel(sourceCandidate);
+    if (!extractedCitation) return null;
+    const remainder = sanitizeText(text.slice(index + 1)).trim();
+    return { extractedCitation, remainder };
+  }
+  return null;
 }
 
 function isLikelyStandaloneCitationLabel(value: string): boolean {
@@ -2819,8 +2871,17 @@ function createQuoteCardElement(params: {
 function createFallbackQuoteCardElement(params: {
   ownerDoc: Document;
   quoteText: string;
+  citationLabel?: string;
+  citationContent?: Node;
 }): HTMLElement {
-  const citationContent = params.ownerDoc.createElement("span");
+  let citationContent = params.citationContent;
+  if (!citationContent) {
+    citationContent = params.ownerDoc.createElement("span");
+    const citationLabel = sanitizeText(params.citationLabel || "").trim();
+    if (citationLabel) {
+      citationContent.textContent = citationLabel;
+    }
+  }
   return createQuoteCardElement({
     ownerDoc: params.ownerDoc,
     quoteText: params.quoteText,
@@ -2882,8 +2943,7 @@ function hasMeaningfulParagraphContent(paragraph: HTMLElement): boolean {
   );
   return childNodes.some(
     (node) =>
-      node.nodeType === 1 &&
-      (node as Element).tagName.toLowerCase() !== "br",
+      node.nodeType === 1 && (node as Element).tagName.toLowerCase() !== "br",
   );
 }
 
@@ -3124,6 +3184,8 @@ function replaceBlockquoteWithFallbackQuoteCard(params: {
   ownerDoc: Document;
   blockquote: Element;
   quoteText: string;
+  citationLabel?: string;
+  citationContent?: Node;
 }): HTMLElement | null {
   const quoteText = stripTrailingNonSourceQuoteLabelFromQuoteText(
     params.quoteText,
@@ -3132,6 +3194,8 @@ function replaceBlockquoteWithFallbackQuoteCard(params: {
   const quoteCard = createFallbackQuoteCardElement({
     ownerDoc: params.ownerDoc,
     quoteText,
+    citationLabel: params.citationLabel,
+    citationContent: params.citationContent,
   });
   const blockquoteParent = params.blockquote.parentNode;
   if (!blockquoteParent) return null;
@@ -3198,21 +3262,16 @@ export function decorateAssistantCitationLinks(params: {
       : null;
 
     // Edge-case fallback: the element may start with a citation label followed
-    // by continuation paragraph text on subsequent lines (no blank line between
-    // them in the LLM output → single <p> block in rendered HTML).
-    // We extract only the first non-empty line and re-attempt parsing.
+    // by continuation text on the same line or subsequent lines (no clean block
+    // boundary in the model output → single <p> block in rendered HTML).
     let citationRemainder: string | null = null;
     if (!extractedCitation && citationEl) {
-      const rawLines = (citationEl.textContent || "").split("\n");
-      const firstLine = sanitizeText(rawLines[0] || "").trim();
-      if (firstLine) {
-        const leadingAttempt = extractStandalonePaperSourceLabel(firstLine);
-        if (leadingAttempt) {
-          extractedCitation = leadingAttempt;
-          // Collect the remainder so it can be re-inserted as a sibling para.
-          const tailLines = rawLines.slice(1).join("\n").trim();
-          if (tailLines) citationRemainder = sanitizeText(tailLines).trim();
-        }
+      const leadingAttempt = extractLeadingPaperSourceLabelWithRemainder(
+        citationEl.textContent || "",
+      );
+      if (leadingAttempt) {
+        extractedCitation = leadingAttempt.extractedCitation;
+        citationRemainder = leadingAttempt.remainder;
       }
     }
 
@@ -3290,12 +3349,27 @@ export function decorateAssistantCitationLinks(params: {
         "quote =",
         quoteText.slice(0, 120),
       );
+      const matchingCandidates = resolveMatchingCandidatesForExtractedCitation(
+        extractedCitation,
+        candidates,
+      );
+      const citationElement = createCitationButton({
+        ownerDoc,
+        body: params.body,
+        panelItem: params.panelItem,
+        candidates: matchingCandidates,
+        extractedCitation,
+        quoteText,
+        paragraphQuoteText: quoteText,
+      });
       removeConsumedSourceBackedQuoteCitation({
         anchorElement:
           replaceBlockquoteWithFallbackQuoteCard({
             ownerDoc,
             blockquote,
             quoteText,
+            citationLabel: extractedCitation.sourceLabel,
+            citationContent: citationElement,
           }) || blockquote,
         citationEl,
         extractedCitation,
@@ -3338,16 +3412,8 @@ export function decorateAssistantCitationLinks(params: {
       anchorElement: quoteCard,
       citationEl,
       extractedCitation,
+      replacementText: citationRemainder,
     });
-
-    // If the citation was mixed with continuation text (edge-case leading-line
-    // extraction), re-insert the remainder as a new paragraph after this element
-    // so the overall reading flow is preserved.
-    if (citationRemainder) {
-      const remainderEl = ownerDoc.createElement("p");
-      remainderEl.textContent = citationRemainder;
-      quoteCard.parentElement?.insertBefore(remainderEl, quoteCard.nextSibling);
-    }
   }
 
   decorateInlineCitationNodes({

@@ -312,14 +312,10 @@ function formatPlainSourceBackedQuoteMarkdown(
   quoteText: string,
   citationLabel: string,
 ): string {
-  const normalizedQuote = normalizeMultilineText(quoteText);
-  const normalizedCitation = normalizeCitationLabel(citationLabel);
-  if (!normalizedQuote || !normalizedCitation) return "";
-  const quoteLines = normalizedQuote
-    .split("\n")
-    .map((line) => `> ${line}`)
-    .join("\n");
-  return `${quoteLines}\n\n${normalizedCitation}`;
+  return formatQuoteWithCitationInsideBlockquoteMarkdown(
+    quoteText,
+    citationLabel,
+  );
 }
 
 export function sanitizeUntrustedSourceBackedQuoteBlocks(
@@ -871,9 +867,10 @@ function formatPlainQuoteWithCitationMarkdown(
   quoteText: string,
   citationLabel: string,
 ): string {
-  const quoteMarkdown = formatPlainQuoteMarkdown(quoteText);
-  const citationMarkdown = normalizeCitationLabel(citationLabel);
-  return [quoteMarkdown, citationMarkdown].filter(Boolean).join("\n\n");
+  return formatQuoteWithCitationInsideBlockquoteMarkdown(
+    quoteText,
+    citationLabel,
+  );
 }
 
 function quoteHasSearchableLocatorTokens(quoteText: string): boolean {
@@ -1173,11 +1170,24 @@ export function buildQuoteAnchorPromptBlock(
 }
 
 export function formatQuoteCitationMarkdown(citation: QuoteCitation): string {
-  const quoteLines = normalizeMultilineText(citation.quoteText)
+  return formatQuoteWithCitationInsideBlockquoteMarkdown(
+    citation.quoteText,
+    citation.citationLabel,
+  );
+}
+
+function formatQuoteWithCitationInsideBlockquoteMarkdown(
+  quoteText: string,
+  citationLabel: string,
+): string {
+  const normalizedQuote = normalizeMultilineText(quoteText);
+  const normalizedCitation = normalizeCitationLabel(citationLabel);
+  if (!normalizedQuote || !normalizedCitation) return "";
+  const quoteLines = normalizedQuote
     .split("\n")
     .map((line) => `> ${line}`)
     .join("\n");
-  return `${quoteLines}\n\n${citation.citationLabel}`;
+  return `${quoteLines}\n>\n> ${normalizedCitation}`;
 }
 
 export type UnresolvedQuoteCitationPlaceholderMode =

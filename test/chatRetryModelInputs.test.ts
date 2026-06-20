@@ -58,6 +58,34 @@ describe("chat retry model inputs", function () {
     assert.notInclude(rendered, "> Quote card boundaries");
   });
 
+  it("isolates preserved quote anchors in nested lists from emphasized continuation text", function () {
+    const quoteCitation = buildQuoteCitation({
+      quoteText:
+        "We trained and tested non-linear decoders on every recording session pair.",
+      citationLabel: "(Carrasco et al., 2026)",
+      contextItemId: 42,
+    });
+    assert.isDefined(quoteCitation);
+
+    const rendered = buildAssistantDisplayMarkdownForRender({
+      text: [
+        "- **Decoding and Classification:**",
+        "  - **Head Direction Decoding:** Non-linear decoders were trained.",
+        "",
+        `    [[quote:${quoteCitation!.id}]]`,
+        "*Environment Classification:* Classifiers were trained.",
+      ].join("\n"),
+      quoteCitations: [quoteCitation!],
+    });
+
+    assert.include(
+      rendered,
+      `[[quote:${quoteCitation!.id}]]\n\n*Environment Classification:*`,
+    );
+    assert.notInclude(rendered, "(Carrasco et al., 2026)");
+    assert.notInclude(rendered, "> We trained");
+  });
+
   it("omits unresolved quote anchors in assistant bubbles", function () {
     const rendered = buildAssistantDisplayMarkdownForRender({
       text: "Evidence:\n\n[[quote:Q_missing]]\n\nContinue.",
@@ -89,6 +117,46 @@ describe("chat retry model inputs", function () {
     assert.notInclude(payload!.plainText, "[[quote:");
     assert.include(payload!.renderedHtml, "<blockquote>");
     assert.notInclude(payload!.renderedHtml, "[[quote:");
+  });
+
+  it("renders expanded quote anchors before emphasized continuation text in clipboard payloads", function () {
+    const quoteCitation = buildQuoteCitation({
+      quoteText:
+        "The primary measures were the absolute change in preferred direction.",
+      citationLabel: "(Carrasco et al., 2026)",
+      contextItemId: 42,
+    });
+    assert.isDefined(quoteCitation);
+
+    const payload = buildRenderedMarkdownClipboardPayload(
+      [
+        "- **Stability Metrics:** Primary measures were compared across days.",
+        "",
+        `[[quote:${quoteCitation!.id}]]`,
+        "",
+        "*Environment Classification:* Classifiers were trained.",
+      ].join("\n"),
+      [quoteCitation!],
+    );
+
+    assert.isNotNull(payload);
+    assert.include(payload!.plainText, "> The primary measures");
+    assert.include(payload!.plainText, "(Carrasco et al., 2026)");
+    assert.notInclude(payload!.plainText, "[[quote:");
+    assert.include(payload!.renderedHtml, "<blockquote>");
+    assert.include(
+      payload!.renderedHtml,
+      "<p>(Carrasco et al., 2026)</p></blockquote>",
+    );
+    assert.notInclude(
+      payload!.renderedHtml,
+      "</blockquote>\n<p>(Carrasco et al., 2026)",
+    );
+    assert.include(
+      payload!.renderedHtml,
+      "<em>Environment Classification:</em>",
+    );
+    assert.notInclude(payload!.renderedHtml, "*Environment Classification:*");
   });
 
   it("omits unresolved quote anchors in clipboard payloads", function () {
