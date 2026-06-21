@@ -47,13 +47,13 @@ describe("queuedFollowUps", function () {
     );
   });
 
-  it("excludes WebChat from queue keying", function () {
-    assert.isNull(
+  it("ignores missing queue keys", function () {
+    assert.equal(
       buildQueuedFollowUpThreadKey({
         conversationSystem: "upstream",
-        conversationKey: 42,
-        webChatActive: true,
+        conversationKey: null,
       }),
+      null,
     );
     assert.deepEqual(enqueueQueuedFollowUp(null, "ignored"), []);
   });

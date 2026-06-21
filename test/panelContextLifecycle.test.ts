@@ -102,18 +102,20 @@ describe("panelContextLifecycle", function () {
       initStart,
     );
     const initBlock = setupSource.slice(initStart, initEnd);
-    const applyWebChat = initBlock.indexOf("applyWebChatModeUI();");
+    const initializeControls = initBlock.indexOf(
+      "initializePanelControlState();",
+    );
     const resetPreview = initBlock.indexOf("resetComposePreviewUI();");
     const firstFlush = initBlock.indexOf("flushPanelStateRefreshNow();");
     const lastFlush = initBlock.lastIndexOf("flushPanelStateRefreshNow();");
 
     assert.isAtLeast(initStart, 0);
     assert.isAbove(initEnd, initStart);
-    assert.isAtLeast(applyWebChat, 0);
+    assert.isAtLeast(initializeControls, 0);
     assert.isAtLeast(resetPreview, 0);
     assert.isAtLeast(firstFlush, 0);
     assert.strictEqual(firstFlush, lastFlush);
-    assert.isBelow(applyWebChat, firstFlush);
+    assert.isBelow(initializeControls, firstFlush);
     assert.isBelow(resetPreview, firstFlush);
   });
 });
