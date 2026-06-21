@@ -13,8 +13,7 @@ export type PdfPaperModelInputProfile = {
     | "api_key"
     | "codex_auth"
     | "codex_app_server"
-    | "copilot_auth"
-    | "webchat";
+    | "copilot_auth";
   providerProtocol?: ProviderProtocol;
 } | null;
 
@@ -97,7 +96,6 @@ export async function resolvePdfModeModelInputs(params: {
   selectedImageCountForBudget: number;
   profile: PdfPaperModelInputProfile;
   currentModelName: string;
-  isWebChat?: boolean;
   useCodexAttachmentPolicy?: boolean;
 }): Promise<PdfPaperModelInputResult> {
   const {
@@ -106,7 +104,6 @@ export async function resolvePdfModeModelInputs(params: {
     selectedBaseFiles,
     profile,
     currentModelName,
-    isWebChat = false,
   } = params;
   const modelName = (profile?.model || currentModelName || "").trim();
   const selectedPdfFiles = selectedBaseFiles.filter(isPdfAttachment);
@@ -124,10 +121,9 @@ export async function resolvePdfModeModelInputs(params: {
   let modelSelectedPdfAttachments = selectedPdfFiles;
   let pdfPageImageDataUrls: string[] = [];
   const pdfUploadSystemMessages: string[] = [];
-  const hasProviderProcessedPdfs = paperContexts.length > 0 && !isWebChat;
+  const hasProviderProcessedPdfs = paperContexts.length > 0;
 
   if (
-    !isWebChat &&
     pdfSupport !== "native" &&
     (paperContexts.length > 0 || selectedPdfFiles.length > 0)
   ) {

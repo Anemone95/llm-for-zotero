@@ -69,16 +69,6 @@ describe("standaloneTabLabel", function () {
     );
   });
 
-  it("overrides the paper slot label with Web chat while webchat is active", function () {
-    assert.equal(
-      resolveStandalonePaperTabLabel({
-        paperSlotItem: attachedNote,
-        isWebChat: true,
-      }),
-      "Web chat",
-    );
-  });
-
   it("preserves a note-editing paper slot label while library chat is active", function () {
     const paperSlotItem = attachedNote;
     const labelWhileLibraryChat = resolveStandalonePaperTabLabel({

@@ -5,7 +5,7 @@ import type { ProviderCapabilities, ProviderParams } from "../types";
  *
  * Standard image_url content parts with image MIME types work (user
  * confirmed).  The Copilot proxy rejects application/pdf MIME input,
- * so PDF support is disabled; users should use text mode / MinerU for PDFs.
+ * so PDF support is disabled; users should use local PDF paths with supported runtimes.
  */
 
 export function matches(params: ProviderParams): boolean {

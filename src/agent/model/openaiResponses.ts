@@ -18,6 +18,7 @@ import type {
   AgentRuntimeRequest,
 } from "../types";
 import type { AgentModelAdapter, AgentStepParams } from "./adapter";
+import { buildAgentModelCapabilities } from "./contentCapabilities";
 import {
   buildResponsesContinuationInput,
   buildResponsesInitialInput,
@@ -56,17 +57,25 @@ export class OpenAIResponsesAgentAdapter implements AgentModelAdapter {
   private conversationItems: unknown[] | null = null;
 
   getCapabilities(_request: AgentRuntimeRequest): AgentModelCapabilities {
-    return {
+    return buildAgentModelCapabilities({
       streaming: true,
       toolCalls: true,
-      multimodal: true,
+      contentInputs: {
+        images: true,
+        pdfDocuments: true,
+        nativeFiles: true,
+      },
       fileInputs: true,
       reasoning: true,
-    };
+    });
   }
 
   supportsTools(_request: AgentRuntimeRequest): boolean {
     return true;
+  }
+
+  resetState(): void {
+    this.conversationItems = null;
   }
 
   async runStep(params: AgentStepParams): Promise<AgentModelStep> {

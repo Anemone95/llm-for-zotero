@@ -1,8 +1,11 @@
 import { assert } from "chai";
 import {
+  buildAssistantDisplayMarkdownForRender,
+  buildRenderedMarkdownClipboardPayload,
   resolveRetryModelInputsForTests,
   type EffectiveRequestConfig,
 } from "../src/modules/contextPanel/chat";
+import { buildQuoteCitation } from "../src/modules/contextPanel/quoteCitations";
 import type {
   ChatAttachment,
   Message,
@@ -18,6 +21,209 @@ describe("chat retry model inputs", function () {
     category: "pdf",
     storedPath: "/tmp/paper.pdf",
   };
+
+  it("preserves known quote anchors for interactive assistant rendering", function () {
+    const quoteCitation = buildQuoteCitation({
+      quoteText: "Rendered quote anchors should not leak.",
+      citationLabel: "(Lee, 2026)",
+      contextItemId: 42,
+    });
+    assert.isDefined(quoteCitation);
+
+    const rendered = buildAssistantDisplayMarkdownForRender({
+      text: `Evidence:\n\n[[quote:${quoteCitation!.id}]]`,
+      quoteCitations: [quoteCitation!],
+    });
+
+    assert.include(rendered, `[[quote:${quoteCitation!.id}]]`);
+    assert.notInclude(rendered, "> Rendered quote anchors");
+    assert.notInclude(rendered, "(Lee, 2026)");
+  });
+
+  it("isolates preserved quote anchors from following assistant prose", function () {
+    const quoteCitation = buildQuoteCitation({
+      quoteText: "Quote card boundaries should remain block-level.",
+      citationLabel: "(Lee, 2026)",
+      contextItemId: 42,
+    });
+    assert.isDefined(quoteCitation);
+
+    const rendered = buildAssistantDisplayMarkdownForRender({
+      text: `Evidence:\n\n[[quote:${quoteCitation!.id}]]\nSo **one component** handles all angles.`,
+      quoteCitations: [quoteCitation!],
+    });
+
+    assert.include(rendered, `[[quote:${quoteCitation!.id}]]\n\nSo **one`);
+    assert.notInclude(rendered, `[[quote:${quoteCitation!.id}]]\nSo **one`);
+    assert.notInclude(rendered, "> Quote card boundaries");
+  });
+
+  it("isolates preserved quote anchors in nested lists from emphasized continuation text", function () {
+    const quoteCitation = buildQuoteCitation({
+      quoteText:
+        "We trained and tested non-linear decoders on every recording session pair.",
+      citationLabel: "(Carrasco et al., 2026)",
+      contextItemId: 42,
+    });
+    assert.isDefined(quoteCitation);
+
+    const rendered = buildAssistantDisplayMarkdownForRender({
+      text: [
+        "- **Decoding and Classification:**",
+        "  - **Head Direction Decoding:** Non-linear decoders were trained.",
+        "",
+        `    [[quote:${quoteCitation!.id}]]`,
+        "*Environment Classification:* Classifiers were trained.",
+      ].join("\n"),
+      quoteCitations: [quoteCitation!],
+    });
+
+    assert.include(
+      rendered,
+      `[[quote:${quoteCitation!.id}]]\n\n*Environment Classification:*`,
+    );
+    assert.notInclude(rendered, "(Carrasco et al., 2026)");
+    assert.notInclude(rendered, "> We trained");
+  });
+
+  it("omits unresolved quote anchors in assistant bubbles", function () {
+    const rendered = buildAssistantDisplayMarkdownForRender({
+      text: "Evidence:\n\n[[quote:Q_missing]]\n\nContinue.",
+      quoteCitations: [],
+    });
+
+    assert.include(rendered, "Evidence");
+    assert.include(rendered, "Continue.");
+    assert.notInclude(rendered, "[[quote:");
+    assert.notInclude(rendered, "[quote unavailable]");
+  });
+
+  it("expands quote anchors in rendered clipboard payloads", function () {
+    const quoteCitation = buildQuoteCitation({
+      quoteText: "Clipboard quote anchors should not leak.",
+      citationLabel: "(Lee, 2026)",
+      contextItemId: 42,
+    });
+    assert.isDefined(quoteCitation);
+
+    const payload = buildRenderedMarkdownClipboardPayload(
+      `Evidence:\n\n[[quote:${quoteCitation!.id}]]`,
+      [quoteCitation!],
+    );
+
+    assert.isNotNull(payload);
+    assert.include(payload!.plainText, "> Clipboard quote anchors");
+    assert.include(payload!.plainText, "(Lee, 2026)");
+    assert.notInclude(payload!.plainText, "[[quote:");
+    assert.include(payload!.renderedHtml, "<blockquote>");
+    assert.notInclude(payload!.renderedHtml, "[[quote:");
+  });
+
+  it("renders expanded quote anchors before emphasized continuation text in clipboard payloads", function () {
+    const quoteCitation = buildQuoteCitation({
+      quoteText:
+        "The primary measures were the absolute change in preferred direction.",
+      citationLabel: "(Carrasco et al., 2026)",
+      contextItemId: 42,
+    });
+    assert.isDefined(quoteCitation);
+
+    const payload = buildRenderedMarkdownClipboardPayload(
+      [
+        "- **Stability Metrics:** Primary measures were compared across days.",
+        "",
+        `[[quote:${quoteCitation!.id}]]`,
+        "*Environment Classification:* Classifiers were trained.",
+      ].join("\n"),
+      [quoteCitation!],
+    );
+
+    assert.isNotNull(payload);
+    assert.include(payload!.plainText, "> The primary measures");
+    assert.include(payload!.plainText, "(Carrasco et al., 2026)");
+    assert.notInclude(payload!.plainText, "[[quote:");
+    assert.include(payload!.renderedHtml, "<blockquote>");
+    assert.include(
+      payload!.renderedHtml,
+      "<p>(Carrasco et al., 2026)</p></blockquote><p><em>Environment Classification:</em> Classifiers were trained.</p>",
+    );
+    assert.notInclude(
+      payload!.renderedHtml,
+      "(Carrasco et al., 2026) <em>Environment Classification:</em>",
+    );
+    assert.notInclude(payload!.renderedHtml, "*Environment Classification:*");
+  });
+
+  it("renders expanded quote anchors before unordered continuation text in clipboard payloads", function () {
+    const quoteCitation = buildQuoteCitation({
+      quoteText:
+        "The primary measures were the absolute change in preferred direction.",
+      citationLabel: "(Carrasco et al., 2026)",
+      contextItemId: 42,
+    });
+    assert.isDefined(quoteCitation);
+
+    const payload = buildRenderedMarkdownClipboardPayload(
+      [
+        `[[quote:${quoteCitation!.id}]]`,
+        "- **Environment Classification:** Classifiers were trained.",
+      ].join("\n"),
+      [quoteCitation!],
+    );
+
+    assert.isNotNull(payload);
+    assert.include(payload!.renderedHtml, "<blockquote>");
+    assert.include(
+      payload!.renderedHtml,
+      "</blockquote><ul><li><strong>Environment Classification:</strong> Classifiers were trained.</li></ul>",
+    );
+    assert.notInclude(
+      payload!.renderedHtml,
+      "(Carrasco et al., 2026) - <strong>Environment",
+    );
+  });
+
+  it("omits unresolved quote anchors in clipboard payloads", function () {
+    const payload = buildRenderedMarkdownClipboardPayload(
+      "Evidence:\n\n[[quote:Q_missing]]\n\nContinue.",
+      [],
+    );
+
+    assert.isNotNull(payload);
+    assert.include(payload!.plainText, "Evidence");
+    assert.include(payload!.plainText, "Continue.");
+    assert.notInclude(payload!.plainText, "[[quote:");
+    assert.notInclude(payload!.plainText, "[quote unavailable]");
+    assert.notInclude(payload!.renderedHtml, "[[quote:");
+    assert.notInclude(payload!.renderedHtml, "[quote unavailable]");
+  });
+
+  it("preserves untrusted leaked source metadata quotes before assistant rendering", function () {
+    const rendered = buildAssistantDisplayMarkdownForRender({
+      text: '"our results provide evidence that the activity of dynamic engrams..." [[source=(Tomé, 2024), section=Dynamic and selective engrams emerge with memory consolidation, chunk=28]]',
+      quoteCitations: [],
+    });
+
+    assert.include(rendered, "> our results provide evidence");
+    assert.include(rendered, "(Tomé, 2024)");
+    assert.notInclude(rendered, "[[source=");
+    assert.notInclude(rendered, "section=");
+    assert.notInclude(rendered, "chunk=");
+  });
+
+  it("preserves untrusted leaked source metadata quotes in clipboard payloads", function () {
+    const payload = buildRenderedMarkdownClipboardPayload(
+      '"our model predicted that memory engrams are highly dynamic" [[source=(Tomé, 2024), section=Dynamic and selective engrams emerge with memory consolidation, chunk=8]]',
+      [],
+    );
+
+    assert.isNotNull(payload);
+    assert.include(payload!.plainText, "> our model predicted");
+    assert.include(payload!.plainText, "(Tomé, 2024)");
+    assert.include(payload!.renderedHtml, "<blockquote>");
+    assert.notInclude(payload!.plainText, "[[source=");
+    assert.notInclude(payload!.renderedHtml, "section=");
+  });
 
   const visionConfig: EffectiveRequestConfig = {
     model: "third-party-vision",
@@ -88,9 +294,9 @@ describe("chat retry model inputs", function () {
   it("fails PDF retries when retry switches to a text-only model", async function () {
     const textOnlyConfig: EffectiveRequestConfig = {
       ...visionConfig,
-      model: "deepseek-reasoner",
-      modelEntryId: "deepseek-entry",
-      modelProviderLabel: "DeepSeek",
+      model: "local-text-only",
+      modelEntryId: "text-only-entry",
+      modelProviderLabel: "Local text-only",
     };
 
     try {

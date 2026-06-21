@@ -200,6 +200,13 @@ export async function readAttachmentBytes(path: string): Promise<Uint8Array> {
   return readBytes(path);
 }
 
+export async function writeAttachmentBytes(
+  path: string,
+  bytes: Uint8Array,
+): Promise<void> {
+  return writeBytes(path, bytes);
+}
+
 async function writeBytes(path: string, bytes: Uint8Array): Promise<void> {
   const io = getIOUtils();
   if (io?.write) {
@@ -220,12 +227,19 @@ function bytesToHex(bytes: Uint8Array): string {
     .join("");
 }
 
+function bytesToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
+}
+
 async function computeSHA256Hex(bytes: Uint8Array): Promise<string> {
   const subtle = globalThis.crypto?.subtle;
   if (!subtle?.digest) {
     throw new Error("WebCrypto subtle.digest unavailable");
   }
-  const hashBuffer = await subtle.digest("SHA-256", bytes);
+  const hashBuffer = await subtle.digest("SHA-256", bytesToArrayBuffer(bytes));
   return bytesToHex(new Uint8Array(hashBuffer));
 }
 
@@ -241,6 +255,13 @@ async function copyFile(sourcePath: string, destPath: string): Promise<void> {
     return;
   }
   throw new Error("No file copy API available");
+}
+
+export async function copyAttachmentFile(
+  sourcePath: string,
+  destPath: string,
+): Promise<void> {
+  return copyFile(sourcePath, destPath);
 }
 
 async function removePath(path: string, recursive: boolean): Promise<void> {

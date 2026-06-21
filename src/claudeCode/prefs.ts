@@ -3,8 +3,13 @@ declare const Zotero: any;
 import { config } from "../../package.json";
 import type { ConversationSystem } from "../shared/types";
 import {
+  normalizeAgentPermissionMode,
+  type AgentPermissionMode,
+} from "../shared/agentPermissionMode";
+import {
   CLAUDE_MODEL_OPTIONS,
   CLAUDE_REASONING_OPTIONS,
+  getClaudeAllocatedConversationKeyRange,
   getClaudeGlobalConversationKeyRange,
   getClaudePaperConversationKeyRange,
   type ClaudeReasoningMode,
@@ -164,14 +169,19 @@ export function getClaudeCustomInstructionPref(): string {
   return getStringPref("systemPrompt").trim();
 }
 
-export function getClaudeConfigSourcePref(): "default" | "user-only" | "zotero-only" {
+export function getClaudeConfigSourcePref():
+  | "default"
+  | "user-only"
+  | "zotero-only" {
   const raw = getStringPref("agentClaudeConfigSource").trim().toLowerCase();
   if (raw === "user-level" || raw === "user-only") return "user-only";
   if (raw === "zotero-specific" || raw === "zotero-only") return "zotero-only";
   return "default";
 }
 
-export function getClaudeSettingSourcesByPref(): Array<"user" | "project" | "local"> {
+export function getClaudeSettingSourcesByPref(): Array<
+  "user" | "project" | "local"
+> {
   const source = getClaudeConfigSourcePref();
   if (source === "user-only") return ["user"];
   if (source === "zotero-only") return ["project", "local"];
@@ -182,13 +192,13 @@ export function getClaudeSettingSourcesCsvByPref(): string {
   return getClaudeSettingSourcesByPref().join(",");
 }
 
-export function getClaudePermissionModePref(): "safe" | "yolo" {
-  return getStringPref("agentPermissionMode").trim().toLowerCase() === "yolo"
-    ? "yolo"
-    : "safe";
+export function getClaudePermissionModePref(): AgentPermissionMode {
+  return normalizeAgentPermissionMode(
+    getStringPref("agentPermissionMode").trim().toLowerCase(),
+  );
 }
 
-export function setClaudePermissionModePref(mode: "safe" | "yolo"): void {
+export function setClaudePermissionModePref(mode: AgentPermissionMode): void {
   setPref("agentPermissionMode", mode === "yolo" ? "yolo" : "safe");
 }
 
@@ -218,7 +228,10 @@ export function setClaudeReasoningModePref(mode: ClaudeReasoningMode): void {
 }
 
 export function isClaudeBlockStreamingEnabled(): boolean {
-  const value = getZoteroPrefs()?.get?.(prefKey("claudeCodeBlockStreaming"), true);
+  const value = getZoteroPrefs()?.get?.(
+    prefKey("claudeCodeBlockStreaming"),
+    true,
+  );
   if (typeof value === "boolean") return value;
   if (typeof value === "string") {
     const normalized = value.trim().toLowerCase();
@@ -248,7 +261,10 @@ export function setClaudeAutoCompactEnabled(enabled: boolean): void {
 }
 
 export function getClaudeAutoCompactThresholdPercent(): number {
-  const value = getZoteroPrefs()?.get?.(prefKey("claudeCodeAutoCompactThreshold"), true);
+  const value = getZoteroPrefs()?.get?.(
+    prefKey("claudeCodeAutoCompactThreshold"),
+    true,
+  );
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return 50;
   return Math.min(80, Math.max(30, Math.round(parsed)));
@@ -260,11 +276,16 @@ export function setClaudeAutoCompactThresholdPercent(value: number): void {
 }
 
 export function getClaudeManagedInstructionTemplatePref(): string {
-  return getStringPref("claudeCodeManagedInstructionTemplate").replace(/\r\n?/g, "\n");
+  return getStringPref("claudeCodeManagedInstructionTemplate").replace(
+    /\r\n?/g,
+    "\n",
+  );
 }
 
 export function setClaudeManagedInstructionTemplatePref(value: string): string {
-  const normalized = String(value || "").replace(/\r\n?/g, "\n").trim();
+  const normalized = String(value || "")
+    .replace(/\r\n?/g, "\n")
+    .trim();
   setPref("claudeCodeManagedInstructionTemplate", normalized);
   return normalized;
 }
@@ -296,19 +317,31 @@ export function isConversationKeyInRange(
   kind: "global" | "paper",
 ): boolean {
   if (!Number.isFinite(value) || value <= 0) return false;
-  const range = kind === "global"
-    ? getClaudeGlobalConversationKeyRange()
-    : getClaudePaperConversationKeyRange();
+  const range =
+    kind === "global"
+      ? getClaudeGlobalConversationKeyRange()
+      : getClaudePaperConversationKeyRange();
   return value >= range.start && value < range.endExclusive;
 }
 
-function getScopedLegacyAllocatedConversationKey(kind: "global" | "paper"): number | null {
+function isConversationKeyInAllocatedRange(
+  value: number,
+  kind: "global" | "paper",
+): boolean {
+  if (!Number.isFinite(value) || value <= 0) return false;
+  const range = getClaudeAllocatedConversationKeyRange(kind);
+  return value >= range.start && value < range.endExclusive;
+}
+
+function getScopedLegacyAllocatedConversationKey(
+  kind: "global" | "paper",
+): number | null {
   const value = getNumberPref(
     kind === "global"
       ? "claudeCodeLastAllocatedGlobalConversationKey"
       : "claudeCodeLastAllocatedPaperConversationKey",
   );
-  return value && isConversationKeyInRange(value, kind) ? value : null;
+  return value && isConversationKeyInAllocatedRange(value, kind) ? value : null;
 }
 
 export function getLastUsedClaudeGlobalConversationKey(
@@ -317,10 +350,18 @@ export function getLastUsedClaudeGlobalConversationKey(
   if (!Number.isFinite(libraryID) || libraryID <= 0) return null;
   const map = getJsonPref("claudeCodeGlobalConversationMap");
   const scopedValue = Number(map[buildGlobalConversationMapKey(libraryID)]);
-  if (Number.isFinite(scopedValue) && scopedValue > 0) return Math.floor(scopedValue);
-  const legacyValue = Number(map[buildLegacyGlobalConversationMapKey(libraryID)]);
+  if (Number.isFinite(scopedValue) && scopedValue > 0) {
+    return isConversationKeyInRange(scopedValue, "global")
+      ? Math.floor(scopedValue)
+      : null;
+  }
+  const legacyValue = Number(
+    map[buildLegacyGlobalConversationMapKey(libraryID)],
+  );
   if (!Number.isFinite(legacyValue) || legacyValue <= 0) return null;
-  return isConversationKeyInRange(legacyValue, "global") ? Math.floor(legacyValue) : null;
+  return isConversationKeyInRange(legacyValue, "global")
+    ? Math.floor(legacyValue)
+    : null;
 }
 
 export function setLastUsedClaudeGlobalConversationKey(
@@ -329,12 +370,15 @@ export function setLastUsedClaudeGlobalConversationKey(
 ): void {
   if (!Number.isFinite(libraryID) || libraryID <= 0) return;
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
+  if (!isConversationKeyInRange(conversationKey, "global")) return;
   const map = getJsonPref("claudeCodeGlobalConversationMap");
   map[buildGlobalConversationMapKey(libraryID)] = Math.floor(conversationKey);
   setJsonPref("claudeCodeGlobalConversationMap", map);
 }
 
-export function removeLastUsedClaudeGlobalConversationKey(libraryID: number): void {
+export function removeLastUsedClaudeGlobalConversationKey(
+  libraryID: number,
+): void {
   if (!Number.isFinite(libraryID) || libraryID <= 0) return;
   const map = getJsonPref("claudeCodeGlobalConversationMap");
   delete map[buildGlobalConversationMapKey(libraryID)];
@@ -348,11 +392,21 @@ export function getLastUsedClaudePaperConversationKey(
   if (!Number.isFinite(libraryID) || libraryID <= 0) return null;
   if (!Number.isFinite(paperItemID) || paperItemID <= 0) return null;
   const map = getJsonPref("claudeCodePaperConversationMap");
-  const scopedValue = Number(map[buildPaperConversationMapKey(libraryID, paperItemID)]);
-  if (Number.isFinite(scopedValue) && scopedValue > 0) return Math.floor(scopedValue);
-  const legacyValue = Number(map[buildLegacyPaperConversationMapKey(libraryID, paperItemID)]);
+  const scopedValue = Number(
+    map[buildPaperConversationMapKey(libraryID, paperItemID)],
+  );
+  if (Number.isFinite(scopedValue) && scopedValue > 0) {
+    return isConversationKeyInRange(scopedValue, "paper")
+      ? Math.floor(scopedValue)
+      : null;
+  }
+  const legacyValue = Number(
+    map[buildLegacyPaperConversationMapKey(libraryID, paperItemID)],
+  );
   if (!Number.isFinite(legacyValue) || legacyValue <= 0) return null;
-  return isConversationKeyInRange(legacyValue, "paper") ? Math.floor(legacyValue) : null;
+  return isConversationKeyInRange(legacyValue, "paper")
+    ? Math.floor(legacyValue)
+    : null;
 }
 
 export function setLastUsedClaudePaperConversationKey(
@@ -363,8 +417,10 @@ export function setLastUsedClaudePaperConversationKey(
   if (!Number.isFinite(libraryID) || libraryID <= 0) return;
   if (!Number.isFinite(paperItemID) || paperItemID <= 0) return;
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
+  if (!isConversationKeyInRange(conversationKey, "paper")) return;
   const map = getJsonPref("claudeCodePaperConversationMap");
-  map[buildPaperConversationMapKey(libraryID, paperItemID)] = Math.floor(conversationKey);
+  map[buildPaperConversationMapKey(libraryID, paperItemID)] =
+    Math.floor(conversationKey);
   setJsonPref("claudeCodePaperConversationMap", map);
 }
 
@@ -386,12 +442,20 @@ function buildLastAllocatedMapKey(kind: "global" | "paper"): string {
 export function getLastAllocatedClaudeGlobalConversationKey(): number | null {
   const map = getJsonPref("claudeCodeLastAllocatedConversationKeyMap");
   const value = Number(map[buildLastAllocatedMapKey("global")]);
-  if (Number.isFinite(value) && value > 0) return Math.floor(value);
+  if (
+    Number.isFinite(value) &&
+    isConversationKeyInAllocatedRange(value, "global")
+  ) {
+    return Math.floor(value);
+  }
   return getScopedLegacyAllocatedConversationKey("global");
 }
 
-export function setLastAllocatedClaudeGlobalConversationKey(conversationKey: number): void {
+export function setLastAllocatedClaudeGlobalConversationKey(
+  conversationKey: number,
+): void {
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
+  if (!isConversationKeyInAllocatedRange(conversationKey, "global")) return;
   const current = getLastAllocatedClaudeGlobalConversationKey() || 0;
   const normalized = Math.floor(conversationKey);
   if (normalized <= current) return;
@@ -404,12 +468,20 @@ export function setLastAllocatedClaudeGlobalConversationKey(conversationKey: num
 export function getLastAllocatedClaudePaperConversationKey(): number | null {
   const map = getJsonPref("claudeCodeLastAllocatedConversationKeyMap");
   const value = Number(map[buildLastAllocatedMapKey("paper")]);
-  if (Number.isFinite(value) && value > 0) return Math.floor(value);
+  if (
+    Number.isFinite(value) &&
+    isConversationKeyInAllocatedRange(value, "paper")
+  ) {
+    return Math.floor(value);
+  }
   return getScopedLegacyAllocatedConversationKey("paper");
 }
 
-export function setLastAllocatedClaudePaperConversationKey(conversationKey: number): void {
+export function setLastAllocatedClaudePaperConversationKey(
+  conversationKey: number,
+): void {
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
+  if (!isConversationKeyInAllocatedRange(conversationKey, "paper")) return;
   const current = getLastAllocatedClaudePaperConversationKey() || 0;
   const normalized = Math.floor(conversationKey);
   if (normalized <= current) return;

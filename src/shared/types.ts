@@ -25,6 +25,21 @@ export type ChatAttachment = {
   contentHash?: string;
 };
 
+export type GeneratedChatImage = {
+  id: string;
+  label?: string;
+  path?: string;
+  src?: string;
+  revisedPrompt?: string;
+};
+
+export type PaperContentSourceMode =
+  | "pdf"
+  | "markdown"
+  | "html"
+  | "txt"
+  | "docx";
+
 export type AdvancedModelParams = {
   temperature: number;
   maxTokens: number;
@@ -34,19 +49,27 @@ export type AdvancedModelParams = {
 export type PaperContextRef = {
   itemId: number;
   contextItemId: number;
+  contentSourceMode?: PaperContentSourceMode;
   citationKey?: string;
   title: string;
   attachmentTitle?: string;
   firstCreator?: string;
   year?: string;
-  /** Full path to MinerU parsed cache directory (contains full.md + images/). */
-  mineruCacheDir?: string;
 };
 
 export type QuoteCitation = {
   id: string;
   quoteText: string;
   citationLabel: string;
+  sourceMatchText?: string;
+  sourceMatchKind?:
+    | "trusted"
+    | "exact"
+    | "ellipsis-segment"
+    | "raw-prefix"
+    | "raw-suffix"
+    | "raw-middle"
+    | "progressive";
   contextItemId?: number;
   itemId?: number;
 };
@@ -78,6 +101,15 @@ export type CollectionContextRef = {
   libraryID: number;
 };
 
+/** A Zotero tag or tag scope selected as context scope. */
+export type TagContextRef = {
+  name: string;
+  libraryID: number;
+  normalizedName?: string;
+  scope?: "allTagged" | "untagged";
+  includeAutomatic?: boolean;
+};
+
 export type ActiveNoteSession = {
   noteKind: "item" | "standalone";
   noteId: number;
@@ -105,6 +137,7 @@ export type ActiveNoteContext = {
 export type ConversationSystem = "upstream" | "claude_code" | "codex";
 
 export type GlobalConversationSummary = {
+  conversationID: string;
   conversationKey: number;
   libraryID: number;
   createdAt: number;
@@ -114,6 +147,7 @@ export type GlobalConversationSummary = {
 };
 
 export type PaperConversationSummary = {
+  conversationID: string;
   conversationKey: number;
   libraryID: number;
   paperItemID: number;
@@ -127,6 +161,7 @@ export type PaperConversationSummary = {
 export type ClaudeConversationKind = "global" | "paper";
 
 export type ClaudeConversationSummary = {
+  conversationID: string;
   conversationKey: number;
   libraryID: number;
   kind: ClaudeConversationKind;
@@ -148,6 +183,7 @@ export type ClaudeConversationSummary = {
 export type CodexConversationKind = "global" | "paper";
 
 export type CodexConversationSummary = {
+  conversationID: string;
   conversationKey: number;
   libraryID: number;
   kind: CodexConversationKind;

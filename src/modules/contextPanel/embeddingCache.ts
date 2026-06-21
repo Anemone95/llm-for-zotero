@@ -2,12 +2,12 @@
  * Persistent disk cache for paper chunk embeddings.
  *
  * Stores one JSON file per paper in `{dataDir}/llm-for-zotero-embeddings/`.
- * Uses the same Gecko I/O pattern as mineruCache.ts (IOUtils → OS.File fallback).
+ * Uses the Gecko I/O pattern (IOUtils -> OS.File fallback).
  *
  * Cache invalidation:
  *  - chunk content changes (chunkHash mismatch)
  *  - embedding model changes (model mismatch)
- *  - MinerU cache invalidation (cascade via clearEmbeddingCache)
+ *  - PDF text cache invalidation (cascade via clearEmbeddingCache)
  */
 
 import { joinLocalPath } from "../../utils/localPath";
@@ -15,7 +15,7 @@ import { joinLocalPath } from "../../utils/localPath";
 const EMBEDDING_CACHE_DIR = "llm-for-zotero-embeddings";
 const CACHE_VERSION = 2; // v2: added provider field for cross-provider cache isolation
 
-// ── Gecko I/O helpers (mirrors mineruCache.ts) ──────────────────────────────
+// ── Gecko I/O helpers ───────────────────────────────────────────────────────
 
 type IOUtilsLike = {
   exists?: (path: string) => Promise<boolean>;

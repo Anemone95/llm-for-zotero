@@ -51,6 +51,13 @@ describe("notes citation page export", function () {
         year: "2020",
       },
     ];
+    const quoteCitation = buildQuoteCitation({
+      quoteText: quote,
+      citationLabel: "(Whittington et al., 2020)",
+      contextItemId: 23,
+      itemId: 1,
+    });
+    assert.isDefined(quoteCitation);
     const messages: Message[] = [
       {
         role: "user",
@@ -63,6 +70,7 @@ describe("notes citation page export", function () {
         text: `> ${quote}\n\n(Whittington et al., 2020, page 1)`,
         timestamp: 2,
         modelName: "Claude",
+        quoteCitations: [quoteCitation!],
       },
     ];
 
@@ -76,6 +84,56 @@ describe("notes citation page export", function () {
     );
     assert.include(result.noteHtml, "(Whittington et al., 2020, page 23)");
     assert.notInclude(result.noteHtml, "(Whittington et al., 2020, page 1)");
+  });
+
+  it("uses source match snippets for cached quote pages in saved notes", function () {
+    const displayedQuote =
+      "We hypothesized that some brain states are easier for people to generate, and that tailoring training to these brain states will facilitate BCI learning. This added explanation was not in the source.";
+    const matchedSnippet =
+      "we hypothesized that some brain states are easier for people to generate";
+    const paperContexts: PaperContextRef[] = [
+      {
+        itemId: 1,
+        contextItemId: 23,
+        title: "Busch 2026",
+        firstCreator: "Busch et al.",
+        year: "2026",
+      },
+    ];
+    const quoteCitation = buildQuoteCitation({
+      quoteText: displayedQuote,
+      citationLabel: "(Busch et al., 2026)",
+      sourceMatchText: matchedSnippet,
+      sourceMatchKind: "raw-prefix",
+      contextItemId: 23,
+      itemId: 1,
+    });
+    assert.isDefined(quoteCitation);
+    const messages: Message[] = [
+      {
+        role: "user",
+        text: "Explain the paper.",
+        timestamp: 1,
+        paperContexts,
+      },
+      {
+        role: "assistant",
+        text: `[[quote:${quoteCitation!.id}]]`,
+        timestamp: 2,
+        modelName: "Claude",
+        quoteCitations: [quoteCitation!],
+      },
+    ];
+
+    rememberCachedCitationPage(23, matchedSnippet, 14, "15");
+
+    const result = buildChatHistoryNotePayload(messages);
+
+    assert.include(
+      result.noteHtml,
+      'href="zotero://open-pdf/library/items/ATTACH23?page=15"',
+    );
+    assert.include(result.noteHtml, "(Busch et al., 2026, page 15)");
   });
 
   it("renders stored quote anchors before note citation injection", function () {
@@ -123,6 +181,55 @@ describe("notes citation page export", function () {
       'href="zotero://open-pdf/library/items/ATTACH23?page=23"',
     );
     assert.notInclude(result.noteHtml, "[[quote:");
+    assert.include(result.noteText, "> Structured quote anchors");
+    assert.include(result.noteText, "(Whittington et al., 2020)");
+    assert.notInclude(result.noteText, "[[quote:");
+  });
+
+  it("omits unresolved quote anchors from chat-history text", function () {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        text: "Evidence:\n\n[[quote:Q_missing]]\n\nContinue.",
+        timestamp: 2,
+        modelName: "Claude",
+        quoteCitations: [],
+      },
+    ];
+
+    const result = buildChatHistoryNotePayload(messages);
+
+    assert.include(result.noteText, "Evidence");
+    assert.include(result.noteText, "Continue.");
+    assert.notInclude(result.noteText, "[[quote:");
+    assert.notInclude(result.noteText, "[quote unavailable]");
+    assert.notInclude(result.noteHtml, "[[quote:");
+    assert.notInclude(result.noteHtml, "[quote unavailable]");
+  });
+
+  it("preserves untrusted leaked source metadata quotes in chat-history text", function () {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        text: '"our results provide evidence that the activity of dynamic engrams..." [[source=(Tomé, 2024), section=Dynamic and selective engrams emerge with memory consolidation, chunk=28]]',
+        timestamp: 2,
+        modelName: "Claude",
+        quoteCitations: [],
+      },
+    ];
+
+    const result = buildChatHistoryNotePayload(messages);
+
+    assert.include(result.noteText, "> our results provide evidence");
+    assert.include(result.noteText, "(Tomé, 2024)");
+    assert.include(result.noteHtml, "our results provide evidence");
+    assert.include(result.noteHtml, "(Tomé, 2024)");
+    assert.notInclude(result.noteText, "[[source=");
+    assert.notInclude(result.noteText, "section=");
+    assert.notInclude(result.noteText, "chunk=");
+    assert.notInclude(result.noteHtml, "[[source=");
+    assert.notInclude(result.noteHtml, "section=");
+    assert.notInclude(result.noteHtml, "chunk=");
   });
 
   it("does not export model-written blockquote pages without a verified cache", function () {
@@ -137,6 +244,13 @@ describe("notes citation page export", function () {
         year: "2020",
       },
     ];
+    const quoteCitation = buildQuoteCitation({
+      quoteText: quote,
+      citationLabel: "(Whittington et al., 2020)",
+      contextItemId: 23,
+      itemId: 1,
+    });
+    assert.isDefined(quoteCitation);
     const messages: Message[] = [
       {
         role: "user",
@@ -149,6 +263,7 @@ describe("notes citation page export", function () {
         text: `> ${quote}\n\n(Whittington et al., 2020, page 1)`,
         timestamp: 2,
         modelName: "Claude",
+        quoteCitations: [quoteCitation!],
       },
     ];
 
@@ -214,6 +329,13 @@ describe("notes citation page export", function () {
         year: "2020",
       },
     ];
+    const quoteCitation = buildQuoteCitation({
+      quoteText: quote,
+      citationLabel: "(Whittington et al., 2020)",
+      contextItemId: 23,
+      itemId: 1,
+    });
+    assert.isDefined(quoteCitation);
     const messages: Message[] = [
       {
         role: "user",
@@ -226,6 +348,7 @@ describe("notes citation page export", function () {
         text: `> ${quote}\n\n(Whittington et al., 2020, page 1)`,
         timestamp: 2,
         modelName: "Claude",
+        quoteCitations: [quoteCitation!],
       },
     ];
 

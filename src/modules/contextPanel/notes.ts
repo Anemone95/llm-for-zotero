@@ -3,7 +3,6 @@ import {
   sanitizeText,
   escapeNoteHtml,
   getCurrentLocalTimestamp,
-  getSelectedTextSourceIcon,
   normalizeSelectedTextSource,
 } from "./textUtils";
 import { normalizeAttachmentContentHash } from "./normalizers";
@@ -26,6 +25,7 @@ import {
 } from "../../utils/attachmentRefStore";
 import type {
   ChatAttachment,
+  GeneratedChatImage,
   Message,
   PaperContextRef,
   QuoteCitation,
@@ -61,7 +61,19 @@ import {
   resolveCodexPaperPortalBaseItem,
 } from "../../codexAppServer/portal";
 import { getMessageCitationPaperContexts } from "./citationContexts";
-import { replaceQuoteCitationPlaceholdersForMarkdown } from "./quoteCitations";
+import {
+  findMatchingTrustedQuoteCitation,
+  replaceQuoteCitationPlaceholdersForMarkdown,
+} from "./quoteCitations";
+import {
+  buildGeneratedImagesHtmlForNote,
+  formatGeneratedImagesMarkdownForNote,
+  normalizeEmbeddableGeneratedImages,
+} from "./noteImages";
+import {
+  replaceVisualFigureFencesWithNoteImages,
+  type NoteFigureRenderOptions,
+} from "./figureExport";
 
 export { readNoteSnapshot, stripNoteHtml, type NoteSnapshot };
 
@@ -145,6 +157,36 @@ export function renderRawNoteHtml(contentText: string): string {
   } catch (err) {
     ztoolkit.log("Note markdown render error:", err);
     return escapeNoteHtml(raw).replace(/\n/g, "<br/>");
+  }
+}
+
+async function renderRawNoteHtmlForSave(
+  contentText: string,
+  options: {
+    noteId?: number;
+    figureRender?: NoteFigureRenderOptions;
+  } = {},
+): Promise<string> {
+  const raw = normalizeNoteSourceText(contentText);
+  if (!raw) return "<p></p>";
+  let noteSource = raw;
+  if (options.noteId && options.figureRender?.doc) {
+    try {
+      noteSource = await replaceVisualFigureFencesWithNoteImages(
+        raw,
+        options.noteId,
+        options.figureRender,
+      );
+    } catch (err) {
+      ztoolkit.log("Note figure render error:", err);
+      noteSource = raw;
+    }
+  }
+  try {
+    return renderMarkdownForNote(noteSource);
+  } catch (err) {
+    ztoolkit.log("Note markdown render error:", err);
+    return escapeNoteHtml(noteSource).replace(/\n/g, "<br/>");
   }
 }
 
@@ -234,6 +276,7 @@ function buildZoteroPdfUri(
 function injectCitationLinksIntoNoteHtml(
   html: string,
   paperContexts: PaperContextRef[] | undefined,
+  quoteCitations?: QuoteCitation[],
 ): string {
   if (!html || !paperContexts?.length) return html;
 
@@ -242,6 +285,60 @@ function injectCitationLinksIntoNoteHtml(
   // Capture the blockquote content so we can look up the citation page cache
   // (the cache is keyed by contextItemId + quote text).
   let result = html.replace(
+    /(<blockquote>)([\s\S]*?)(<\/blockquote>)/gi,
+    (_match, bqOpen: string, bqContent: string, bqClose: string) => {
+      const paragraphMatches = Array.from(
+        bqContent.matchAll(/(<p>)([\s\S]*?)(<\/p>)/gi),
+      );
+      const lastParagraph = paragraphMatches[paragraphMatches.length - 1];
+      if (!lastParagraph || lastParagraph.index === undefined) return _match;
+      const plainText = (lastParagraph[2] || "").replace(/<[^>]+>/g, "").trim();
+      if (!plainText) return _match;
+      const candidates = matchAssistantCitationCandidates(
+        plainText,
+        paperContexts,
+      );
+      if (!candidates.length) return _match;
+      const bestCandidate = candidates[0];
+      const extracted = extractStandalonePaperSourceLabel(plainText);
+      const citationStart = lastParagraph.index;
+      const citationEnd = citationStart + lastParagraph[0].length;
+      const quoteHtml = bqContent.slice(0, citationStart);
+      const quoteText = stripNoteHtml(quoteHtml);
+      const trustedQuote = findMatchingTrustedQuoteCitation({
+        quoteText,
+        citationLabel: extracted?.sourceLabel || plainText,
+        quoteCitations,
+      });
+      const lookupTexts = Array.from(
+        new Set(
+          [trustedQuote?.sourceMatchText, trustedQuote?.quoteText, quoteText]
+            .map((value) => sanitizeText(value || "").trim())
+            .filter(Boolean),
+        ),
+      );
+      let cachedPage = "";
+      for (const lookupText of lookupTexts) {
+        cachedPage =
+          lookupCachedCitationPage(bestCandidate.contextItemId, lookupText) ||
+          "";
+        if (cachedPage) break;
+      }
+      const pageLabel = cachedPage || undefined;
+      const uri = buildZoteroPdfUri(bestCandidate.contextItemId, pageLabel);
+      if (!uri) return _match;
+      const visibleCitationText = pageLabel
+        ? formatSourceLabelWithPage(
+            extracted?.sourceLabel || plainText,
+            pageLabel,
+          )
+        : extracted?.sourceLabel || plainText;
+      const linkedCitation = `${lastParagraph[1]}<a href="${escapeNoteHtml(uri)}">${escapeNoteHtml(visibleCitationText)}</a>${lastParagraph[3]}`;
+      return `${bqOpen}${quoteHtml}${linkedCitation}${bqContent.slice(citationEnd)}${bqClose}`;
+    },
+  );
+
+  result = result.replace(
     /(<blockquote>)([\s\S]*?)(<\/blockquote>\s*<p>)([\s\S]*?)(<\/p>)/gi,
     (
       _match,
@@ -263,10 +360,25 @@ function injectCitationLinksIntoNoteHtml(
       // Check the citation page cache for a corrected page (verified by
       // FindController when the user clicked the citation in the chat panel).
       const quoteText = stripNoteHtml(bqContent);
-      const cachedPage = lookupCachedCitationPage(
-        bestCandidate.contextItemId,
+      const trustedQuote = findMatchingTrustedQuoteCitation({
         quoteText,
+        citationLabel: extracted?.sourceLabel || plainText,
+        quoteCitations,
+      });
+      const lookupTexts = Array.from(
+        new Set(
+          [trustedQuote?.sourceMatchText, trustedQuote?.quoteText, quoteText]
+            .map((value) => sanitizeText(value || "").trim())
+            .filter(Boolean),
+        ),
       );
+      let cachedPage = "";
+      for (const lookupText of lookupTexts) {
+        cachedPage =
+          lookupCachedCitationPage(bestCandidate.contextItemId, lookupText) ||
+          "";
+        if (cachedPage) break;
+      }
       const pageLabel = cachedPage || undefined;
       const uri = buildZoteroPdfUri(bestCandidate.contextItemId, pageLabel);
       if (!uri) return _match;
@@ -382,16 +494,89 @@ function buildAssistantNoteHtml(
   modelName: string,
   paperContexts?: PaperContextRef[],
   quoteCitations?: QuoteCitation[],
+  generatedImagesHtml = "",
+  queryText = "",
 ): string {
+  const query = replaceQuoteCitationPlaceholdersForMarkdown(
+    sanitizeText(queryText || "").trim(),
+    quoteCitations,
+    { unresolved: "omit" },
+  );
   const response = replaceQuoteCitationPlaceholdersForMarkdown(
     sanitizeText(stripTrailingPluginFooter(contentText || "")).trim(),
     quoteCitations,
+    { unresolved: "omit" },
   );
   const source = modelName.trim() || "unknown";
   const timestamp = getCurrentLocalTimestamp();
-  let responseHtml = renderRawNoteHtml(response);
-  responseHtml = injectCitationLinksIntoNoteHtml(responseHtml, paperContexts);
-  return `<p><strong>${escapeNoteHtml(timestamp)}</strong></p><p><strong>${escapeNoteHtml(source)}:</strong></p><div>${responseHtml}</div>${NOTE_FOOTER_HTML}`;
+  let queryHtml = query ? renderRawNoteHtml(query) : "";
+  let responseHtml = response ? renderRawNoteHtml(response) : "";
+  if (queryHtml) {
+    queryHtml = injectCitationLinksIntoNoteHtml(
+      queryHtml,
+      paperContexts,
+      quoteCitations,
+    );
+  }
+  if (responseHtml) {
+    responseHtml = injectCitationLinksIntoNoteHtml(
+      responseHtml,
+      paperContexts,
+      quoteCitations,
+    );
+  }
+  const queryBlock = queryHtml
+    ? `<p><strong>User query:</strong></p><div>${queryHtml}</div>`
+    : "";
+  return `<p><strong>${escapeNoteHtml(timestamp)}</strong></p>${queryBlock}<p><strong>Model response:</strong> ${escapeNoteHtml(source)}</p><div>${responseHtml}${generatedImagesHtml}</div>${NOTE_FOOTER_HTML}`;
+}
+
+async function buildAssistantNoteHtmlForSave(
+  contentText: string,
+  modelName: string,
+  paperContexts?: PaperContextRef[],
+  quoteCitations?: QuoteCitation[],
+  generatedImagesHtml = "",
+  queryText = "",
+  options: {
+    noteId?: number;
+    figureRender?: NoteFigureRenderOptions;
+  } = {},
+): Promise<string> {
+  const query = replaceQuoteCitationPlaceholdersForMarkdown(
+    sanitizeText(queryText || "").trim(),
+    quoteCitations,
+    { unresolved: "omit" },
+  );
+  const response = replaceQuoteCitationPlaceholdersForMarkdown(
+    sanitizeText(stripTrailingPluginFooter(contentText || "")).trim(),
+    quoteCitations,
+    { unresolved: "omit" },
+  );
+  const source = modelName.trim() || "unknown";
+  const timestamp = getCurrentLocalTimestamp();
+  let queryHtml = query ? await renderRawNoteHtmlForSave(query, options) : "";
+  let responseHtml = response
+    ? await renderRawNoteHtmlForSave(response, options)
+    : "";
+  if (queryHtml) {
+    queryHtml = injectCitationLinksIntoNoteHtml(
+      queryHtml,
+      paperContexts,
+      quoteCitations,
+    );
+  }
+  if (responseHtml) {
+    responseHtml = injectCitationLinksIntoNoteHtml(
+      responseHtml,
+      paperContexts,
+      quoteCitations,
+    );
+  }
+  const queryBlock = queryHtml
+    ? `<p><strong>User query:</strong></p><div>${queryHtml}</div>`
+    : "";
+  return `<p><strong>${escapeNoteHtml(timestamp)}</strong></p>${queryBlock}<p><strong>Model response:</strong> ${escapeNoteHtml(source)}</p><div>${responseHtml}${generatedImagesHtml}</div>${NOTE_FOOTER_HTML}`;
 }
 
 function renderChatMessageHtmlForNote(
@@ -401,10 +586,29 @@ function renderChatMessageHtmlForNote(
   const safeText = replaceQuoteCitationPlaceholdersForMarkdown(
     sanitizeText(text || "").trim(),
     quoteCitations,
+    { unresolved: "omit" },
   );
   if (!safeText) return "";
   // Reuse the same markdown-to-note rendering path as single-response save.
   return renderRawNoteHtml(safeText);
+}
+
+async function renderChatMessageHtmlForNoteSave(
+  text: string,
+  noteId: number | undefined,
+  figureRender: NoteFigureRenderOptions | undefined,
+  quoteCitations?: QuoteCitation[],
+): Promise<string> {
+  const safeText = replaceQuoteCitationPlaceholdersForMarkdown(
+    sanitizeText(text || "").trim(),
+    quoteCitations,
+    { unresolved: "omit" },
+  );
+  if (!safeText) return "";
+  return renderRawNoteHtmlForSave(safeText, {
+    noteId,
+    figureRender,
+  });
 }
 
 function normalizeScreenshotImagesForNote(images: unknown): string[] {
@@ -488,19 +692,14 @@ function formatSelectedTextLabel(
   index: number,
   total: number,
 ): string {
-  const icon = getSelectedTextSourceIcon(source);
   if (source === "note") {
-    return total === 1
-      ? `${icon} Note context`
-      : `${icon} Note context (${index + 1})`;
+    return total === 1 ? "Note context" : `Note context (${index + 1})`;
   }
   if (source === "note-edit") {
-    return total === 1
-      ? `${icon} Editing focus`
-      : `${icon} Editing focus (${index + 1})`;
+    return total === 1 ? "Editing focus" : `Editing focus (${index + 1})`;
   }
-  if (total === 1) return `${icon} Selected text`;
-  return `${icon} Selected text (${index + 1})`;
+  if (total === 1) return "Selected text";
+  return `Selected text (${index + 1})`;
 }
 
 function buildScreenshotImagesHtmlForNote(images: string[]): string {
@@ -623,12 +822,35 @@ async function normalizeHistoryAttachmentsToSharedBlobs(
 export function buildChatHistoryNotePayload(messages: Message[]): {
   noteHtml: string;
   noteText: string;
+};
+export function buildChatHistoryNotePayload(
+  messages: Message[],
+  options: {
+    generatedImageHtmlByMessageIndex?: Map<number, string>;
+  },
+): {
+  noteHtml: string;
+  noteText: string;
+};
+export function buildChatHistoryNotePayload(
+  messages: Message[],
+  options: {
+    generatedImageHtmlByMessageIndex?: Map<number, string>;
+  } = {},
+): {
+  noteHtml: string;
+  noteText: string;
 } {
   const timestamp = getCurrentLocalTimestamp();
   const textLines: string[] = [];
   const htmlBlocks: string[] = [];
   let lastUserPaperContexts: PaperContextRef[] | undefined;
-  for (const msg of messages) {
+  for (
+    let messageIndex = 0;
+    messageIndex < messages.length;
+    messageIndex += 1
+  ) {
+    const msg = messages[messageIndex]!;
     // Strip any skill-added footer from assistant messages so chat-history
     // exports don't end up with "Written by LLM-for-Zotero." repeated for
     // every saved-as-note assistant turn plus the UI wrapper's own footer.
@@ -645,12 +867,26 @@ export function buildChatHistoryNotePayload(messages: Message[]): {
       msg.screenshotImages,
     );
     const fileAttachments = normalizeFileAttachmentsForNote(msg.attachments);
+    const generatedImages =
+      msg.role === "assistant"
+        ? normalizeEmbeddableGeneratedImages(msg.generatedImages)
+        : [];
+    const generatedImageText =
+      msg.role === "assistant"
+        ? formatGeneratedImagesMarkdownForNote(generatedImages)
+        : "";
+    const generatedImageHtml =
+      msg.role === "assistant"
+        ? options.generatedImageHtmlByMessageIndex?.get(messageIndex) || ""
+        : "";
     const screenshotCount = screenshotImages.length;
     if (
       !text &&
       !selectedTextContexts.length &&
       !screenshotCount &&
-      !fileAttachments.length
+      !fileAttachments.length &&
+      !generatedImageText &&
+      !generatedImageHtml
     )
       continue;
     let textWithContext = text;
@@ -692,6 +928,10 @@ export function buildChatHistoryNotePayload(messages: Message[]): {
       }
       textWithContext = userBlocks.join("\n\n");
       htmlTextWithContext = userHtmlBlocks.join("\n\n");
+    } else if (generatedImageText) {
+      textWithContext = [textWithContext, generatedImageText]
+        .filter(Boolean)
+        .join("\n\n");
     }
     const speaker =
       msg.role === "user"
@@ -704,7 +944,7 @@ export function buildChatHistoryNotePayload(messages: Message[]): {
     const fileHtml =
       msg.role === "user" ? buildFileListHtmlForNote(fileAttachments) : "";
     let rendered = renderChatMessageHtmlForNote(
-      msg.role === "user" ? htmlTextWithContext : textWithContext,
+      htmlTextWithContext,
       msg.role === "assistant" ? msg.quoteCitations : undefined,
     );
     // For assistant messages, inject citation links using the preceding
@@ -713,16 +953,176 @@ export function buildChatHistoryNotePayload(messages: Message[]): {
       rendered = injectCitationLinksIntoNoteHtml(
         rendered,
         lastUserPaperContexts,
+        msg.quoteCitations,
       );
     }
+    const exportedText =
+      msg.role === "assistant"
+        ? replaceQuoteCitationPlaceholdersForMarkdown(
+            textWithContext,
+            msg.quoteCitations,
+            { unresolved: "omit" },
+          )
+        : textWithContext;
     if (msg.role === "user") {
       lastUserPaperContexts = getMessageCitationPaperContexts(msg);
     }
-    if (!rendered && !screenshotHtml && !fileHtml) continue;
-    textLines.push(`${speaker}: ${textWithContext}`);
+    if (!rendered && !screenshotHtml && !fileHtml && !generatedImageHtml)
+      continue;
+    textLines.push(`${speaker}: ${exportedText}`);
     const renderedBlock = rendered ? `<div>${rendered}</div>` : "";
     htmlBlocks.push(
-      `<p><strong>${escapeNoteHtml(speaker)}:</strong></p>${renderedBlock}${screenshotHtml}${fileHtml}`,
+      `<p><strong>${escapeNoteHtml(speaker)}:</strong></p>${renderedBlock}${screenshotHtml}${fileHtml}${generatedImageHtml}`,
+    );
+  }
+  const noteText = textLines.join("\n\n");
+  const bodyHtml = htmlBlocks.join("<hr/>");
+  return {
+    noteText,
+    noteHtml: `<p><strong>Chat history saved at ${escapeNoteHtml(timestamp)}</strong></p><div>${bodyHtml}</div>${NOTE_FOOTER_HTML}`,
+  };
+}
+
+async function buildChatHistoryNotePayloadForSave(
+  messages: Message[],
+  options: {
+    noteId: number;
+    generatedImageHtmlByMessageIndex?: Map<number, string>;
+    figureRender?: NoteFigureRenderOptions;
+  },
+): Promise<{
+  noteHtml: string;
+  noteText: string;
+}> {
+  const timestamp = getCurrentLocalTimestamp();
+  const textLines: string[] = [];
+  const htmlBlocks: string[] = [];
+  let lastUserPaperContexts: PaperContextRef[] | undefined;
+  for (
+    let messageIndex = 0;
+    messageIndex < messages.length;
+    messageIndex += 1
+  ) {
+    const msg = messages[messageIndex]!;
+    const rawText = msg.text || "";
+    const textPreStripped =
+      msg.role === "assistant" ? stripTrailingPluginFooter(rawText) : rawText;
+    const text = sanitizeText(textPreStripped).trim();
+    const selectedTextContexts = normalizeSelectedTextsForNote(
+      msg.selectedTexts,
+      msg.selectedText,
+      msg.selectedTextSources,
+    );
+    const screenshotImages = normalizeScreenshotImagesForNote(
+      msg.screenshotImages,
+    );
+    const fileAttachments = normalizeFileAttachmentsForNote(msg.attachments);
+    const generatedImages =
+      msg.role === "assistant"
+        ? normalizeEmbeddableGeneratedImages(msg.generatedImages)
+        : [];
+    const generatedImageText =
+      msg.role === "assistant"
+        ? formatGeneratedImagesMarkdownForNote(generatedImages)
+        : "";
+    const generatedImageHtml =
+      msg.role === "assistant"
+        ? options.generatedImageHtmlByMessageIndex?.get(messageIndex) || ""
+        : "";
+    const screenshotCount = screenshotImages.length;
+    if (
+      !text &&
+      !selectedTextContexts.length &&
+      !screenshotCount &&
+      !fileAttachments.length &&
+      !generatedImageText &&
+      !generatedImageHtml
+    )
+      continue;
+    let textWithContext = text;
+    let htmlTextWithContext = text;
+    if (msg.role === "user") {
+      const userBlocks: string[] = [];
+      const userHtmlBlocks: string[] = [];
+      if (selectedTextContexts.length === 1) {
+        const entry = selectedTextContexts[0];
+        const label = formatSelectedTextLabel(
+          entry.source,
+          0,
+          selectedTextContexts.length,
+        );
+        userBlocks.push(formatSelectedTextQuoteMarkdown(entry.text, label));
+        userHtmlBlocks.push(formatSelectedTextQuoteMarkdown(entry.text, label));
+      } else if (selectedTextContexts.length > 1) {
+        selectedTextContexts.forEach((entry, index) => {
+          const label = formatSelectedTextLabel(
+            entry.source,
+            index,
+            selectedTextContexts.length,
+          );
+          userBlocks.push(formatSelectedTextQuoteMarkdown(entry.text, label));
+          userHtmlBlocks.push(
+            formatSelectedTextQuoteMarkdown(entry.text, label),
+          );
+        });
+      }
+      if (screenshotCount) {
+        userBlocks.push(formatScreenshotEmbeddedLabel(screenshotCount));
+      }
+      if (fileAttachments.length) {
+        userBlocks.push(formatFileEmbeddedLabel(fileAttachments));
+      }
+      if (text) {
+        userBlocks.push(text);
+        userHtmlBlocks.push(text);
+      }
+      textWithContext = userBlocks.join("\n\n");
+      htmlTextWithContext = userHtmlBlocks.join("\n\n");
+    } else if (generatedImageText) {
+      textWithContext = [textWithContext, generatedImageText]
+        .filter(Boolean)
+        .join("\n\n");
+    }
+    const speaker =
+      msg.role === "user"
+        ? "user"
+        : sanitizeText(msg.modelName || "").trim() || "model";
+    const screenshotHtml =
+      msg.role === "user"
+        ? buildScreenshotImagesHtmlForNote(screenshotImages)
+        : "";
+    const fileHtml =
+      msg.role === "user" ? buildFileListHtmlForNote(fileAttachments) : "";
+    let rendered = await renderChatMessageHtmlForNoteSave(
+      htmlTextWithContext,
+      options.noteId,
+      options.figureRender,
+      msg.role === "assistant" ? msg.quoteCitations : undefined,
+    );
+    if (msg.role === "assistant" && rendered) {
+      rendered = injectCitationLinksIntoNoteHtml(
+        rendered,
+        lastUserPaperContexts,
+        msg.quoteCitations,
+      );
+    }
+    const exportedText =
+      msg.role === "assistant"
+        ? replaceQuoteCitationPlaceholdersForMarkdown(
+            textWithContext,
+            msg.quoteCitations,
+            { unresolved: "omit" },
+          )
+        : textWithContext;
+    if (msg.role === "user") {
+      lastUserPaperContexts = getMessageCitationPaperContexts(msg);
+    }
+    if (!rendered && !screenshotHtml && !fileHtml && !generatedImageHtml)
+      continue;
+    textLines.push(`${speaker}: ${exportedText}`);
+    const renderedBlock = rendered ? `<div>${rendered}</div>` : "";
+    htmlBlocks.push(
+      `<p><strong>${escapeNoteHtml(speaker)}:</strong></p>${renderedBlock}${screenshotHtml}${fileHtml}${generatedImageHtml}`,
     );
   }
   const noteText = textLines.join("\n\n");
@@ -744,6 +1144,101 @@ function appendAssistantAnswerToNoteHtml(
   return `${base}<hr/>${addition}`;
 }
 
+export type AssistantResponseNoteDestination =
+  | { kind: "item"; item: Zotero.Item }
+  | { kind: "standalone"; libraryID: number };
+
+export type AssistantResponseNoteResult = {
+  status: "created";
+  destination: AssistantResponseNoteDestination["kind"];
+  noteId?: number;
+};
+
+export async function createAssistantResponseNote(params: {
+  destination: AssistantResponseNoteDestination;
+  contentText: string;
+  queryText?: string;
+  modelName: string;
+  paperContexts?: PaperContextRef[];
+  quoteCitations?: QuoteCitation[];
+  generatedImages?: GeneratedChatImage[];
+  figureRender?: NoteFigureRenderOptions;
+}): Promise<AssistantResponseNoteResult> {
+  let libraryID = 0;
+  let parentId: number | undefined;
+  if (params.destination.kind === "item") {
+    const parentItem = resolveParentItemForNoteTarget(params.destination.item);
+    parentId = parentItem?.id;
+    if (!parentItem || !parentId) {
+      throw new Error("No parent item available for note creation");
+    }
+    libraryID = parentItem.libraryID;
+  } else {
+    libraryID = Number.isFinite(params.destination.libraryID)
+      ? Math.floor(params.destination.libraryID)
+      : 0;
+    if (libraryID <= 0) {
+      throw new Error("Invalid library ID for standalone note creation");
+    }
+  }
+
+  const generatedImages = normalizeEmbeddableGeneratedImages(
+    params.generatedImages,
+  );
+  const buildHtml = async (noteId?: number): Promise<string> => {
+    const generatedImagesHtml =
+      noteId && generatedImages.length
+        ? await buildGeneratedImagesHtmlForNote(generatedImages, noteId)
+        : "";
+    return buildAssistantNoteHtmlForSave(
+      params.contentText,
+      params.modelName,
+      params.paperContexts,
+      params.quoteCitations,
+      generatedImagesHtml,
+      params.queryText,
+      {
+        noteId,
+        figureRender: params.figureRender,
+      },
+    );
+  };
+
+  const note = new Zotero.Item("note");
+  note.libraryID = libraryID;
+  if (parentId) note.parentID = parentId;
+  const needsDeferredHtml =
+    generatedImages.length || Boolean(params.figureRender?.doc);
+  if (needsDeferredHtml) {
+    note.setNote("<p>Preparing note figures...</p>");
+  } else {
+    note.setNote(await buildHtml());
+  }
+  const saveResult = await note.saveTx();
+  const noteId =
+    typeof saveResult === "number" && saveResult > 0 ? saveResult : note.id;
+  if (needsDeferredHtml && noteId && noteId > 0) {
+    note.setNote(await buildHtml(noteId));
+    await note.saveTx();
+  }
+  if (noteId && noteId > 0) {
+    const target =
+      params.destination.kind === "item"
+        ? `parent ${parentId}`
+        : `library ${libraryID}`;
+    ztoolkit.log(`LLM: Created response note ${noteId} for ${target}`);
+  } else {
+    ztoolkit.log(
+      "LLM: Warning – response note was saved but could not determine note ID",
+    );
+  }
+  return {
+    status: "created",
+    destination: params.destination.kind,
+    noteId: noteId && noteId > 0 ? noteId : undefined,
+  };
+}
+
 export async function createNoteFromAssistantText(
   item: Zotero.Item,
   contentText: string,
@@ -753,6 +1248,9 @@ export async function createNoteFromAssistantText(
     appendToTrackedNote?: boolean;
     rememberCreatedNote?: boolean;
     quoteCitations?: QuoteCitation[];
+    generatedImages?: GeneratedChatImage[];
+    queryText?: string;
+    figureRender?: NoteFigureRenderOptions;
   } = {},
 ): Promise<"created" | "appended"> {
   const parentItem = resolveParentItemForNoteTarget(item);
@@ -767,12 +1265,27 @@ export async function createNoteFromAssistantText(
   // of injecting rendered DOM HTML from the bubble was fragile — KaTeX
   // span trees and sanitised classless wrappers were mostly dropped by
   // ProseMirror.)
-  const html = buildAssistantNoteHtml(
-    contentText,
-    modelName,
-    paperContexts,
-    options.quoteCitations,
+  const generatedImages = normalizeEmbeddableGeneratedImages(
+    options.generatedImages,
   );
+  const buildHtml = async (noteId?: number): Promise<string> => {
+    const generatedImagesHtml =
+      noteId && generatedImages.length
+        ? await buildGeneratedImagesHtmlForNote(generatedImages, noteId)
+        : "";
+    return buildAssistantNoteHtmlForSave(
+      contentText,
+      modelName,
+      paperContexts,
+      options.quoteCitations,
+      generatedImagesHtml,
+      options.queryText,
+      {
+        noteId,
+        figureRender: options.figureRender,
+      },
+    );
+  };
 
   if (options.appendToTrackedNote) {
     // Try to find an existing tracked note for this parent item.
@@ -780,6 +1293,7 @@ export async function createNoteFromAssistantText(
     const existingNote = getTrackedAssistantNoteForParent(parentId);
     if (existingNote) {
       try {
+        const html = await buildHtml(existingNote.id);
         const appendedHtml = appendAssistantAnswerToNoteHtml(
           existingNote.getNote() || "",
           html,
@@ -803,24 +1317,20 @@ export async function createNoteFromAssistantText(
   }
 
   // No existing tracked note (or append failed) – create a brand-new note.
-  const note = new Zotero.Item("note");
-  note.libraryID = parentItem.libraryID;
-  note.parentID = parentId;
-  note.setNote(html);
-  const saveResult = await note.saveTx();
-  // saveTx() returns the new item ID (number) on creation.
-  // Also check note.id as a fallback.
-  const newNoteId =
-    typeof saveResult === "number" && saveResult > 0 ? saveResult : note.id;
-  if (newNoteId && newNoteId > 0) {
+  const result = await createAssistantResponseNote({
+    destination: { kind: "item", item },
+    contentText,
+    queryText: options.queryText,
+    modelName,
+    paperContexts,
+    quoteCitations: options.quoteCitations,
+    generatedImages: options.generatedImages,
+    figureRender: options.figureRender,
+  });
+  if (result.noteId && result.noteId > 0) {
     if (options.rememberCreatedNote) {
-      rememberAssistantNoteForParent(parentId, newNoteId);
+      rememberAssistantNoteForParent(parentId, result.noteId);
     }
-    ztoolkit.log(`LLM: Created new note ${newNoteId} for parent ${parentId}`);
-  } else {
-    ztoolkit.log(
-      "LLM: Warning – note was saved but could not determine note ID",
-    );
   }
   return "created";
 }
@@ -831,29 +1341,48 @@ export async function createStandaloneNoteFromAssistantText(
   modelName: string,
   paperContexts?: PaperContextRef[],
   quoteCitations?: QuoteCitation[],
+  generatedImages?: GeneratedChatImage[],
+  queryText?: string,
+  figureRender?: NoteFigureRenderOptions,
 ): Promise<"created"> {
-  const normalizedLibraryID = Number.isFinite(libraryID)
-    ? Math.floor(libraryID)
-    : 0;
-  if (normalizedLibraryID <= 0) {
-    throw new Error("Invalid library ID for standalone note creation");
-  }
-  const html = buildAssistantNoteHtml(
+  await createAssistantResponseNote({
+    destination: { kind: "standalone", libraryID },
     contentText,
+    queryText,
     modelName,
     paperContexts,
     quoteCitations,
-  );
-  const note = new Zotero.Item("note");
-  note.libraryID = normalizedLibraryID;
-  note.setNote(html);
-  await note.saveTx();
+    generatedImages,
+    figureRender,
+  });
   return "created";
+}
+
+async function buildGeneratedImageHtmlByMessageIndex(
+  history: Message[],
+  noteId: number,
+): Promise<Map<number, string>> {
+  const htmlByIndex = new Map<number, string>();
+  if (!noteId || noteId <= 0) return htmlByIndex;
+  for (let index = 0; index < history.length; index += 1) {
+    const msg = history[index];
+    if (msg?.role !== "assistant") continue;
+    const generatedImages = normalizeEmbeddableGeneratedImages(
+      msg.generatedImages,
+    );
+    if (!generatedImages.length) continue;
+    const html = await buildGeneratedImagesHtmlForNote(generatedImages, noteId);
+    if (html) htmlByIndex.set(index, html);
+  }
+  return htmlByIndex;
 }
 
 export async function createNoteFromChatHistory(
   item: Zotero.Item,
   history: Message[],
+  options: {
+    figureRender?: NoteFigureRenderOptions;
+  } = {},
 ): Promise<void> {
   const parentItem = resolveParentItemForNoteTarget(item);
   const parentId = parentItem?.id;
@@ -877,7 +1406,18 @@ export async function createNoteFromChatHistory(
   }
   const normalizedHistory =
     await normalizeHistoryAttachmentsToSharedBlobs(history);
-  note.setNote(buildChatHistoryNotePayload(normalizedHistory).noteHtml);
+  const generatedImageHtmlByMessageIndex =
+    await buildGeneratedImageHtmlByMessageIndex(normalizedHistory, noteId);
+  const payload = options.figureRender?.doc
+    ? await buildChatHistoryNotePayloadForSave(normalizedHistory, {
+        noteId,
+        generatedImageHtmlByMessageIndex,
+        figureRender: options.figureRender,
+      })
+    : buildChatHistoryNotePayload(normalizedHistory, {
+        generatedImageHtmlByMessageIndex,
+      });
+  note.setNote(payload.noteHtml);
   await note.saveTx();
   const attachmentHashes = collectAttachmentHashes(normalizedHistory);
   try {
@@ -898,6 +1438,9 @@ export async function createNoteFromChatHistory(
 export async function createStandaloneNoteFromChatHistory(
   libraryID: number,
   history: Message[],
+  options: {
+    figureRender?: NoteFigureRenderOptions;
+  } = {},
 ): Promise<void> {
   const normalizedLibraryID = Number.isFinite(libraryID)
     ? Math.floor(libraryID)
@@ -918,7 +1461,18 @@ export async function createStandaloneNoteFromChatHistory(
   }
   const normalizedHistory =
     await normalizeHistoryAttachmentsToSharedBlobs(history);
-  note.setNote(buildChatHistoryNotePayload(normalizedHistory).noteHtml);
+  const generatedImageHtmlByMessageIndex =
+    await buildGeneratedImageHtmlByMessageIndex(normalizedHistory, noteId);
+  const payload = options.figureRender?.doc
+    ? await buildChatHistoryNotePayloadForSave(normalizedHistory, {
+        noteId,
+        generatedImageHtmlByMessageIndex,
+        figureRender: options.figureRender,
+      })
+    : buildChatHistoryNotePayload(normalizedHistory, {
+        generatedImageHtmlByMessageIndex,
+      });
+  note.setNote(payload.noteHtml);
   await note.saveTx();
   const attachmentHashes = collectAttachmentHashes(normalizedHistory);
   try {

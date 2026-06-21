@@ -36,8 +36,7 @@ export type ModelProviderAuthMode =
   | "api_key"
   | "codex_auth"
   | "codex_app_server"
-  | "copilot_auth"
-  | "webchat"; // [webchat]
+  | "copilot_auth";
 
 export type ModelProviderGroup = {
   id: string;
@@ -139,8 +138,8 @@ function normalizeProviderAuthMode(value: unknown): ModelProviderAuthMode {
   if (value === "codex_auth") return "codex_auth";
   if (value === "codex_app_server") return "codex_app_server";
   if (value === "copilot_auth") return "copilot_auth";
-  if (value === "webchat") return "webchat"; // [webchat]
-  return "api_key";
+  if (value === "api_key") return "api_key";
+  return "codex_app_server";
 }
 
 function normalizeAdvancedModelConfig(
@@ -308,8 +307,7 @@ function resolveStoredPresetId(group: ModelProviderGroup): ProviderPresetId {
   if (
     group.authMode === "codex_auth" ||
     group.authMode === "codex_app_server" ||
-    group.authMode === "copilot_auth" ||
-    group.authMode === "webchat"
+    group.authMode === "copilot_auth"
   ) {
     return "customized";
   }
@@ -574,8 +572,8 @@ export function createEmptyProviderGroup(): ModelProviderGroup {
     id: createId("provider"),
     apiBase: "",
     apiKey: "",
-    authMode: "api_key",
-    providerProtocol: "openai_chat_compat",
+    authMode: "codex_app_server",
+    providerProtocol: "codex_responses",
     models: [],
   };
 }
@@ -603,11 +601,8 @@ export function getRuntimeModelEntries(): RuntimeModelEntry[] {
       group.apiBase,
       groupIndex + 1,
     );
-    // [webchat] Use "ChatGPT Web" (or target label) as provider label
     const providerLabel =
-      authMode === "webchat"
-        ? `${baseProviderLabel} (web)`
-        : authMode === "codex_auth"
+      authMode === "codex_auth"
           ? `${baseProviderLabel} (codex auth, legacy)`
           : authMode === "codex_app_server"
             ? `${baseProviderLabel} (app server)`
@@ -621,11 +616,8 @@ export function getRuntimeModelEntries(): RuntimeModelEntry[] {
       const normalizedModel = modelName.toLowerCase();
       const duplicateCount = (normalizedCounts.get(normalizedModel) || 0) + 1;
       normalizedCounts.set(normalizedModel, duplicateCount);
-      // [webchat] Display as "web/chatgpt" etc.
       const baseModelLabel =
-        authMode === "webchat"
-          ? `web/${modelName}`
-          : authMode === "codex_auth"
+        authMode === "codex_auth"
             ? `codex/${modelName}`
             : authMode === "codex_app_server"
               ? `codex-app/${modelName}`

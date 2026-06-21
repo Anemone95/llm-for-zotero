@@ -57,6 +57,21 @@ export type CodexAppServerItemEvent = {
   title?: string;
   serverName?: string;
   arguments?: unknown;
+  query?: string;
+  action?: unknown;
+  command?: string;
+  cwd?: string;
+  path?: string;
+  result?: unknown;
+  savedPath?: string;
+  revisedPrompt?: string;
+  exitCode?: number;
+  durationMs?: number;
+  changes?: unknown;
+  success?: boolean;
+  namespace?: string;
+  model?: string;
+  receiverThreadIds?: unknown;
   raw?: Record<string, unknown>;
 };
 
@@ -84,6 +99,21 @@ function createAbortError(): Error {
   const err = new Error("Aborted");
   (err as { name?: string }).name = "AbortError";
   return err;
+}
+
+function extractCodexAppServerNotificationThreadId(rawParams: unknown): string {
+  if (!rawParams || typeof rawParams !== "object") return "";
+  const params = rawParams as {
+    threadId?: unknown;
+    thread?: { id?: unknown };
+  };
+  if (typeof params.thread?.id === "string" && params.thread.id.trim()) {
+    return params.thread.id.trim();
+  }
+  if (typeof params.threadId === "string" && params.threadId.trim()) {
+    return params.threadId.trim();
+  }
+  return "";
 }
 
 export class CodexAppServerProcess {
@@ -696,6 +726,32 @@ function normalizeCodexAppServerFieldText(
   return text ? text.slice(0, maxLength) : undefined;
 }
 
+function redactCodexAppServerUserMessageTransportContext(
+  value: string | undefined,
+): string | undefined {
+  const text = normalizeCodexAppServerText(value);
+  if (!text) return undefined;
+  if (!/^Zotero context for this turn:/i.test(text.trimStart())) return text;
+  const marker = text.match(/\n\nUser request:\n/i);
+  if (!marker || marker.index === undefined) return "User request";
+  const requestText = text.slice(marker.index + marker[0].length).trim();
+  return requestText || "User request";
+}
+
+function normalizeCodexAppServerRawString(
+  value: unknown,
+  maxLength = 4000,
+): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text ? text.slice(0, maxLength) : undefined;
+}
+
+function normalizeCodexAppServerNumber(value: unknown): number | undefined {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : undefined;
+}
+
 function readCodexAppServerObjectName(value: unknown): string | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return normalizeCodexAppServerFieldText(value);
@@ -730,6 +786,32 @@ function copyCodexAppServerRawMetadata(
     "args",
     "input",
     "error",
+    "query",
+    "action",
+    "command",
+    "cwd",
+    "processId",
+    "source",
+    "commandActions",
+    "aggregatedOutput",
+    "exitCode",
+    "durationMs",
+    "changes",
+    "result",
+    "savedPath",
+    "saved_path",
+    "revisedPrompt",
+    "revised_prompt",
+    "path",
+    "success",
+    "namespace",
+    "prompt",
+    "model",
+    "reasoningEffort",
+    "receiverThreadIds",
+    "senderThreadId",
+    "agentsStates",
+    "contentItems",
   ];
   const raw: Record<string, unknown> = {};
   for (const key of keys) {
@@ -773,28 +855,61 @@ function extractCodexAppServerItem(
     arguments?: unknown;
     args?: unknown;
     input?: unknown;
+    query?: unknown;
+    action?: unknown;
+    command?: unknown;
+    cwd?: unknown;
+    path?: unknown;
+    result?: unknown;
+    savedPath?: unknown;
+    saved_path?: unknown;
+    revisedPrompt?: unknown;
+    revised_prompt?: unknown;
+    exitCode?: unknown;
+    exit_code?: unknown;
+    durationMs?: unknown;
+    duration_ms?: unknown;
+    changes?: unknown;
+    success?: unknown;
+    namespace?: unknown;
+    model?: unknown;
+    receiverThreadIds?: unknown;
+    receiver_thread_ids?: unknown;
   };
   const status = typeof item.status === "string" ? item.status.trim() : "";
+  const type =
+    typeof item.type === "string" && item.type.trim()
+      ? item.type.trim().toLowerCase()
+      : undefined;
+  const role =
+    typeof item.role === "string" && item.role.trim()
+      ? item.role.trim().toLowerCase()
+      : undefined;
+  const rawSummary = normalizeCodexAppServerText(item.summary) || undefined;
+  const rawDetails =
+    normalizeCodexAppServerText(item.content) ||
+    normalizeCodexAppServerText(item.reasoning) ||
+    normalizeCodexAppServerText(item.text) ||
+    undefined;
+  const isUserMessageItem =
+    role === "user" ||
+    (type || "").replace(/[-_\s]+/g, "").toLowerCase() === "usermessage";
+  const summary = isUserMessageItem
+    ? redactCodexAppServerUserMessageTransportContext(rawSummary)
+    : rawSummary;
+  const details = isUserMessageItem
+    ? redactCodexAppServerUserMessageTransportContext(rawDetails)
+    : rawDetails;
   return {
     id:
       typeof item.id === "string" && item.id.trim()
         ? item.id.trim()
         : undefined,
-    type:
-      typeof item.type === "string" && item.type.trim()
-        ? item.type.trim().toLowerCase()
-        : undefined,
-    role:
-      typeof item.role === "string" && item.role.trim()
-        ? item.role.trim().toLowerCase()
-        : undefined,
+    type,
+    role,
     status: status || undefined,
-    summary: normalizeCodexAppServerText(item.summary) || undefined,
-    details:
-      normalizeCodexAppServerText(item.content) ||
-      normalizeCodexAppServerText(item.reasoning) ||
-      normalizeCodexAppServerText(item.text) ||
-      undefined,
+    summary,
+    details,
     error:
       normalizeCodexAppServerFieldText(item.error, 500) ||
       normalizeCodexAppServerFieldText(
@@ -815,6 +930,27 @@ function extractCodexAppServerItem(
       readCodexAppServerObjectName(item.mcpServerName) ||
       readCodexAppServerObjectName(item.server),
     arguments: item.arguments ?? item.args ?? item.input,
+    query: normalizeCodexAppServerFieldText(item.query, 1000),
+    action: item.action,
+    command: normalizeCodexAppServerRawString(item.command, 8000),
+    cwd: normalizeCodexAppServerRawString(item.cwd, 4000),
+    path: normalizeCodexAppServerRawString(item.path, 4000),
+    result: item.result,
+    savedPath:
+      normalizeCodexAppServerRawString(item.savedPath, 4000) ||
+      normalizeCodexAppServerRawString(item.saved_path, 4000),
+    revisedPrompt:
+      normalizeCodexAppServerRawString(item.revisedPrompt, 8000) ||
+      normalizeCodexAppServerRawString(item.revised_prompt, 8000),
+    exitCode: normalizeCodexAppServerNumber(item.exitCode ?? item.exit_code),
+    durationMs: normalizeCodexAppServerNumber(
+      item.durationMs ?? item.duration_ms,
+    ),
+    changes: item.changes,
+    success: typeof item.success === "boolean" ? item.success : undefined,
+    namespace: normalizeCodexAppServerFieldText(item.namespace, 240),
+    model: normalizeCodexAppServerFieldText(item.model, 240),
+    receiverThreadIds: item.receiverThreadIds ?? item.receiver_thread_ids,
     raw: copyCodexAppServerRawMetadata(sourceRecord),
   };
 }
@@ -1347,6 +1483,64 @@ export function waitForCodexAppServerTurnCompletion(params: {
     );
 
     signal?.addEventListener("abort", abortHandler, { once: true });
+  });
+}
+
+export function waitForCodexAppServerThreadCompacted(params: {
+  proc: CodexAppServerProcess;
+  threadId: string;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}): Promise<void> {
+  const timeoutMs =
+    params.timeoutMs ?? DEFAULT_CODEX_APP_SERVER_TURN_TIMEOUT_MS;
+  const threadId = params.threadId.trim();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      unsubCompacted();
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
+      params.signal?.removeEventListener("abort", abortHandler);
+      fn();
+    };
+
+    const abortHandler = () => {
+      settle(() => reject(createAbortError()));
+    };
+
+    const unsubCompacted = params.proc.onNotification(
+      "thread/compacted",
+      (rawParams: unknown) => {
+        const compactedThreadId =
+          extractCodexAppServerNotificationThreadId(rawParams);
+        if (compactedThreadId !== threadId) return;
+        settle(() => resolve());
+      },
+    );
+
+    if (timeoutMs > 0) {
+      timeoutId = setTimeout(() => {
+        settle(() =>
+          reject(
+            new Error(
+              `Timed out waiting for codex app-server thread compaction after ${timeoutMs}ms`,
+            ),
+          ),
+        );
+      }, timeoutMs);
+    }
+
+    if (params.signal?.aborted) {
+      abortHandler();
+      return;
+    }
+    params.signal?.addEventListener("abort", abortHandler, { once: true });
   });
 }
 

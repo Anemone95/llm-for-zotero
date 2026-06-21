@@ -1,6 +1,5 @@
 import { config } from "../../package.json";
 import { t } from "../utils/i18n";
-import { WEBCHAT_TARGETS } from "../webchat/types";
 import {
   DEFAULT_MAX_TOKENS,
   DEFAULT_SYSTEM_PROMPT,
@@ -39,6 +38,7 @@ import {
   runProviderConnectionTest,
   runCodexAppServerConnectionTest,
 } from "../utils/providerConnectionTest";
+import { normalizeAgentPermissionMode } from "../shared/agentPermissionMode";
 import {
   startCopilotDeviceFlow,
   pollCopilotDeviceAuth,
@@ -52,39 +52,38 @@ import {
   FONT_SCALE_DEFAULT_PERCENT,
   FONT_SCALE_MAX_PERCENT,
   FONT_SCALE_MIN_PERCENT,
+  MESSAGE_LINE_SPACING_DEFAULT_PERCENT,
+  MESSAGE_LINE_SPACING_MAX_PERCENT,
+  MESSAGE_LINE_SPACING_MIN_PERCENT,
+  MESSAGE_PARAGRAPH_SPACING_DEFAULT_PX,
+  MESSAGE_PARAGRAPH_SPACING_MAX_PX,
+  MESSAGE_PARAGRAPH_SPACING_MIN_PX,
+  MESSAGE_WORD_SPACING_DEFAULT_PX,
+  MESSAGE_WORD_SPACING_MAX_PX,
+  MESSAGE_WORD_SPACING_MIN_PX,
 } from "./contextPanel/constants";
 import {
   applyPanelFontScale,
   getFontScalePref,
+  getMessageFontFamilyPref,
+  getMessageLineSpacingPref,
+  getMessageParagraphSpacingPref,
+  getMessageWordSpacingPref,
   setFontScalePref,
+  setMessageFontFamilyPref,
+  setMessageLineSpacingPref,
+  setMessageParagraphSpacingPref,
+  setMessageWordSpacingPref,
 } from "./contextPanel/prefHelpers";
-import { setPanelFontScalePercent } from "./contextPanel/state";
+import {
+  setPanelFontScalePercent,
+  setMessageFontFamily,
+  setMessageLineSpacingPercent,
+  setMessageParagraphSpacingPx,
+  setMessageWordSpacingPx,
+} from "./contextPanel/state";
 import { getAgentTraceExportPath } from "../agent/store/traceStore";
 import { joinLocalPath } from "../utils/localPath";
-import {
-  isMineruEnabled,
-  getMineruApiKey,
-  getMineruLocalApiBase,
-  getMineruLocalBackend,
-  getMineruMode,
-  type MineruLocalBackend,
-  type MineruMode,
-  normalizeMineruLocalBackend,
-  setMineruEnabled,
-  setMineruApiKey,
-  setMineruLocalApiBase,
-  setMineruLocalBackend,
-  setMineruMode,
-  isGlobalAutoParseEnabled,
-  setGlobalAutoParseEnabled,
-  isMineruSyncEnabled,
-  setMineruSyncEnabled,
-  getMineruMaxAutoPages,
-  normalizeMineruMaxAutoPages,
-  setMineruMaxAutoPages,
-  getMineruExcludePatterns,
-  setMineruExcludePatterns,
-} from "../utils/mineruConfig";
 import {
   getNotesDirectoryPath,
   setNotesDirectoryPath,
@@ -95,16 +94,6 @@ import {
   getNotesDirectoryNickname,
   setNotesDirectoryNickname,
 } from "../utils/notesDirectoryConfig";
-import {
-  testMineruConnection,
-  testMineruLocalConnection,
-  testProxyConnection,
-} from "../utils/mineruClient";
-import { registerMineruManagerScript } from "./mineruManagerScript";
-import {
-  cleanSyncedMineruPackages,
-  repairMineruSyncPackages,
-} from "./contextPanel/mineruSync";
 import { getRuntimePlatformInfo } from "../utils/runtimePlatform";
 import {
   getClaudeAutoCompactThresholdPercent,
@@ -134,11 +123,11 @@ import {
   getCodexBinaryPathPref,
   getCodexReasoningModePref,
   getCodexRuntimeModelPref,
-  isCodexZoteroMcpToolsEnabled,
   isCodexAppServerModeEnabled,
+  isNativeZoteroMcpToolsEnabled,
   setCodexAppServerModeEnabled,
   setCodexBinaryPathPref,
-  setCodexZoteroMcpToolsEnabled,
+  setNativeZoteroMcpToolsEnabled,
   setCodexReasoningModePref,
   setCodexRuntimeModelPref,
 } from "../codexAppServer/prefs";
@@ -238,12 +227,6 @@ function getProviderProfile(index: number): ProviderProfile {
   };
 }
 
-type AgentPermissionMode = "safe" | "yolo";
-
-function normalizeAgentPermissionMode(value: unknown): AgentPermissionMode {
-  return value === "yolo" ? "yolo" : "safe";
-}
-
 const DEFAULT_AGENT_BRIDGE_URL = "http://127.0.0.1:19787";
 
 function normalizeProviderPresetId(value: unknown): ProviderPresetId {
@@ -265,13 +248,12 @@ function getProtocolOptions(
   authMode: ModelProviderAuthMode,
   presetId: ProviderPresetId,
 ): ProviderProtocol[] {
-  if (authMode === "webchat") return ["web_sync"]; // [webchat]
   if (authMode === "codex_auth" || authMode === "codex_app_server")
     return ["codex_responses"];
   if (authMode === "copilot_auth")
     return ["openai_chat_compat", "responses_api"];
   return getProviderPresetProtocolOptions(presetId).filter(
-    (protocol) => protocol !== "codex_responses" && protocol !== "web_sync",
+    (protocol) => protocol !== "codex_responses",
   );
 }
 
@@ -284,9 +266,7 @@ function resolveSelectedProtocol(
     const defaultProtocol =
       group.authMode === "codex_auth" || group.authMode === "codex_app_server"
         ? "codex_responses"
-        : group.authMode === "webchat"
-          ? "web_sync"
-          : group.authMode === "copilot_auth"
+        : group.authMode === "copilot_auth"
             ? "openai_chat_compat"
             : getProviderPreset(presetId).defaultProtocol;
     return allowed.includes(defaultProtocol) ? defaultProtocol : allowed[0];
@@ -394,7 +374,6 @@ function hasEmptyModel(group: ModelProviderGroup): boolean {
 }
 
 function normalizeAuthMode(value: unknown): ModelProviderAuthMode {
-  if (value === "webchat") return "webchat"; // [webchat]
   if (value === "codex_auth") return "codex_auth";
   if (value === "codex_app_server") return "codex_app_server";
   if (value === "copilot_auth") return "copilot_auth";
@@ -551,48 +530,6 @@ const ADV_ROW_STYLE =
   " background: rgba(128,128,128,0.06);" +
   " border: 1px solid var(--stroke-secondary, #c8c8c8); border-radius: 6px; margin-top: 4px;";
 
-async function confirmMineruSyncPackageDeletion(
-  disableSync: boolean,
-): Promise<boolean> {
-  const dialogData: { [key: string]: unknown } = {
-    loadCallback: () => {
-      return;
-    },
-    unloadCallback: () => {
-      return;
-    },
-  };
-  const message = disableSync
-    ? t(
-        "Synced MinerU ZIP packages are Zotero attachment items. MinerU sync will be disabled, then those package attachments will be deleted. Zotero may show sync conflicts while it syncs these deletions. If that happens, choose the local/deleted version to remove already-uploaded packages from Zotero sync.",
-      )
-    : t(
-        "Synced MinerU ZIP packages are Zotero attachment items. Those package attachments will be deleted. Zotero may show sync conflicts while it syncs these deletions. If that happens, choose the local/deleted version to remove already-uploaded packages from Zotero sync.",
-      );
-
-  new ztoolkit.Dialog(1, 1)
-    .addCell(0, 0, {
-      tag: "div",
-      namespace: "html",
-      properties: { textContent: message },
-      styles: {
-        width: "420px",
-        lineHeight: "1.45",
-        whiteSpace: "pre-line",
-      },
-    })
-    .addButton(
-      t(disableSync ? "Disable sync and delete" : "Delete packages"),
-      "delete",
-    )
-    .addButton(t("Cancel"), "cancel")
-    .setDialogData(dialogData)
-    .open(t("Delete MinerU sync packages?"));
-  await (dialogData as { unloadLock: { promise: Promise<void> } }).unloadLock
-    .promise;
-  return (dialogData as { _lastButtonId?: string })._lastButtonId === "delete";
-}
-
 // ── Main export ────────────────────────────────────────────────────
 
 export async function registerPrefsScripts(_window: Window | undefined | null) {
@@ -696,18 +633,6 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
   ) as HTMLTextAreaElement | null;
   if (systemPrompt?.placeholder) {
     systemPrompt.placeholder = t(systemPrompt.placeholder);
-  }
-  const mineruApiKeyEl = doc.querySelector(
-    `#${config.addonRef}-mineru-api-key`,
-  ) as HTMLInputElement | null;
-  if (mineruApiKeyEl?.placeholder) {
-    mineruApiKeyEl.placeholder = t(mineruApiKeyEl.placeholder);
-  }
-  const mineruLocalApiBaseEl = doc.querySelector(
-    `#${config.addonRef}-mineru-local-api-base`,
-  ) as HTMLInputElement | null;
-  if (mineruLocalApiBaseEl?.placeholder) {
-    mineruLocalApiBaseEl.placeholder = t(mineruLocalApiBaseEl.placeholder);
   }
   // Translate language dropdown options
   const localeSelectEl = doc.querySelector(
@@ -879,6 +804,16 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     groups.forEach((group, groupIndex) => {
       const profile = getProviderProfile(groupIndex);
       group.authMode = normalizeAuthMode(group.authMode);
+      if (group.authMode !== "codex_app_server") {
+        group.authMode = "codex_app_server";
+        group.providerProtocol = "codex_responses";
+        group.apiKey = "";
+        group.apiBase = migrateApiBaseForAuthModeChange(
+          "api_key",
+          "codex_app_server",
+          group.apiBase,
+        );
+      }
       group.models = ensureModels(group, profile);
 
       const card = el(doc, "div", CARD_STYLE);
@@ -913,114 +848,39 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       ) as HTMLSelectElement;
       authModeSelect.id = `${config.addonRef}-auth-mode-${group.id}`;
       authModeLabel.setAttribute("for", authModeSelect.id);
-      const apiKeyOption = el(doc, "option") as HTMLOptionElement;
-      apiKeyOption.value = "api_key";
-      apiKeyOption.textContent = t("API Key");
-      apiKeyOption.selected = group.authMode === "api_key";
       const codexAppServerOption = el(doc, "option") as HTMLOptionElement;
       codexAppServerOption.value = "codex_app_server";
       codexAppServerOption.textContent = t(
         "Codex App Server (native runtime settings)",
       );
-      codexAppServerOption.selected = group.authMode === "codex_app_server";
-      const codexOption = el(doc, "option") as HTMLOptionElement;
-      codexOption.value = "codex_auth";
-      codexOption.textContent = t("Codex Auth (Legacy)");
-      codexOption.selected = group.authMode === "codex_auth";
-      const copilotOption = el(doc, "option") as HTMLOptionElement;
-      copilotOption.value = "copilot_auth";
-      copilotOption.textContent = t("GitHub Copilot");
-      copilotOption.selected = group.authMode === "copilot_auth";
-      // [webchat] Add webchat option
-      const webchatOption = el(doc, "option") as HTMLOptionElement;
-      webchatOption.value = "webchat";
-      webchatOption.textContent = t("WebChat");
-      webchatOption.selected = group.authMode === "webchat";
-      authModeSelect.append(apiKeyOption);
-      if (group.authMode === "codex_app_server") {
-        authModeSelect.append(codexAppServerOption);
-      }
-      authModeSelect.append(codexOption, copilotOption, webchatOption);
+      codexAppServerOption.selected = true;
+      authModeSelect.append(codexAppServerOption);
       authModeSelect.addEventListener("change", () => {
         const previousAuthMode = group.authMode;
-        const nextAuthMode = normalizeAuthMode(authModeSelect.value);
+        const nextAuthMode: ModelProviderAuthMode = "codex_app_server";
         group.authMode = nextAuthMode;
         group.apiBase = migrateApiBaseForAuthModeChange(
           previousAuthMode,
           nextAuthMode,
           group.apiBase,
         );
-        if (nextAuthMode === "webchat") {
-          group.providerProtocol = "web_sync";
-          // Set default webchat model to chatgpt.com (user can change it)
-          const webchatModelNames: string[] = WEBCHAT_TARGETS.map(
-            (wt) => wt.modelName,
-          );
-          if (
-            !group.models[0]?.model ||
-            !webchatModelNames.includes(group.models[0].model)
-          ) {
-            group.models = [{ ...group.models[0], model: "chatgpt.com" }];
-          }
-        } else if (
-          nextAuthMode === "codex_auth" ||
-          nextAuthMode === "codex_app_server"
-        ) {
-          group.providerProtocol = "codex_responses";
-        } else if (nextAuthMode === "copilot_auth") {
-          group.providerProtocol = "openai_chat_compat";
-        } else if (
-          group.providerProtocol === "codex_responses" ||
-          group.providerProtocol === "web_sync"
-        ) {
-          group.providerProtocol =
-            selectedPreset?.defaultProtocol || "openai_chat_compat";
-        }
-        if (nextAuthMode === "codex_auth" && !group.apiBase.trim()) {
-          group.apiBase = DEFAULT_CODEX_API_BASE;
-        }
-        if (nextAuthMode === "copilot_auth" && !group.apiBase.trim()) {
-          group.apiBase = DEFAULT_COPILOT_API_BASE;
-        }
+        group.providerProtocol = "codex_responses";
         persistGroups(groups);
         setTimeout(() => rerender(), 0);
       });
       const authModeHelperText =
-        group.authMode === "webchat"
-          ? t(
-              'Relay questions to %targets% via the Sync for Zotero browser extension. Download extension: github.com/yilewang/sync-for-zotero → Releases. Unzip, open chrome://extensions, enable Developer Mode, click "Load unpacked", select the extension folder. Keep the corresponding chat tab open while using WebChat mode.',
-            ).replace(
-              "%targets%",
-              WEBCHAT_TARGETS.map((wt) => wt.label).join(" / "),
-            )
-          : group.authMode === "copilot_auth"
-            ? t(COPILOT_API_HELPER_TEXT)
-            : group.authMode === "codex_auth"
-              ? t(LEGACY_CODEX_AUTH_HELPER_TEXT)
-              : group.authMode === "codex_app_server"
-                ? t(CODEX_APP_SERVER_HELPER_TEXT)
-                : "";
+        group.authMode === "codex_app_server"
+          ? t(CODEX_APP_SERVER_HELPER_TEXT)
+          : "";
       authModeWrap.append(
         authModeLabel,
         authModeSelect,
         el(doc, "span", HELPER_STYLE, authModeHelperText),
       );
 
-      const selectedPresetId: ProviderPresetId =
-        group.authMode === "codex_auth" ||
-        group.authMode === "codex_app_server" ||
-        group.authMode === "copilot_auth"
-          ? "customized"
-          : (group.presetIdOverride ?? detectProviderPreset(group.apiBase));
-      const selectedPreset =
-        selectedPresetId === "customized"
-          ? null
-          : getProviderPreset(selectedPresetId);
-      const isCustomizedPreset =
-        group.authMode !== "codex_auth" &&
-        group.authMode !== "codex_app_server" &&
-        group.authMode !== "copilot_auth" &&
-        selectedPresetId === "customized";
+      const selectedPresetId: ProviderPresetId = "customized";
+      const selectedPreset = null;
+      const isCustomizedPreset = false;
       group.providerProtocol = resolveSelectedProtocol(group, selectedPresetId);
 
       // ── Provider preset ─────────────────────────────────────────
@@ -1029,11 +889,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         "div",
         "display: flex; flex-direction: column;",
       );
-      if (
-        group.authMode !== "codex_auth" &&
-        group.authMode !== "codex_app_server" &&
-        group.authMode !== "copilot_auth"
-      ) {
+      if (false) {
         const providerPresetLabel = el(
           doc,
           "label",
@@ -1094,34 +950,19 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         doc,
         "label",
         LABEL_STYLE,
-        group.authMode === "codex_app_server"
-          ? t("Codex CLI Path")
-          : t("API URL"),
+        t("Codex CLI Path"),
       );
       const apiUrlInput = el(doc, "input", INPUT_STYLE) as HTMLInputElement;
       apiUrlInput.id = `${config.addonRef}-api-base-${group.id}`;
       apiUrlLabel.setAttribute("for", apiUrlInput.id);
       apiUrlInput.type = "text";
-      apiUrlInput.placeholder =
-        group.authMode === "codex_auth"
-          ? DEFAULT_CODEX_API_BASE
-          : group.authMode === "codex_app_server"
-            ? t("Optional absolute path to codex executable")
-            : group.authMode === "copilot_auth"
-              ? DEFAULT_COPILOT_API_BASE
-              : selectedPreset?.defaultApiBase || "https://api.openai.com/v1";
+      apiUrlInput.placeholder = t("Optional absolute path to codex executable");
       apiUrlInput.value = group.apiBase;
-      apiUrlInput.readOnly =
-        group.authMode !== "codex_auth" &&
-        group.authMode !== "codex_app_server" &&
-        group.authMode !== "copilot_auth" &&
-        !isCustomizedPreset;
+      apiUrlInput.readOnly = false;
       apiUrlInput.style.opacity = apiUrlInput.readOnly ? "0.85" : "1";
       apiUrlInput.style.cursor = apiUrlInput.readOnly ? "default" : "text";
       apiUrlInput.style.pointerEvents = apiUrlInput.readOnly ? "none" : "auto";
-      apiUrlInput.title = apiUrlInput.readOnly
-        ? t("Switch Provider to Customized to edit this URL manually.")
-        : "";
+      apiUrlInput.title = "";
       apiUrlInput.addEventListener("input", () => {
         group.apiBase = apiUrlInput.value;
         persistGroups(groups);
@@ -1131,13 +972,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         doc,
         "span",
         HELPER_STYLE,
-        group.authMode === "codex_auth"
-          ? t(LEGACY_CODEX_API_HELPER_TEXT)
-          : group.authMode === "codex_app_server"
-            ? t(getCodexAppServerPathHelperText())
-            : group.authMode === "copilot_auth"
-              ? t(COPILOT_API_HELPER_TEXT)
-              : getPresetSelectHelperText(selectedPresetId),
+        t(getCodexAppServerPathHelperText()),
       );
       apiUrlWrap.append(apiUrlLabel, apiUrlInput, apiUrlHelper);
 
@@ -1160,13 +995,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         syncAddProviderBtn();
       });
       apiKeyWrap.append(apiKeyLabel, apiKeyInput);
-      if (
-        group.authMode === "codex_auth" ||
-        group.authMode === "codex_app_server" ||
-        group.authMode === "copilot_auth"
-      ) {
-        apiKeyWrap.style.display = "none";
-      }
+      apiKeyWrap.style.display = "none";
 
       // ── Copilot Login ────────────────────────────────────────────
       const copilotLoginWrap = el(
@@ -1174,7 +1003,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         "div",
         "display: flex; flex-direction: column; gap: 6px;",
       );
-      if (group.authMode === "copilot_auth") {
+      if (false) {
         const isLoggedIn = group.apiKey.startsWith("ghu_");
         const copilotStatus = el(
           doc,
@@ -1502,37 +1331,6 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
 
       const addModelBtn = iconBtn(doc, "+", t("Add model"));
       addModelBtn.style.color = "var(--color-accent, #2563eb)";
-      if (group.authMode === "webchat") {
-        // [webchat] Replace "+" with a "Fetch Models" button that adds all webchat targets
-        addModelBtn.style.display = "none";
-        const fetchModelsBtn = el(
-          doc,
-          "button",
-          OUTLINE_BTN_STYLE,
-          t("Fetch Models"),
-        ) as HTMLButtonElement;
-        fetchModelsBtn.type = "button";
-        fetchModelsBtn.style.fontSize = "11px";
-        fetchModelsBtn.style.padding = "2px 8px";
-        fetchModelsBtn.addEventListener("click", () => {
-          const allTargets = WEBCHAT_TARGETS.map((wt) => wt.modelName);
-          const existing = new Set(
-            group.models.map((m: { model: string }) => m.model),
-          );
-          let added = false;
-          for (const target of allTargets) {
-            if (!existing.has(target)) {
-              group.models.push(createProviderModelEntry(target));
-              added = true;
-            }
-          }
-          if (added) {
-            persistGroups(groups);
-            rerender();
-          }
-        });
-        modelsHeaderRow.appendChild(fetchModelsBtn);
-      }
       modelsHeaderRow.appendChild(addModelBtn);
       modelsWrap.appendChild(modelsHeaderRow);
 
@@ -1576,9 +1374,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
             " box-sizing: border-box; background: Field; color: FieldText;",
         ) as HTMLInputElement;
         modelInput.type = "text";
-        if (group.authMode !== "webchat") {
-          modelInput.value = modelEntry.model;
-        }
+        modelInput.value = modelEntry.model;
         modelInput.placeholder =
           modelIndex === 0 ? profile.modelPlaceholder : "";
 
@@ -1592,41 +1388,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
 
         const advGearBtn = iconBtn(doc, "⚙", t("Advanced options"));
 
-        // [webchat] Replace text input with a dropdown for webchat model selection
-        if (group.authMode === "webchat") {
-          const validWebchatModels = WEBCHAT_TARGETS.map((wt) => ({
-            value: wt.modelName,
-            label: `${wt.modelName} (${wt.label})`,
-          }));
-          if (!validWebchatModels.some((m) => m.value === modelEntry.model)) {
-            modelEntry.model = "chatgpt.com";
-          }
-          modelInput.style.display = "none";
-          testBtn.style.display = "none";
-          advGearBtn.style.display = "none";
-
-          const modelSelect = el(
-            doc,
-            "select",
-            "flex: 1; min-width: 0; padding: 6px 10px; font-size: 13px;" +
-              " border: 1px solid var(--stroke-secondary, #c8c8c8); border-radius: 6px;" +
-              " box-sizing: border-box; background: Field; color: FieldText;",
-          ) as HTMLSelectElement;
-          for (const opt of validWebchatModels) {
-            const option = doc.createElement("option");
-            option.value = opt.value;
-            option.textContent = opt.label;
-            if (opt.value === modelEntry.model) option.selected = true;
-            modelSelect.appendChild(option);
-          }
-          modelSelect.addEventListener("change", () => {
-            modelEntry.model = modelSelect.value;
-            persistGroups(groups);
-          });
-          mainRow.append(modelInput, modelSelect);
-        } else {
-          mainRow.append(modelInput, testBtn, advGearBtn);
-        }
+        mainRow.append(modelInput, testBtn, advGearBtn);
 
         if (group.models.length > 1) {
           const removeModelBtn = iconBtn(doc, "×", t("Remove model"));
@@ -1905,37 +1667,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         "hr",
         "border: none; border-top: 1px solid var(--stroke-secondary, #c8c8c8); margin: 0;",
       );
-      if (group.authMode === "webchat") {
-        // [webchat] Minimal layout: only auth mode + model names (webchat target selector)
-        cardBody.append(authModeWrap, divider, modelsWrap);
-      } else if (group.authMode === "copilot_auth") {
-        cardBody.append(
-          authModeWrap,
-          copilotLoginWrap,
-          apiUrlWrap,
-          divider,
-          modelsWrap,
-        );
-      } else if (group.authMode === "codex_app_server") {
-        cardBody.append(authModeWrap, apiUrlWrap, divider, modelsWrap);
-      } else if (group.authMode === "codex_auth") {
-        cardBody.append(
-          authModeWrap,
-          apiUrlWrap,
-          apiKeyWrap,
-          divider,
-          modelsWrap,
-        );
-      } else {
-        cardBody.append(
-          authModeWrap,
-          providerPresetWrap,
-          apiUrlWrap,
-          apiKeyWrap,
-          divider,
-          modelsWrap,
-        );
-      }
+      cardBody.append(authModeWrap, apiUrlWrap, divider, modelsWrap);
       card.append(cardHeader, cardBody);
       wrap.appendChild(card);
     });
@@ -2021,42 +1753,84 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
   const fontScaleResetBtn = doc.querySelector(
     `#${config.addonRef}-panel-font-scale-reset`,
   ) as HTMLButtonElement | null;
+  const messageLineSpacingSlider = doc.querySelector(
+    `#${config.addonRef}-message-line-spacing`,
+  ) as HTMLInputElement | null;
+  const messageLineSpacingReadout = doc.querySelector(
+    `#${config.addonRef}-message-line-spacing-readout`,
+  ) as HTMLSpanElement | null;
+  const messageLineSpacingResetBtn = doc.querySelector(
+    `#${config.addonRef}-message-line-spacing-reset`,
+  ) as HTMLButtonElement | null;
+  const messageParagraphSpacingSlider = doc.querySelector(
+    `#${config.addonRef}-message-paragraph-spacing`,
+  ) as HTMLInputElement | null;
+  const messageParagraphSpacingReadout = doc.querySelector(
+    `#${config.addonRef}-message-paragraph-spacing-readout`,
+  ) as HTMLSpanElement | null;
+  const messageParagraphSpacingResetBtn = doc.querySelector(
+    `#${config.addonRef}-message-paragraph-spacing-reset`,
+  ) as HTMLButtonElement | null;
+  const messageWordSpacingSlider = doc.querySelector(
+    `#${config.addonRef}-message-word-spacing`,
+  ) as HTMLInputElement | null;
+  const messageWordSpacingReadout = doc.querySelector(
+    `#${config.addonRef}-message-word-spacing-readout`,
+  ) as HTMLSpanElement | null;
+  const messageWordSpacingResetBtn = doc.querySelector(
+    `#${config.addonRef}-message-word-spacing-reset`,
+  ) as HTMLButtonElement | null;
+  const messageFontFamilyInput = doc.querySelector(
+    `#${config.addonRef}-message-font-family`,
+  ) as HTMLInputElement | null;
+  const messageFontFamilyResetBtn = doc.querySelector(
+    `#${config.addonRef}-message-font-family-reset`,
+  ) as HTMLButtonElement | null;
+
+  const collectTypographyTargets = (): HTMLElement[] => {
+    const targets: HTMLElement[] = [];
+    const seen = new Set<HTMLElement>();
+    const push = (el: HTMLElement | null) => {
+      if (!el || seen.has(el)) return;
+      seen.add(el);
+      targets.push(el);
+    };
+    const wins = ((
+      Zotero as unknown as { getMainWindows?: () => Window[] }
+    ).getMainWindows?.() || []) as Window[];
+    for (const w of wins) {
+      const d = w?.document;
+      if (!d) continue;
+      d.querySelectorAll("#llm-main").forEach((n: Element) =>
+        push(n as HTMLElement),
+      );
+      push(
+        d.getElementById(
+          "llmforzotero-standalone-chat-root",
+        ) as HTMLElement | null,
+      );
+    }
+    const standaloneWin = addon?.data?.standaloneWindow as Window | undefined;
+    if (standaloneWin && standaloneWin.document) {
+      standaloneWin.document
+        .querySelectorAll("#llm-main")
+        .forEach((n: Element) => push(n as HTMLElement));
+      push(
+        standaloneWin.document.getElementById(
+          "llmforzotero-standalone-chat-root",
+        ) as HTMLElement | null,
+      );
+    }
+    return targets;
+  };
+
+  const applyTypographyTargets = () => {
+    for (const target of collectTypographyTargets()) {
+      applyPanelFontScale(target);
+    }
+  };
 
   if (fontScaleSlider) {
-    const collectFontScaleTargets = (): HTMLElement[] => {
-      const targets: HTMLElement[] = [];
-      const seen = new Set<HTMLElement>();
-      const push = (el: HTMLElement | null) => {
-        if (!el || seen.has(el)) return;
-        seen.add(el);
-        targets.push(el);
-      };
-      const wins = ((
-        Zotero as unknown as { getMainWindows?: () => Window[] }
-      ).getMainWindows?.() || []) as Window[];
-      for (const w of wins) {
-        const d = w?.document;
-        if (!d) continue;
-        d.querySelectorAll("#llm-main").forEach((n: Element) =>
-          push(n as HTMLElement),
-        );
-        push(
-          d.getElementById(
-            "llmforzotero-standalone-chat-root",
-          ) as HTMLElement | null,
-        );
-      }
-      const standaloneWin = addon?.data?.standaloneWindow as Window | undefined;
-      if (standaloneWin && standaloneWin.document) {
-        push(
-          standaloneWin.document.getElementById(
-            "llmforzotero-standalone-chat-root",
-          ) as HTMLElement | null,
-        );
-      }
-      return targets;
-    };
-
     const applyFontScale = (value: number) => {
       const clamped = Math.max(
         FONT_SCALE_MIN_PERCENT,
@@ -2064,9 +1838,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       );
       setPanelFontScalePercent(clamped);
       setFontScalePref(clamped);
-      for (const target of collectFontScaleTargets()) {
-        applyPanelFontScale(target);
-      }
+      applyTypographyTargets();
       fontScaleSlider.value = String(clamped);
       if (fontScaleReadout) fontScaleReadout.textContent = `${clamped}%`;
     };
@@ -2084,6 +1856,134 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     if (fontScaleResetBtn) {
       fontScaleResetBtn.addEventListener("click", () => {
         applyFontScale(FONT_SCALE_DEFAULT_PERCENT);
+      });
+    }
+  }
+
+  if (messageLineSpacingSlider) {
+    const applyMessageLineSpacing = (value: number) => {
+      const clamped = Math.max(
+        MESSAGE_LINE_SPACING_MIN_PERCENT,
+        Math.min(value, MESSAGE_LINE_SPACING_MAX_PERCENT),
+      );
+      setMessageLineSpacingPercent(clamped);
+      setMessageLineSpacingPref(clamped);
+      applyTypographyTargets();
+      messageLineSpacingSlider.value = String(clamped);
+      if (messageLineSpacingReadout) {
+        messageLineSpacingReadout.textContent = `${clamped}%`;
+      }
+    };
+
+    const initial = getMessageLineSpacingPref();
+    messageLineSpacingSlider.value = String(initial);
+    if (messageLineSpacingReadout) {
+      messageLineSpacingReadout.textContent = `${initial}%`;
+    }
+
+    messageLineSpacingSlider.addEventListener("input", () => {
+      const next = Number(messageLineSpacingSlider.value);
+      if (!Number.isFinite(next)) return;
+      applyMessageLineSpacing(next);
+    });
+
+    if (messageLineSpacingResetBtn) {
+      messageLineSpacingResetBtn.addEventListener("click", () => {
+        applyMessageLineSpacing(MESSAGE_LINE_SPACING_DEFAULT_PERCENT);
+      });
+    }
+  }
+
+  if (messageParagraphSpacingSlider) {
+    const formatParagraphSpacing = (value: number) =>
+      `${Number.isInteger(value) ? String(value) : value.toFixed(1)}px`;
+    const applyMessageParagraphSpacing = (value: number) => {
+      const clamped = Math.max(
+        MESSAGE_PARAGRAPH_SPACING_MIN_PX,
+        Math.min(value, MESSAGE_PARAGRAPH_SPACING_MAX_PX),
+      );
+      setMessageParagraphSpacingPx(clamped);
+      setMessageParagraphSpacingPref(clamped);
+      applyTypographyTargets();
+      messageParagraphSpacingSlider.value = String(clamped);
+      if (messageParagraphSpacingReadout) {
+        messageParagraphSpacingReadout.textContent =
+          formatParagraphSpacing(clamped);
+      }
+    };
+
+    const initial = getMessageParagraphSpacingPref();
+    messageParagraphSpacingSlider.value = String(initial);
+    if (messageParagraphSpacingReadout) {
+      messageParagraphSpacingReadout.textContent =
+        formatParagraphSpacing(initial);
+    }
+
+    messageParagraphSpacingSlider.addEventListener("input", () => {
+      const next = Number(messageParagraphSpacingSlider.value);
+      if (!Number.isFinite(next)) return;
+      applyMessageParagraphSpacing(next);
+    });
+
+    if (messageParagraphSpacingResetBtn) {
+      messageParagraphSpacingResetBtn.addEventListener("click", () => {
+        applyMessageParagraphSpacing(MESSAGE_PARAGRAPH_SPACING_DEFAULT_PX);
+      });
+    }
+  }
+
+  if (messageWordSpacingSlider) {
+    const formatWordSpacing = (value: number) =>
+      `${Number.isInteger(value) ? String(value) : value.toFixed(1)}px`;
+    const applyMessageWordSpacing = (value: number) => {
+      const clamped = Math.max(
+        MESSAGE_WORD_SPACING_MIN_PX,
+        Math.min(value, MESSAGE_WORD_SPACING_MAX_PX),
+      );
+      setMessageWordSpacingPx(clamped);
+      setMessageWordSpacingPref(clamped);
+      applyTypographyTargets();
+      messageWordSpacingSlider.value = String(clamped);
+      if (messageWordSpacingReadout) {
+        messageWordSpacingReadout.textContent = formatWordSpacing(clamped);
+      }
+    };
+
+    const initial = getMessageWordSpacingPref();
+    messageWordSpacingSlider.value = String(initial);
+    if (messageWordSpacingReadout) {
+      messageWordSpacingReadout.textContent = formatWordSpacing(initial);
+    }
+
+    messageWordSpacingSlider.addEventListener("input", () => {
+      const next = Number(messageWordSpacingSlider.value);
+      if (!Number.isFinite(next)) return;
+      applyMessageWordSpacing(next);
+    });
+
+    if (messageWordSpacingResetBtn) {
+      messageWordSpacingResetBtn.addEventListener("click", () => {
+        applyMessageWordSpacing(MESSAGE_WORD_SPACING_DEFAULT_PX);
+      });
+    }
+  }
+
+  if (messageFontFamilyInput) {
+    const applyMessageFontFamily = (value: string) => {
+      setMessageFontFamily(value);
+      setMessageFontFamilyPref(value);
+      applyTypographyTargets();
+      messageFontFamilyInput.value = value;
+    };
+
+    messageFontFamilyInput.value = getMessageFontFamilyPref();
+    messageFontFamilyInput.addEventListener("input", () => {
+      applyMessageFontFamily(messageFontFamilyInput.value);
+    });
+
+    if (messageFontFamilyResetBtn) {
+      messageFontFamilyResetBtn.addEventListener("click", () => {
+        applyMessageFontFamily("");
       });
     }
   }
@@ -2262,13 +2162,17 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
   };
 
   if (codexAppServerMcpEnableInput) {
-    codexAppServerMcpEnableInput.checked = isCodexZoteroMcpToolsEnabled();
+    codexAppServerMcpEnableInput.checked = isNativeZoteroMcpToolsEnabled();
     codexAppServerMcpEnableInput.addEventListener("change", () => {
-      setCodexZoteroMcpToolsEnabled(codexAppServerMcpEnableInput.checked);
+      setNativeZoteroMcpToolsEnabled(codexAppServerMcpEnableInput.checked);
       renderCodexMcpStatus(
         codexAppServerMcpEnableInput.checked
-          ? t("Zotero MCP tools will be configured before native Codex turns.")
-          : t("Zotero MCP tools disabled for native Codex turns."),
+          ? t(
+              "Zotero MCP tools enabled for native Codex and Claude Code turns.",
+            )
+          : t(
+              "Zotero MCP tools disabled for native Codex and Claude Code turns.",
+            ),
       );
     });
   }
@@ -2282,7 +2186,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           const status = await installOrUpdateCodexZoteroMcpConfig({
             codexPath: getConfiguredCodexAppServerBinaryPath(),
           });
-          setCodexZoteroMcpToolsEnabled(true);
+          setNativeZoteroMcpToolsEnabled(true);
           if (codexAppServerMcpEnableInput) {
             codexAppServerMcpEnableInput.checked = true;
           }
@@ -2310,7 +2214,11 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     });
   }
 
-  if (codexAppServerMcpStatus && isCodexZoteroMcpToolsEnabled()) {
+  if (
+    codexAppServerMcpStatus &&
+    isCodexAppServerModeEnabled() &&
+    isNativeZoteroMcpToolsEnabled()
+  ) {
     renderCodexMcpStatus(t("Checking Zotero MCP setup…"));
     void readCodexNativeMcpSetupStatus({
       codexPath: getConfiguredCodexAppServerBinaryPath(),
@@ -2956,7 +2864,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
   }
 
   // ── Semantic Search settings ───────────────────────────────────
-  // Follows the same toggle + sub-settings pattern as MinerU.
+  // Follows the same toggle + sub-settings pattern as other optional features.
 
   const semanticSearchToggle = doc.querySelector(
     `#${config.addonRef}-enable-semantic-search`,
@@ -3057,7 +2965,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       return "gemini";
     };
 
-    // Toggle visibility (same pattern as MinerU)
+    // Toggle visibility for nested settings.
     const syncSemanticVisibility = () => {
       semanticSearchSubSettings.style.display = semanticSearchToggle.checked
         ? "flex"
@@ -3374,365 +3282,6 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     renderEmbeddingCard();
   }
 
-  // ── MinerU settings ─────────────────────────────────────────────
-
-  const mineruEnabledInput = doc.querySelector(
-    `#${config.addonRef}-mineru-enabled`,
-  ) as HTMLInputElement | null;
-  const mineruSubSettings = doc.querySelector(
-    `#${config.addonRef}-mineru-sub-settings`,
-  ) as HTMLDivElement | null;
-  const mineruLocalModeInput = doc.querySelector(
-    `#${config.addonRef}-mineru-local-mode`,
-  ) as HTMLInputElement | null;
-  const mineruCloudInfo = doc.querySelector(
-    `#${config.addonRef}-mineru-cloud-info`,
-  ) as HTMLDivElement | null;
-  const mineruApiKeySection = doc.querySelector(
-    `#${config.addonRef}-mineru-api-key-section`,
-  ) as HTMLDivElement | null;
-  const mineruApiKeyInput = doc.querySelector(
-    `#${config.addonRef}-mineru-api-key`,
-  ) as HTMLInputElement | null;
-  const mineruLocalSection = doc.querySelector(
-    `#${config.addonRef}-mineru-local-section`,
-  ) as HTMLDivElement | null;
-  const mineruLocalApiBaseInput = doc.querySelector(
-    `#${config.addonRef}-mineru-local-api-base`,
-  ) as HTMLInputElement | null;
-  const mineruLocalBackendSelect = doc.querySelector(
-    `#${config.addonRef}-mineru-local-backend`,
-  ) as HTMLSelectElement | null;
-  const mineruTestBtn = doc.querySelector(
-    `#${config.addonRef}-mineru-test`,
-  ) as HTMLButtonElement | null;
-  const mineruTestStatus = doc.querySelector(
-    `#${config.addonRef}-mineru-test-status`,
-  ) as HTMLSpanElement | null;
-  const mineruSyncEnabledInput = doc.querySelector(
-    `#${config.addonRef}-mineru-sync-enabled`,
-  ) as HTMLInputElement | null;
-  const mineruSyncPrepareBtn = doc.querySelector(
-    `#${config.addonRef}-mineru-sync-prepare`,
-  ) as HTMLButtonElement | null;
-  const mineruSyncCleanBtn = doc.querySelector(
-    `#${config.addonRef}-mineru-sync-clean`,
-  ) as HTMLButtonElement | null;
-  const mineruSyncStatus = doc.querySelector(
-    `#${config.addonRef}-mineru-sync-status`,
-  ) as HTMLSpanElement | null;
-
-  const getSelectedMineruMode = (): MineruMode =>
-    mineruLocalModeInput?.checked ? "local" : "cloud";
-  const clearMineruTestStatus = () => {
-    if (!mineruTestStatus) return;
-    mineruTestStatus.style.display = "none";
-    mineruTestStatus.textContent = "";
-  };
-  const syncMineruModeVisibility = () => {
-    const mode = getSelectedMineruMode();
-    if (mineruCloudInfo) {
-      mineruCloudInfo.style.display = mode === "cloud" ? "block" : "none";
-    }
-    if (mineruApiKeySection) {
-      mineruApiKeySection.style.display = mode === "cloud" ? "flex" : "none";
-    }
-    if (mineruLocalSection) {
-      mineruLocalSection.style.display = mode === "local" ? "flex" : "none";
-    }
-  };
-
-  if (mineruEnabledInput) {
-    mineruEnabledInput.checked = isMineruEnabled();
-    const syncSubVisibility = () => {
-      if (mineruSubSettings) {
-        mineruSubSettings.style.display = mineruEnabledInput.checked
-          ? "flex"
-          : "none";
-      }
-      syncMineruModeVisibility();
-    };
-    syncSubVisibility();
-    mineruEnabledInput.addEventListener("change", () => {
-      setMineruEnabled(mineruEnabledInput.checked);
-      syncSubVisibility();
-    });
-  }
-
-  const isMineruSyncChecked = () =>
-    mineruSyncEnabledInput
-      ? mineruSyncEnabledInput.checked
-      : isMineruSyncEnabled();
-  const updateMineruSyncCleanupLabel = () => {
-    if (!mineruSyncCleanBtn) return;
-    mineruSyncCleanBtn.textContent = t(
-      isMineruSyncChecked()
-        ? "Disable MinerU sync and delete packages"
-        : "Delete synced MinerU packages",
-    );
-  };
-  const syncMineruSyncControls = () => {
-    const enabled = isMineruSyncChecked();
-    if (mineruSyncPrepareBtn) {
-      mineruSyncPrepareBtn.disabled = !enabled;
-    }
-    updateMineruSyncCleanupLabel();
-  };
-
-  if (mineruSyncEnabledInput) {
-    mineruSyncEnabledInput.checked = isMineruSyncEnabled();
-    syncMineruSyncControls();
-    mineruSyncEnabledInput.addEventListener("change", () => {
-      const enabled = mineruSyncEnabledInput.checked;
-      setMineruSyncEnabled(enabled);
-      syncMineruSyncControls();
-      if (!mineruSyncStatus) return;
-      mineruSyncStatus.style.display = "block";
-      mineruSyncStatus.style.color = "var(--fill-secondary, #888)";
-      if (!enabled) {
-        mineruSyncStatus.textContent = t(
-          "MinerU sync disabled. Existing synced packages are kept until deleted.",
-        );
-        return;
-      }
-      mineruSyncStatus.textContent = t(
-        "MinerU sync enabled. Existing local caches sync only when requested.",
-      );
-    });
-  } else {
-    syncMineruSyncControls();
-  }
-
-  if (mineruSyncPrepareBtn && mineruSyncStatus) {
-    mineruSyncPrepareBtn.addEventListener("click", () => {
-      if (!isMineruSyncEnabled()) {
-        mineruSyncStatus.style.display = "block";
-        mineruSyncStatus.style.color = "#b45309";
-        mineruSyncStatus.textContent = t(
-          "Enable MinerU sync before preparing packages.",
-        );
-        return;
-      }
-
-      mineruSyncPrepareBtn.disabled = true;
-      if (mineruSyncCleanBtn) mineruSyncCleanBtn.disabled = true;
-      mineruSyncStatus.style.display = "block";
-      mineruSyncStatus.style.color = "var(--fill-secondary, #888)";
-      mineruSyncStatus.textContent = t("Syncing existing MinerU caches…");
-      void (async () => {
-        try {
-          const result = await repairMineruSyncPackages({
-            onProgress: (progress) => {
-              mineruSyncStatus.textContent =
-                t("Syncing existing MinerU caches") +
-                `: ${progress.scanned} scanned, ` +
-                `${progress.published} package(s), ` +
-                `${progress.restored} restored.`;
-            },
-          });
-          mineruSyncStatus.textContent =
-            t("Existing MinerU caches synced") +
-            `: ${result.published} package(s), ` +
-            `${result.restored} restored, ${result.upToDate} up to date, ` +
-            `${result.skipped} skipped.`;
-          mineruSyncStatus.style.color =
-            result.failed > 0 || result.diverged > 0 ? "#b45309" : "green";
-        } catch (error) {
-          mineruSyncStatus.textContent = `\u2717 ${
-            error instanceof Error ? error.message : String(error)
-          }`;
-          mineruSyncStatus.style.color = "red";
-        } finally {
-          mineruSyncPrepareBtn.disabled = !isMineruSyncEnabled();
-          if (mineruSyncCleanBtn) mineruSyncCleanBtn.disabled = false;
-        }
-      })();
-    });
-  }
-
-  if (mineruSyncCleanBtn && mineruSyncStatus) {
-    const runMineruSyncCleanup = async () => {
-      const shouldDisableSync = isMineruSyncChecked();
-      const confirmed =
-        await confirmMineruSyncPackageDeletion(shouldDisableSync);
-      if (!confirmed) return;
-
-      mineruSyncCleanBtn.disabled = true;
-      if (shouldDisableSync) {
-        setMineruSyncEnabled(false);
-        if (mineruSyncEnabledInput) {
-          mineruSyncEnabledInput.checked = false;
-        }
-        syncMineruSyncControls();
-      }
-      mineruSyncStatus.style.display = "block";
-      mineruSyncStatus.style.color = "var(--fill-secondary, #888)";
-      mineruSyncStatus.textContent = shouldDisableSync
-        ? t("MinerU sync disabled. Deleting synced MinerU packages…")
-        : t("Deleting synced MinerU packages…");
-      try {
-        const result = await cleanSyncedMineruPackages();
-        const deletedPrefix = shouldDisableSync
-          ? t("MinerU sync disabled. Deleted synced MinerU packages")
-          : t("Deleted synced MinerU packages");
-        mineruSyncStatus.textContent =
-          result.failed > 0
-            ? `${deletedPrefix}: ${result.deleted}, ${result.failed} failed.`
-            : `${deletedPrefix}: ${result.deleted}.`;
-        mineruSyncStatus.style.color = result.failed > 0 ? "#b45309" : "green";
-      } catch (error) {
-        mineruSyncStatus.textContent = `\u2717 ${
-          error instanceof Error ? error.message : String(error)
-        }`;
-        mineruSyncStatus.style.color = "red";
-      } finally {
-        mineruSyncCleanBtn.disabled = false;
-        syncMineruSyncControls();
-      }
-    };
-    mineruSyncCleanBtn.addEventListener(
-      "click",
-      () => void runMineruSyncCleanup(),
-    );
-    mineruSyncCleanBtn.addEventListener(
-      "command",
-      () => void runMineruSyncCleanup(),
-    );
-  }
-
-  const mineruGlobalAutoParseInput = doc.querySelector(
-    `#${config.addonRef}-mineru-global-auto-parse`,
-  ) as HTMLInputElement | null;
-  if (mineruGlobalAutoParseInput) {
-    mineruGlobalAutoParseInput.checked = isGlobalAutoParseEnabled();
-    mineruGlobalAutoParseInput.addEventListener("change", () => {
-      setGlobalAutoParseEnabled(mineruGlobalAutoParseInput.checked);
-    });
-  }
-
-  if (mineruLocalModeInput) {
-    mineruLocalModeInput.checked = getMineruMode() === "local";
-    syncMineruModeVisibility();
-    mineruLocalModeInput.addEventListener("change", () => {
-      setMineruMode(getSelectedMineruMode());
-      syncMineruModeVisibility();
-      clearMineruTestStatus();
-    });
-  } else {
-    syncMineruModeVisibility();
-  }
-
-  if (mineruApiKeyInput) {
-    mineruApiKeyInput.value = getMineruApiKey();
-    mineruApiKeyInput.addEventListener("input", () => {
-      setMineruApiKey(mineruApiKeyInput.value);
-    });
-  }
-
-  if (mineruLocalApiBaseInput) {
-    mineruLocalApiBaseInput.value = getMineruLocalApiBase();
-    const commitMineruLocalApiBase = () => {
-      setMineruLocalApiBase(mineruLocalApiBaseInput.value);
-      mineruLocalApiBaseInput.value = getMineruLocalApiBase();
-    };
-    mineruLocalApiBaseInput.addEventListener(
-      "change",
-      commitMineruLocalApiBase,
-    );
-    mineruLocalApiBaseInput.addEventListener("blur", commitMineruLocalApiBase);
-  }
-
-  if (mineruLocalBackendSelect) {
-    mineruLocalBackendSelect.value = getMineruLocalBackend();
-    mineruLocalBackendSelect.addEventListener("change", () => {
-      const next: MineruLocalBackend = normalizeMineruLocalBackend(
-        mineruLocalBackendSelect.value,
-      );
-      setMineruLocalBackend(next);
-      mineruLocalBackendSelect.value = next;
-      clearMineruTestStatus();
-    });
-  }
-
-  if (mineruTestBtn && mineruTestStatus) {
-    const runMineruTest = async () => {
-      const mode = getSelectedMineruMode();
-      if (mode === "local" && mineruLocalApiBaseInput) {
-        setMineruLocalApiBase(mineruLocalApiBaseInput.value);
-        mineruLocalApiBaseInput.value = getMineruLocalApiBase();
-      }
-      mineruTestBtn.disabled = true;
-      mineruTestStatus.style.display = "inline";
-      mineruTestStatus.textContent = t("Testing…");
-      mineruTestStatus.style.color = "var(--fill-secondary, #888)";
-      try {
-        if (mode === "local") {
-          await testMineruLocalConnection(getMineruLocalApiBase());
-        } else {
-          const apiKey = getMineruApiKey().trim();
-          if (apiKey) {
-            await testMineruConnection(apiKey);
-          } else {
-            await testProxyConnection();
-          }
-        }
-        mineruTestStatus.textContent = t("✓ Connection successful");
-        mineruTestStatus.style.color = "green";
-      } catch (error) {
-        mineruTestStatus.textContent = `\u2717 ${(error as Error).message}`;
-        mineruTestStatus.style.color = "red";
-      } finally {
-        mineruTestBtn.disabled = false;
-      }
-    };
-    mineruTestBtn.addEventListener("click", () => void runMineruTest());
-    mineruTestBtn.addEventListener("command", () => void runMineruTest());
-  }
-
-  // ── MinerU advanced parse filters ──────────────────────────────
-  const mineruMaxAutoPagesInput = doc.querySelector(
-    `#${config.addonRef}-mineru-max-auto-pages`,
-  ) as HTMLInputElement | null;
-  if (mineruMaxAutoPagesInput) {
-    const maxPages = getMineruMaxAutoPages();
-    mineruMaxAutoPagesInput.value = String(maxPages);
-    const saveMaxAutoPages = () => {
-      const digitsOnly = mineruMaxAutoPagesInput.value.replace(/[^\d]/g, "");
-      if (mineruMaxAutoPagesInput.value !== digitsOnly) {
-        mineruMaxAutoPagesInput.value = digitsOnly;
-      }
-      const normalized = normalizeMineruMaxAutoPages(digitsOnly);
-      setMineruMaxAutoPages(normalized);
-      return normalized;
-    };
-    mineruMaxAutoPagesInput.addEventListener("input", () => {
-      saveMaxAutoPages();
-    });
-    mineruMaxAutoPagesInput.addEventListener("blur", () => {
-      const normalized = saveMaxAutoPages();
-      mineruMaxAutoPagesInput.value = String(normalized);
-    });
-  }
-
-  const mineruExcludePatternsInput = doc.querySelector(
-    `#${config.addonRef}-mineru-exclude-patterns`,
-  ) as HTMLInputElement | null;
-  if (mineruExcludePatternsInput) {
-    const patterns = getMineruExcludePatterns();
-    mineruExcludePatternsInput.value = patterns.join(", ");
-    let saveTimer: ReturnType<typeof setTimeout> | null = null;
-    mineruExcludePatternsInput.addEventListener("input", () => {
-      if (saveTimer) clearTimeout(saveTimer);
-      saveTimer = setTimeout(() => {
-        const parsed = mineruExcludePatternsInput.value
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-        setMineruExcludePatterns(parsed);
-      }, 500);
-    });
-  }
-
   // ── Language selector ────────────────────────────────────────────
   const localeSelect = doc.querySelector(
     `#${config.addonRef}-locale-select`,
@@ -3753,11 +3302,4 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     });
   }
 
-  // ── Embedded MinerU manager ──────────────────────────────────────
-  const mineruMgrSidebar = doc.querySelector(
-    `#${config.addonRef}-mineru-mgr-sidebar`,
-  );
-  if (mineruMgrSidebar && _window) {
-    void registerMineruManagerScript(_window, config.addonRef);
-  }
 }

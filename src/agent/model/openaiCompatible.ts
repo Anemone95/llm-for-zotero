@@ -19,6 +19,10 @@ import type {
   AgentToolCall,
 } from "../types";
 import type { AgentModelAdapter, AgentStepParams } from "./adapter";
+import {
+  buildAgentModelCapabilities,
+  mediaContentInputs,
+} from "./contentCapabilities";
 import { isMultimodalRequestSupported } from "./messageBuilder";
 import {
   buildOpenAIFunctionTools,
@@ -116,7 +120,10 @@ async function buildMessagesPayload(messages: AgentModelMessage[]) {
             }
             parts.push({
               type: "image_url",
-              image_url: { url: `data:${rp.mimeType};base64,${rp.base64}` },
+              image_url: {
+                url: `data:${rp.mimeType};base64,${rp.base64}`,
+                ...(rp.detail ? { detail: rp.detail } : {}),
+              },
             });
             break;
           case "pdf":
@@ -332,13 +339,13 @@ function isStreamingResponse(response: Response): boolean {
 
 export class OpenAIChatCompatAgentAdapter implements AgentModelAdapter {
   getCapabilities(request: AgentRuntimeRequest): AgentModelCapabilities {
-    return {
+    return buildAgentModelCapabilities({
       streaming: true,
       toolCalls: isToolCapableApiBase(request),
-      multimodal: isMultimodalRequestSupported(request),
+      contentInputs: mediaContentInputs(isMultimodalRequestSupported(request)),
       fileInputs: false,
       reasoning: true,
-    };
+    });
   }
 
   supportsTools(request: AgentRuntimeRequest): boolean {

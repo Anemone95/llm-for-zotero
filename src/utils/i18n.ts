@@ -26,6 +26,7 @@ const zhCN: Record<string, string> = {
   "Note editing": "笔记编辑",
   "Library chat": "文献库对话",
   "Paper chat": "论文对话",
+  Orphan: "孤立对话",
   "Switch to paper chat": "切换到论文对话",
   "Switch to library chat": "切换到文献库对话",
   Settings: "设置",
@@ -41,6 +42,8 @@ const zhCN: Record<string, string> = {
   "Delete conversation": "删除对话",
   "Delete this turn": "删除此轮对话",
   "Delete this prompt and response": "删除此提问和回答",
+  "Fork this turn": "从此轮分叉",
+  "Start a new chat from this turn": "从此轮开始新的对话",
   "Copy chat as md": "复制对话为 Markdown",
   "Save chat as note": "保存对话为笔记",
   "Upload files": "上传文件",
@@ -99,12 +102,32 @@ const zhCN: Record<string, string> = {
   "Created a new note": "已创建新笔记",
   "Failed to create note": "创建笔记失败",
   "No deletable turn found": "没有可删除的对话轮次",
+  "No forkable turn found": "没有可分叉的对话轮次",
+  "Fork is not supported for this conversation type yet":
+    "此对话类型暂不支持分叉",
+  "Fork is not supported for Claude Code conversations":
+    "Claude Code 对话不支持分叉",
+  "Codex fork is only supported for the latest response":
+    "Codex 仅支持从最新回复分叉",
+  "Cannot fork this Codex conversation because it has no native thread":
+    "无法分叉此 Codex 对话，因为它没有原生线程",
+  "Wait for the current response to finish before forking":
+    "请等待当前回复完成后再分叉",
+  "No active library for conversation fork": "没有可用于分叉的活跃文献库",
+  "Failed to fork conversation": "分叉对话失败",
+  "Conversation forked": "对话已 fork",
+  "Forked from conversation": "从对话分叉",
+  "Open original conversation": "打开原始对话",
   "No chat history detected.": "未检测到对话历史。",
   "Copied chat as md": "已复制对话为 Markdown",
   "Saved chat history to new note": "已将对话历史保存为新笔记",
   "Failed to save chat history": "保存对话历史失败",
   "Could not open plugin settings": "无法打开插件设置",
+  "Could not find this paper": "无法找到此论文",
   "Could not focus this paper": "无法聚焦到此论文",
+  "Could not load this conversation": "无法加载此对话",
+  "Original conversation not found": "未找到原始对话",
+  "This chat's source item was deleted": "此对话的来源条目已被删除",
   "Failed to fully delete turn. Check logs.":
     "未能完全删除对话轮次，请查看日志。",
   "Turn deleted": "已删除对话轮次",
@@ -129,6 +152,8 @@ const zhCN: Record<string, string> = {
   "Started new conversation": "已开始新对话",
   "Open a paper to start a paper chat": "打开一篇论文以开始论文对话",
   "No active paper for paper chat": "没有活跃的论文用于论文对话",
+  "Open a supported Zotero document to start a paper chat":
+    "打开一个受支持的 Zotero 文档以开始论文对话",
   "Failed to create paper chat": "创建论文对话失败",
   "Reused existing new chat": "已复用现有新对话",
   "Started new paper chat": "已开始新的论文对话",
@@ -196,10 +221,14 @@ const zhCN: Record<string, string> = {
   "Paper set to retrieval mode.": "论文已设为检索模式。",
   "Paper context added. Full text will be sent on the next turn.":
     "论文上下文已添加。全文将在下一轮发送。",
-  "Source: MinerU (enhanced markdown)": "来源: MinerU（增强 Markdown）",
-  "(MinerU)": "（MinerU）",
+  "PDF paper context is provided through the local file path.":
+    "PDF 论文上下文通过本地文件路径提供。",
   "Failed to fully delete conversation. Check logs.":
     "未能完全删除对话，请查看日志。",
+  "Failed to delete conversation. Codex thread was not archived.":
+    "未能删除对话。Codex 线程尚未归档。",
+  "Failed to delete conversation because its saved identity is inconsistent. Check logs.":
+    "由于保存的对话身份不一致，未能删除对话。请查看日志。",
 
   // ── Constants / count labels ────────────────────────────────────────────
   "Add Text": "添加文本",
@@ -213,7 +242,7 @@ const zhCN: Record<string, string> = {
   Tertiary: "第三",
   Quaternary: "第四",
 
-  // ── MinerU manager ──────────────────────────────────────────────────────
+  // ── Library/reference selector labels ──────────────────────────────────
   "My Library": "我的文献库",
   "Unfiled Items": "未分类条目",
   Title: "标题",
@@ -225,28 +254,38 @@ const zhCN: Record<string, string> = {
   "Start Filtered": "开始筛选项",
   "Repair Cache": "修复缓存",
   "Repairing...": "正在修复...",
-  "Repairing MinerU cache...": "正在修复 MinerU 缓存...",
   "Delete All Cache": "删除所有缓存",
   "Delete Filtered Cache": "删除筛选缓存",
   "Process This Item": "处理此条目",
   "Show in File Manager": "在文件管理器中显示",
   "Delete confirmation": "删除确认",
-  "Delete MinerU Cache": "删除 MinerU 缓存",
   "Start Selected": "开始所选",
   "Delete Cache": "删除缓存",
-  "Delete MinerU cache for": "删除 MinerU 缓存，共",
   "selected item(s)?": "个所选条目？",
-  "selected item(s) are skipped by MinerU parsing filters. Parse anyway?":
-    "个所选条目被 MinerU 解析过滤器跳过。仍要解析吗？",
   "item(s) in this filter?": "个筛选出的条目？",
-  "Delete all MinerU cached files? This cannot be undone.":
-    "删除所有 MinerU 缓存文件？此操作无法撤销。",
   Skipped: "已跳过",
   "Manage Files": "管理文件",
+  "Folder View": "文件夹视图",
+  Folder: "文件夹",
+  Folders: "文件夹",
+  "Tag View": "标签视图",
+  "Item View": "条目视图",
+  Items: "条目",
+  Status: "状态",
   Tags: "标签",
   "All Tagged": "有标签",
   Untagged: "无标签",
+  "Filter Folders": "筛选文件夹",
   "Filter Tags": "筛选标签",
+  "Expand panel": "展开面板",
+  "Collapse panel": "收起面板",
+  "Resize panel": "调整面板大小",
+  "Remove reference context": "移除引用上下文",
+  "Reference context removed.": "已移除引用上下文。",
+  "Add tag as context": "将标签作为上下文添加",
+  "Remove tag context": "移除标签上下文",
+  "Tag context added.": "已添加标签上下文。",
+  "Tag context removed.": "已移除标签上下文。",
   "Tag filter options": "标签筛选选项",
   "Use OR rule": "使用 OR 规则",
   OR: "或",
@@ -266,7 +305,6 @@ const zhCN: Record<string, string> = {
   "AI Providers": "AI 服务商",
   Customization: "自定义",
   Agent: "Agent",
-  MinerU: "MinerU",
   "Custom System Prompt (Optional)": "自定义系统提示词（可选）",
   "Custom instructions for the AI assistant...": "为 AI 助手设置自定义指令...",
   "Add custom instructions to the default system prompt (leave empty to use default only)":
@@ -279,62 +317,17 @@ const zhCN: Record<string, string> = {
   "Enable Agent Mode (Beta)": "启用 Agent 模式（测试版）",
   'Shows the "Agent (beta)" toggle in the context bar, enabling the agentic multi-step assistant. Off by default — enable only if you want to experiment with the beta feature.':
     '在上下文栏显示"Agent（测试版）"切换按钮，启用多步骤 Agent 助手。默认关闭 — 仅在你想体验测试版功能时启用。',
-  "MinerU PDF Parsing": "MinerU PDF 解析",
-  "Extract high-quality structured text from PDFs with preserved math formulas, tables, and figures. MinerU dramatically improves how the AI understands your papers.":
-    "从 PDF 中提取高质量结构化文本，保留数学公式、表格和图片。MinerU 显著提升 AI 对论文的理解能力。",
-  "Enable MinerU PDF Parsing": "启用 MinerU PDF 解析",
-  "Sync MinerU cache with Zotero file sync": "使用 Zotero 文件同步 MinerU 缓存",
-  "Creates companion ZIP attachments for MinerU full.md, manifest.json, content_list.json, and extracted paper assets. Requires Zotero file sync or WebDAV.":
-    "为 MinerU full.md、manifest.json、content_list.json 和提取出的论文资源创建配套 ZIP 附件。需要启用 Zotero 文件同步或 WebDAV。",
-  "Delete synced MinerU packages": "删除已同步的 MinerU 包",
-  "Disable MinerU sync and delete packages": "禁用 MinerU 同步并删除同步包",
-  "Delete MinerU sync packages?": "删除 MinerU 同步包？",
   "Disable sync and delete": "禁用同步并删除",
   "Delete packages": "删除包",
-  "Synced MinerU ZIP packages are Zotero attachment items. MinerU sync will be disabled, then those package attachments will be deleted. Zotero may show sync conflicts while it syncs these deletions. If that happens, choose the local/deleted version to remove already-uploaded packages from Zotero sync.":
-    "已同步的 MinerU ZIP 包是 Zotero 附件条目。将先禁用 MinerU 同步，然后删除这些包附件。Zotero 同步这些删除操作时可能会显示同步冲突。如果出现冲突，请选择本地/已删除版本，以便从 Zotero 同步中移除已上传的包。",
-  "Synced MinerU ZIP packages are Zotero attachment items. Those package attachments will be deleted. Zotero may show sync conflicts while it syncs these deletions. If that happens, choose the local/deleted version to remove already-uploaded packages from Zotero sync.":
-    "已同步的 MinerU ZIP 包是 Zotero 附件条目。将删除这些包附件。Zotero 同步这些删除操作时可能会显示同步冲突。如果出现冲突，请选择本地/已删除版本，以便从 Zotero 同步中移除已上传的包。",
-  "MinerU sync disabled. Existing synced packages are kept until deleted.":
-    "MinerU 同步已禁用。已有同步包会保留，直到手动删除。",
-  "MinerU sync enabled. Existing local caches sync only when requested.":
-    "MinerU 同步已启用。已有本地缓存只会在你手动请求时同步。",
-  "Syncing existing MinerU caches…": "正在同步已有 MinerU 缓存…",
-  "Syncing existing MinerU caches": "正在同步已有 MinerU 缓存",
-  "Existing MinerU caches synced": "已有 MinerU 缓存已同步",
-  "Deleting synced MinerU packages…": "正在删除已同步的 MinerU 包…",
-  "MinerU sync disabled. Deleting synced MinerU packages…":
-    "MinerU 同步已禁用。正在删除已同步的 MinerU 包…",
-  "Deleted synced MinerU packages": "已删除同步的 MinerU 包",
-  "MinerU sync disabled. Deleted synced MinerU packages":
-    "MinerU 同步已禁用。已删除同步的 MinerU 包",
-  "Synced MinerU package available; local cache will restore when needed.":
-    "已同步的 MinerU 包可用；需要时会恢复本地缓存。",
-  "Local MinerU cache and synced package available.":
-    "本地 MinerU 缓存和同步包均可用。",
-  "Local MinerU cache available.": "本地 MinerU 缓存可用。",
-  "No MinerU cache available.": "没有可用的 MinerU 缓存。",
-  "Enable MinerU sync before preparing packages.":
-    "请先启用 MinerU 同步，再准备同步包。",
   "No API key needed to start, but a personal key is strongly recommended.":
     "无需 API 密钥即可开始，但强烈建议配置个人密钥。",
-  "The built-in MinerU API may no longer be supported after June 1, 2026.":
-    "内置 MinerU API 可能会在 2026 年 6 月 1 日后不再受支持。",
   "Get your own free API key from": "请从以下网站获取你自己的免费 API 密钥：",
   "and paste it below.": "并粘贴到下方。",
   "API Key (Recommended)": "API 密钥（推荐）",
-  "Paste your free MinerU API key": "粘贴你的免费 MinerU API 密钥",
-  "With your own key: direct connection to mineru.net":
-    "使用自己的密钥：直连 mineru.net",
-  "Use local MinerU server": "使用本地 MinerU 服务",
   "Local API Base URL": "本地 API URL",
-  "Uses a self-hosted mineru-api server. Test Connection only checks that the server process is reachable.":
-    "使用本地 mineru-api 服务。测试连接仅检查服务进程是否可访问。",
   Backend: "后端模型",
   "Switching backend triggers a cold start: the first parse afterwards may take noticeably longer while the model loads.":
     "切换后端模型会触发冷启动：模型加载后，首次解析可能会明显更慢。",
-  "Note: Pause stops the queue, but an already-running local parse keeps executing on the mineru-api server — it has no cancel endpoint. To abort immediately (e.g. to switch backend right away), restart your mineru-api process manually.":
-    "注意：暂停只会停止队列，但已经在 mineru-api 服务端运行的本地解析仍会继续执行，因为它没有取消接口。若要立刻中止（例如马上切换后端模型），请手动重启 mineru-api 进程。",
   "Downloading results…": "正在下载结果…",
   "Extracting files…": "正在提取文件…",
   "Reading PDF file…": "正在读取 PDF 文件…",
@@ -348,15 +341,12 @@ const zhCN: Record<string, string> = {
   "Upload failed: HTTP %s to %s": "上传失败：HTTP %s 到 %s",
   "Processing on server…": "服务器正在处理…",
   "Processing on server… (%ss)": "服务器正在处理…（%s 秒）",
+  "Converting on server… (%ss)": "服务器正在转换…（%s 秒）",
   "Waiting for parser… (%ss)": "等待解析器处理…（%s 秒）",
-  "Local MinerU parsing timed out": "本地 MinerU 解析超时",
   "Local parse failed: HTTP %s": "本地解析失败：HTTP %s",
   "Done (%s files extracted)": "完成（已提取 %s 个文件）",
   "Extraction failed on server": "服务器解析失败",
-  "Timed out after 10 minutes": "10 分钟后超时",
-  "Local MinerU health check timed out": "本地 MinerU 健康检查超时",
-  "Local MinerU health check failed: HTTP %s":
-    "本地 MinerU 健康检查失败：HTTP %s",
+  "Missing ZIP result from server": "服务器未返回 ZIP 结果",
   "Test Connection": "测试连接",
   "Enter an API key first": "请先输入 API 密钥",
   "Testing…": "测试中…",
@@ -456,7 +446,6 @@ const zhCN: Record<string, string> = {
   "No models found": "未找到模型",
   "Synced %n models": "已同步 %n 个模型",
   "Fetch Models": "获取模型",
-  WebChat: "WebChat",
   "Provider A": "服务商 A",
   "Provider B": "服务商 B",
   "Provider C": "服务商 C",
@@ -481,8 +470,6 @@ const zhCN: Record<string, string> = {
     "预设使用 Moonshot 国际版 API。中国大陆可使用 api.moonshot.cn。",
   "Uses GitHub Copilot via device login. Requires an active Copilot subscription.":
     "通过设备登录使用 GitHub Copilot。需要有效的 Copilot 订阅。",
-  'Relay questions to %targets% via the Sync for Zotero browser extension. Download extension: github.com/yilewang/sync-for-zotero → Releases. Unzip, open chrome://extensions, enable Developer Mode, click "Load unpacked", select the extension folder. Keep the corresponding chat tab open while using WebChat mode.':
-    "通过 Sync for Zotero 浏览器扩展将问题转发到 %targets%。下载扩展：github.com/yilewang/sync-for-zotero → Releases。解压后打开 chrome://extensions，启用开发者模式，点击“加载已解压的扩展程序”，选择扩展文件夹。使用 WebChat 模式时保持对应聊天标签页打开。",
 
   // Static preference controls
   "Plugin Font Size": "插件字体大小",
@@ -541,17 +528,17 @@ const zhCN: Record<string, string> = {
     "可选。留空会自动检测。也可以输入绝对路径，例如 /usr/local/bin/codex 或 ~/.local/bin/codex。",
   "Test connection": "测试连接",
   "Zotero MCP tools": "Zotero MCP 工具",
-  "Lets native Codex use a curated local MCP server for Zotero library and PDF reading. Write and destructive tools are not exposed in this mode.":
-    "允许原生 Codex 使用精选的本地 MCP 服务来读取 Zotero 文献库和 PDF。此模式不会暴露写入或破坏性工具。",
-  "Enable Zotero MCP tools for native Codex turns":
-    "为原生 Codex 回合启用 Zotero MCP 工具",
+  "Lets native Codex and Claude Code use a curated local MCP server for Zotero library/PDF reading and guarded Zotero operations. Write and destructive tools still use Zotero confirmation or tool-specific safety checks.":
+    "允许原生 Codex 和 Claude Code 使用精选的本地 MCP 服务读取 Zotero 文献库/PDF，并执行受保护的 Zotero 操作。写入和破坏性工具仍会使用 Zotero 确认或工具专属安全检查。",
+  "Enable Zotero MCP tools for native Codex and Claude Code turns":
+    "为原生 Codex 和 Claude Code 回合启用 Zotero MCP 工具",
   "Install/update Zotero MCP config": "安装/更新 Zotero MCP 配置",
-  "Zotero writes a local bearer-token protected MCP entry into Codex config and asks app-server to reload MCP servers. User-level Codex skills, plugins, and other MCP setup remain owned by Codex.":
-    "Zotero 会把受本地 bearer token 保护的 MCP 条目写入 Codex 配置，并请求 app-server 重新加载 MCP 服务。用户级 Codex skills、插件和其他 MCP 设置仍由 Codex 管理。",
-  "Zotero MCP tools will be configured before native Codex turns.":
-    "将在原生 Codex 回合前配置 Zotero MCP 工具。",
-  "Zotero MCP tools disabled for native Codex turns.":
-    "已禁用原生 Codex 回合中的 Zotero MCP 工具。",
+  "For Codex, Zotero writes a local bearer-token protected MCP entry into Codex config and asks app-server to reload MCP servers. Claude Code receives a scoped MCP server directly for each turn. User-level Codex skills, plugins, and other MCP setup remain owned by Codex.":
+    "对于 Codex，Zotero 会把受本地 bearer token 保护的 MCP 条目写入 Codex 配置，并请求 app-server 重新加载 MCP 服务。Claude Code 会在每个回合直接收到带作用域的 MCP 服务。用户级 Codex skills、插件和其他 MCP 设置仍由 Codex 管理。",
+  "Zotero MCP tools enabled for native Codex and Claude Code turns.":
+    "已为原生 Codex 和 Claude Code 回合启用 Zotero MCP 工具。",
+  "Zotero MCP tools disabled for native Codex and Claude Code turns.":
+    "已禁用原生 Codex 和 Claude Code 回合中的 Zotero MCP 工具。",
   "Configuring Zotero MCP tools…": "正在配置 Zotero MCP 工具…",
   "Zotero MCP connected with %n tools.": "Zotero MCP 已连接 %n 个工具。",
   "Zotero MCP config written. Codex is reloading tools.":
@@ -674,8 +661,6 @@ const zhCN: Record<string, string> = {
     "未找到 %provider% 服务商。请输入用于嵌入模型的 API 密钥。",
   "Estimated cost": "预估费用",
 
-  // MinerU preference filters
-  "Sync existing MinerU caches now": "立即同步已有 MinerU 缓存",
   "Advanced parsing filters": "高级解析过滤器",
   "Skip files over": "跳过超过",
   pages: "页",
@@ -735,70 +720,11 @@ export function t(en: string): string {
   return en;
 }
 
-/** Returns the WebChat start page HTML. */
-export function getWebChatWelcomeHtml(
-  targetLabel?: string,
-  targetDomain?: string,
-): string {
-  const label = targetLabel || "WebChat";
-  const domain = targetDomain || "the chat site";
-  if (getEffectiveLocale().startsWith("zh")) {
-    return `
-      <div class="llm-start-page llm-webchat-start-page">
-        <div class="llm-start-page-title">LLM-for-Zotero WebChat</div>
-        <div class="llm-start-page-subtitle">通过已打开的 ${label} 浏览器标签页工作</div>
-        <div class="llm-start-page-recommendations">
-          <div class="llm-start-page-rec-title">工作方式</div>
-          <ol class="llm-start-page-rec-list">
-            <li>Zotero 会通过 Sync for Zotero 浏览器扩展，把你的问题发送到已经打开的 <strong>${domain}</strong> 标签页，然后把回答同步回这里。</li>
-          </ol>
-          <div class="llm-start-page-rec-title llm-webchat-warning-title">⚠️⚠️⚠️ 发送前必须确认</div>
-          <ol class="llm-start-page-rec-list">
-            <li>已经安装并启用 <strong>Sync for Zotero</strong> 浏览器扩展。</li>
-            <li>已经在 Chrome 或 Edge 中打开 <strong>${domain}</strong>，并且已经登录。</li>
-            <li>保持 <strong>${domain}</strong> 标签页可见；不要最小化，不要放到另一个显示器。Zotero 模型标签旁的绿点表示已连接。</li>
-          </ol>
-          <div class="llm-start-page-rec-title llm-webchat-rec-title-spaced">怎么提问</div>
-          <ol class="llm-start-page-rec-list">
-            <li>在这里输入问题并点击 <strong>Send</strong>。</li>
-            <li>论文对话中，论文标签高亮表示会附加当前 PDF；右键论文标签可切换发送 PDF 或跳过 PDF。每个 WebChat 会话通常只上传一次 PDF。</li>
-            <li>如果没有反应，请刷新 <strong>${domain}</strong> 标签页，确认扩展已启用，并让 Zotero 和浏览器保持在同一个显示器。</li>
-          </ol>
-        </div>
-      </div>
-    `;
-  }
-  return `
-    <div class="llm-start-page llm-webchat-start-page">
-      <div class="llm-start-page-title">LLM-for-Zotero WebChat</div>
-      <div class="llm-start-page-subtitle">Use your open ${label} browser tab</div>
-      <div class="llm-start-page-recommendations">
-        <div class="llm-start-page-rec-title">How it works</div>
-        <ol class="llm-start-page-rec-list">
-          <li>Zotero sends your question to the already-open <strong>${domain}</strong> tab through the Sync for Zotero browser extension, then streams the answer back here.</li>
-        </ol>
-        <div class="llm-start-page-rec-title llm-webchat-warning-title">⚠️⚠️⚠️ Before sending</div>
-        <ol class="llm-start-page-rec-list">
-          <li>Install and enable the <strong>Sync for Zotero</strong> browser extension.</li>
-          <li>Open <strong>${domain}</strong> in Chrome or Edge, and make sure you are signed in.</li>
-          <li>Keep the <strong>${domain}</strong> tab visible; do not minimize it or put it on another monitor. A green dot in Zotero's model chip means connected.</li>
-        </ol>
-        <div class="llm-start-page-rec-title llm-webchat-rec-title-spaced">Ask from Zotero</div>
-        <ol class="llm-start-page-rec-list">
-          <li>Type your question here and press <strong>Send</strong>.</li>
-          <li>For paper chat, a highlighted paper chip means the current PDF will be attached; right-click the chip to switch between send PDF and skip PDF. A PDF is uploaded only once per webchat session.</li>
-          <li>If nothing happens, reload the <strong>${domain}</strong> tab, confirm the extension is enabled, and keep Zotero and the browser on the same monitor.</li>
-        </ol>
-      </div>
-    </div>
-  `;
-}
-
 export function getWelcomeHtml(): string {
   if (getEffectiveLocale().startsWith("zh")) {
     return `
       <div class="llm-welcome">
-        <div class="llm-welcome-icon">💬</div>
+        <div class="llm-welcome-icon llm-context-svg-icon llm-context-icon-model-chip" aria-hidden="true"></div>
         <div class="llm-welcome-text">
           <div class="llm-welcome-title">开始对话 — 以下是你可以做的。</div>
           <ul class="llm-welcome-list">
@@ -813,7 +739,7 @@ export function getWelcomeHtml(): string {
   }
   return `
     <div class="llm-welcome">
-      <div class="llm-welcome-icon">💬</div>
+      <div class="llm-welcome-icon llm-context-svg-icon llm-context-icon-model-chip" aria-hidden="true"></div>
       <div class="llm-welcome-text">
         <div class="llm-welcome-title">Start chatting — here's what you can do.</div>
         <ul class="llm-welcome-list">
@@ -890,7 +816,6 @@ export function getStandaloneLibraryChatStartPageHtml(): string {
         <div class="llm-start-page-recommendations">
           <div class="llm-start-page-rec-title">推荐设置以获得最佳体验</div>
           <ol class="llm-start-page-rec-list">
-            <li><strong>偏好设置 → MinerU</strong>：将 PDF 解析为 Markdown + 图片<span class="llm-rec-reason">（MD 是 LLM 的语言；可以利用解析出的图片写出更好的笔记；节省 token）</span></li>
             <li>启用 <strong>Agent 模式</strong>，让助手自主完成研究任务</li>
             <li>使用<strong>高智能模型</strong>：如 Codex、GPT-5.4 等</li>
             <li>在偏好设置中配置<strong>笔记目录路径</strong>（设置 → Agent 标签页）</li>
@@ -906,7 +831,6 @@ export function getStandaloneLibraryChatStartPageHtml(): string {
       <div class="llm-start-page-recommendations">
         <div class="llm-start-page-rec-title">Recommended settings for the best experience</div>
         <ol class="llm-start-page-rec-list">
-          <li><strong>Preferences → MinerU</strong>: parse your PDFs to Markdown + images<span class="llm-rec-reason"> (MD is the language of LLMs; enables better notes with parsed images; saves tokens)</span></li>
           <li>Activate <strong>Agent mode</strong> for autonomous research</li>
           <li>Use an <strong>intelligent model</strong>: Codex, GPT-5.4, or similar high-intelligence models</li>
           <li>Set up <strong>Notes directory</strong> in Preferences (Settings → Agent tab)</li>

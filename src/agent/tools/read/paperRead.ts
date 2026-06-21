@@ -3,12 +3,12 @@ import type {
   AgentToolDefinition,
   AgentToolResult,
 } from "../../types";
+import type { QuoteCitation } from "../../../shared/types";
 import type { PdfService } from "../../services/pdfService";
 import type { PdfPageService } from "../../services/pdfPageService";
 import { parsePageSelectionValue } from "../../services/pdfPageService";
 import type { RetrievalService } from "../../services/retrievalService";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
-import { joinLocalPath } from "../../../utils/localPath";
 import {
   formatPaperCitationLabel,
   formatPaperSourceLabel,
@@ -42,6 +42,7 @@ type PaperReadInput = {
   target?: PdfTarget;
   targets?: PdfTarget[];
   query?: string;
+  queryVariants?: string[];
   sections?: string[];
   pages?: number[];
   neighborPages?: number;
@@ -52,6 +53,9 @@ type PaperReadInput = {
 
 const MAX_OVERVIEW_TARGETS = 5;
 const MAX_TARGETED_TARGETS = 10;
+const MAX_OVERVIEW_QUOTES_PER_RESULT = 3;
+const MIN_OVERVIEW_QUOTE_CHARS = 40;
+const MAX_OVERVIEW_QUOTE_CHARS = 360;
 
 function normalizeMode(value: unknown): PaperReadMode {
   return value === "targeted" ||
@@ -78,92 +82,14 @@ function normalizePages(value: unknown): number[] | undefined {
   return parsePageSelectionValue(value)?.pageIndexes;
 }
 
-function readTextFile(filePath: string): Promise<string> {
-  const IOUtils = (globalThis as any).IOUtils;
-  if (IOUtils?.read) {
-    return IOUtils.read(filePath).then((data: Uint8Array | ArrayBuffer) => {
-      const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-      return new TextDecoder().decode(bytes);
-    });
-  }
-  const OS = (globalThis as any).OS;
-  if (OS?.File?.read) {
-    return OS.File.read(filePath).then((data: Uint8Array | ArrayBuffer) => {
-      const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-      return new TextDecoder().decode(bytes);
-    });
-  }
-  throw new Error("No file reader is available for MinerU markdown");
-}
-
-function selectMineruOverview(
-  fullMd: string,
-  maxChars: number,
-): {
-  text: string;
-  sections: string[];
-} {
-  const clean = fullMd.trim();
-  const sections: string[] = ["frontmatter"];
-  const intro = clean.slice(
-    0,
-    Math.min(clean.length, Math.floor(maxChars * 0.6)),
-  );
-  const headingPattern =
-    /^#{1,6}\s+.*\b(discussion|conclusion|conclusions|summary|general discussion)\b.*$/gim;
-  const matches = Array.from(clean.matchAll(headingPattern));
-  const tailStart = matches.length
-    ? Math.max(0, matches[matches.length - 1].index || 0)
-    : Math.max(0, clean.length - Math.floor(maxChars * 0.4));
-  const tail = clean.slice(tailStart, tailStart + Math.floor(maxChars * 0.5));
-  if (tailStart > 0) sections.push("discussion_or_conclusion");
-  const combined =
-    tail && !intro.includes(tail.slice(0, 200))
-      ? `${intro}\n\n[Later overview section]\n${tail}`
-      : intro;
-  return {
-    text: combined.slice(0, maxChars).trim(),
-    sections,
-  };
-}
-
-async function tryReadMineruOverview(
-  paperContext: NonNullable<PdfTarget["paperContext"]>,
-  maxChars: number,
-): Promise<unknown | null> {
-  const cacheDir = normalizeString(paperContext.mineruCacheDir);
-  if (!cacheDir) return null;
-  try {
-    const filePath = joinLocalPath(cacheDir, "full.md");
-    const fullMd = await readTextFile(filePath);
-    const selected = selectMineruOverview(fullMd, maxChars);
-    return {
-      backend: "mineru",
-      filePath,
-      text: selected.text,
-      sections: selected.sections,
-      citationLabel: formatPaperCitationLabel(paperContext),
-      sourceLabel: formatPaperSourceLabel(paperContext),
-      paperContext,
-    };
-  } catch (error) {
-    return {
-      backend: "mineru",
-      ok: false,
-      warning: `Could not read MinerU full.md: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-      paperContext,
-    };
-  }
-}
-
 function targetForPageTool(input: PaperReadInput): Record<string, unknown> {
   const target = input.target || input.targets?.[0];
   return {
     ...(target ? { target } : {}),
     ...(input.query ? { question: input.query } : {}),
-    ...(input.pages?.length ? { pages: input.pages } : {}),
+    ...(input.pages?.length
+      ? { pages: input.pages.map((pageIndex) => pageIndex + 1) }
+      : {}),
     ...(input.neighborPages ? { neighborPages: input.neighborPages } : {}),
     ...(input.mode === "capture" ? { capture: true } : {}),
   };
@@ -310,7 +236,8 @@ function buildQuoteCitationFromResult(
   return buildQuoteCitation({
     quoteText: result.text,
     citationLabel:
-      normalizeString(result.sourceLabel) || normalizeString(result.citationLabel),
+      normalizeString(result.sourceLabel) ||
+      normalizeString(result.citationLabel),
     contextItemId: paperContext?.contextItemId,
     itemId: paperContext?.itemId,
   });
@@ -325,6 +252,102 @@ function buildQuoteCitationsForResults(
     if (citation) citations.push(citation);
   }
   return mergeQuoteCitations(citations);
+}
+
+function splitOverviewQuoteCandidates(text: string): string[] {
+  const withoutChunkMarkers = text.replace(/^\s*\[chunk\s+\d+\]\s*$/gim, "");
+  const blocks = withoutChunkMarkers
+    .split(/\n{2,}/)
+    .map((block) =>
+      block
+        .split("\n")
+        .map((line) => line.replace(/^#{1,6}\s+/, "").trim())
+        .filter(Boolean)
+        .join(" "),
+    )
+    .map((block) => block.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const block of blocks) {
+    const sentences = block.match(/[^.!?。！？]+[.!?。！？]+(?=\s|$)/g) || [
+      block,
+    ];
+    let candidate = "";
+    for (const sentence of sentences) {
+      const next = `${candidate}${candidate ? " " : ""}${sentence.trim()}`;
+      if (next.length > MAX_OVERVIEW_QUOTE_CHARS) break;
+      candidate = next;
+      if (candidate.length >= MIN_OVERVIEW_QUOTE_CHARS) break;
+    }
+    candidate = candidate || block;
+    if (
+      candidate.length < MIN_OVERVIEW_QUOTE_CHARS ||
+      candidate.length > MAX_OVERVIEW_QUOTE_CHARS
+    ) {
+      continue;
+    }
+    if (/^(?:title|authors?|date|publication|doi|abstract):/i.test(candidate)) {
+      continue;
+    }
+    const key = candidate.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(candidate);
+    if (out.length >= MAX_OVERVIEW_QUOTES_PER_RESULT) break;
+  }
+  return out;
+}
+
+function buildOverviewQuoteCitationPack(
+  results: Array<Record<string, unknown>>,
+): {
+  results: Array<Record<string, unknown>>;
+  quoteCitations: QuoteCitation[];
+} {
+  const quoteCitations: QuoteCitation[] = [];
+  const resultsWithAnchors = results.map((result) => {
+    if (
+      normalizeString(result.backend) === "zotero_metadata" ||
+      normalizeString(result.sourceKind) === "zotero_metadata"
+    ) {
+      return result;
+    }
+    const paperContext = validateObject<Record<string, unknown>>(
+      result.paperContext,
+    )
+      ? result.paperContext
+      : undefined;
+    const quoteTexts = splitOverviewQuoteCandidates(
+      normalizeString(result.text) || "",
+    );
+    const resultCitations = quoteTexts
+      .map((quoteText) =>
+        buildQuoteCitation({
+          quoteText,
+          citationLabel:
+            normalizeString(result.sourceLabel) ||
+            normalizeString(result.citationLabel),
+          contextItemId: paperContext?.contextItemId,
+          itemId: paperContext?.itemId,
+        }),
+      )
+      .filter((entry): entry is QuoteCitation => Boolean(entry));
+    quoteCitations.push(...resultCitations);
+    return resultCitations.length
+      ? {
+          ...result,
+          quoteCitationIds: resultCitations.map((citation) => citation.id),
+          quoteAnchors: resultCitations.map(
+            (citation) => `[[quote:${citation.id}]]`,
+          ),
+        }
+      : result;
+  });
+  return {
+    results: resultsWithAnchors,
+    quoteCitations: mergeQuoteCitations(quoteCitations),
+  };
 }
 
 function getUniqueSourceLabels(entries: unknown[]): string[] {
@@ -350,20 +373,6 @@ function countGroupedPassages(papers: unknown[]): number {
     const passages = Array.isArray(record?.passages) ? record.passages : [];
     return count + passages.length;
   }, 0);
-}
-
-function extractWarningText(value: unknown): string | undefined {
-  if (!validateObject<Record<string, unknown>>(value)) return undefined;
-  return normalizeString(value.warning);
-}
-
-function combineWarnings(
-  ...warnings: Array<string | undefined>
-): string | undefined {
-  const unique = Array.from(
-    new Set(warnings.map((entry) => normalizeString(entry)).filter(Boolean)),
-  );
-  return unique.length ? unique.join("; ") : undefined;
 }
 
 function formatSourcePhrase(
@@ -462,6 +471,12 @@ export function createPaperReadTool(
             },
           },
           query: { type: "string" },
+          queryVariants: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Optional search probes such as translations, acronyms, notation variants, or technical equivalents.",
+          },
           sections: { type: "array", items: { type: "string" } },
           pages: {
             anyOf: [
@@ -547,6 +562,7 @@ export function createPaperReadTool(
           mode === "overview" ? MAX_OVERVIEW_TARGETS : MAX_TARGETED_TARGETS,
         ),
         query: normalizeString(args.query),
+        queryVariants: normalizeStringArray(args.queryVariants),
         sections: normalizeStringArray(args.sections),
         pages: normalizePages(args.pages),
         neighborPages: normalizePositiveInt(args.neighborPages),
@@ -614,38 +630,31 @@ export function createPaperReadTool(
         const maxChars = input.maxChars || 6000;
         const results = [];
         for (const paperContext of targets) {
-          const mineru = await tryReadMineruOverview(paperContext, maxChars);
-          if (mineru && (mineru as { ok?: boolean }).ok !== false) {
-            results.push(mineru);
-            continue;
-          }
           try {
             results.push(
               await pdfService.getOverviewExcerpt({ paperContext, maxChars }),
             );
           } catch (error) {
-            const warning = combineWarnings(
-              extractWarningText(mineru),
-              error instanceof Error ? error.message : String(error),
-            );
             const metadataOverview = buildMetadataOverview({
               paperContext,
               context,
               zoteroGateway,
-              warning,
+              warning: error instanceof Error ? error.message : String(error),
             });
             if (metadataOverview) {
               results.push(metadataOverview);
-            } else if (mineru) {
-              results.push(mineru);
             } else {
               throw error;
             }
           }
         }
+        const overviewQuotePack = buildOverviewQuoteCitationPack(
+          results as Array<Record<string, unknown>>,
+        );
         return {
           mode: input.mode,
-          results,
+          results: overviewQuotePack.results,
+          quoteCitations: overviewQuotePack.quoteCitations,
         };
       }
 
@@ -672,8 +681,13 @@ export function createPaperReadTool(
       const results = await retrievalService.retrieveEvidence({
         papers: targets,
         question,
+        queryVariants: input.queryVariants,
+        model: context.request.model,
         apiBase: context.request.apiBase,
         apiKey: context.request.apiKey,
+        authMode: context.request.authMode,
+        providerProtocol: context.request.providerProtocol,
+        reasoning: context.request.reasoning,
         topK: input.topK,
         perPaperTopK: input.topK,
       });

@@ -7,7 +7,9 @@ import type {
   ChatRuntimeMode,
   CollectionContextRef,
   PaperContextRef,
+  ResolvedContextSource,
   SelectedTextContext,
+  TagContextRef,
 } from "../../types";
 import type { SelectedTextSource } from "../../types";
 import type { EditLatestTurnMarker, EditLatestTurnResult } from "../../chat";
@@ -18,6 +20,11 @@ import {
   shouldApplyCodexAppServerNativeAttachmentPolicy,
 } from "../../codexAppServerAttachmentPolicy";
 import { resolvePdfModeModelInputs } from "./pdfPaperModelInputController";
+import {
+  getAllSkills,
+  prependNativeSkillMention,
+  resolveSkillDirectiveText,
+} from "../../../../agent/skills";
 
 type StatusLevel = "ready" | "warning" | "error";
 
@@ -31,8 +38,7 @@ type SelectedProfile = {
     | "api_key"
     | "codex_auth"
     | "codex_app_server"
-    | "copilot_auth"
-    | "webchat";
+    | "copilot_auth";
   providerProtocol?: ProviderProtocol;
 };
 
@@ -53,11 +59,13 @@ type SendFlowControllerDeps = {
   body: Element;
   inputBox: HTMLTextAreaElement;
   getItem: () => Zotero.Item | null;
+  resolveContextSource: () => Promise<ResolvedContextSource | null>;
   closeSlashMenu: () => void;
   closePaperPicker: () => void;
   getSelectedTextContextEntries: (itemId: number) => SelectedTextContext[];
   getSelectedPaperContexts: (itemId: number) => PaperContextRef[];
   getSelectedCollectionContexts: (itemId: number) => CollectionContextRef[];
+  getSelectedTagContexts: (itemId: number) => TagContextRef[];
   getFullTextPaperContexts: (
     item: Zotero.Item,
     paperContexts: PaperContextRef[],
@@ -163,6 +171,7 @@ type SendFlowControllerDeps = {
   autoUnlockGlobalChat: () => void;
   setStatusMessage?: (message: string, level: StatusLevel) => void;
   editStaleStatusText: string;
+  onComposerDraftCleared?: () => void;
   /** Consume forced skill IDs from slash menu selection. Returns the IDs and clears state. */
   consumeForcedSkillIds?: () => string[] | undefined;
   // [webchat]
@@ -195,7 +204,13 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
     try {
       const textContextConversationKey = deps.getConversationKey(item);
       const draftText = deps.inputBox.value.trim();
-      const text = (options?.overrideText ?? draftText).trim();
+      const earlyProfile = deps.getSelectedProfile();
+      const rawSubmittedText = (options?.overrideText ?? draftText).trim();
+      const codexNativeSkillText =
+        earlyProfile?.authMode === "codex_app_server"
+          ? resolveSkillDirectiveText(rawSubmittedText, getAllSkills())
+          : { text: rawSubmittedText };
+      const text = codexNativeSkillText.text;
       const selectedContexts = deps.getSelectedTextContextEntries(
         textContextConversationKey,
       );
@@ -208,14 +223,17 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         (entry) => entry.noteContext,
       );
       const primarySelectedText = selectedTexts[0] || "";
+      const contextSource = await deps.resolveContextSource();
       const allSelectedPaperContexts = deps.getSelectedPaperContexts(item.id);
       const selectedCollectionContexts = deps.getSelectedCollectionContexts(
         item.id,
       );
+      const selectedTagContexts = deps.getSelectedTagContexts(item.id);
       const usesPluginAgentMode =
-        deps.isAgentMode() && !deps.isCodexConversationSystem();
-      // Plugin Agent mode uses text/MinerU pipeline by default, but if the user
-      // explicitly forced PDF mode on a paper, honour that choice.
+        (deps.isAgentMode() || deps.isClaudeConversationSystem()) &&
+        !deps.isCodexConversationSystem();
+      // Plugin Agent mode resolves paper inputs as local PDF paths. Explicit PDF
+      // mode selections are kept as file-backed model inputs.
       const pdfModePaperContexts = deps.getPdfModePaperContexts(
         item,
         allSelectedPaperContexts,
@@ -233,8 +251,6 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       );
       // Resolve PDFs based on model capability. The visible chip/attachment state
       // stays unchanged; these variables are the provider-specific model inputs.
-      const earlyProfile = deps.getSelectedProfile();
-      const isWebChat = earlyProfile?.authMode === "webchat";
       const runtimeMode: ChatRuntimeMode = usesPluginAgentMode
         ? "agent"
         : "chat";
@@ -288,7 +304,6 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         selectedImageCountForBudget,
         profile: earlyProfile,
         currentModelName: earlyModelName,
-        isWebChat,
         useCodexAttachmentPolicy,
       });
       if (!pdfInputs.ok) return;
@@ -298,16 +313,12 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         pdfPageImageDataUrls,
         pdfUploadSystemMessages,
       } = pdfInputs;
-      if (isWebChat && selectedCollectionContexts.length) {
-        deps.setStatusMessage?.(
-          "Web chat does not support Zotero collection context. Remove the collection and try again.",
-          "error",
-        );
-        return;
-      }
+      const hasImageInputs =
+        selectedImages.length > 0 || pdfPageImageDataUrls.length > 0;
       const hasPaperComposeState =
         allSelectedPaperContexts.length > 0 ||
         selectedCollectionContexts.length > 0 ||
+        selectedTagContexts.length > 0 ||
         !deps.isGlobalMode();
 
       if (
@@ -315,29 +326,47 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         !primarySelectedText &&
         !selectedPaperContexts.length &&
         !selectedCollectionContexts.length &&
-        !selectedFiles.length
+        !selectedTagContexts.length &&
+        !selectedFiles.length &&
+        !hasImageInputs
       ) {
         return;
       }
 
+      const hasNonImageAttachments =
+        selectedFiles.length > 0 ||
+        selectedPaperContexts.length > 0 ||
+        selectedCollectionContexts.length > 0 ||
+        selectedTagContexts.length > 0;
+
       const promptText = deps.resolvePromptText(
         text,
         primarySelectedText,
-        selectedFiles.length > 0 ||
-          selectedPaperContexts.length > 0 ||
-          selectedCollectionContexts.length > 0,
+        hasNonImageAttachments,
       );
-      if (!promptText) return;
+      let resolvedPromptText = promptText;
+      if (!resolvedPromptText && hasImageInputs) {
+        resolvedPromptText = "Please analyze the attached images.";
+      }
+      if (!resolvedPromptText) return;
 
-      const resolvedPromptText =
+      const selectedScopeContextCount =
+        selectedPaperContexts.length +
+        selectedCollectionContexts.length +
+        selectedTagContexts.length;
+      if (
         !text &&
         !primarySelectedText &&
-        selectedPaperContexts.length + selectedCollectionContexts.length > 0 &&
-        !selectedFiles.length
-          ? selectedPaperContexts.length
-            ? "Please analyze selected papers."
-            : "Please analyze selected collection."
-          : promptText;
+        selectedScopeContextCount > 0 &&
+        !selectedFiles.length &&
+        !hasImageInputs
+      ) {
+        resolvedPromptText = selectedPaperContexts.length
+          ? "Please analyze selected papers."
+          : selectedCollectionContexts.length
+            ? "Please analyze selected collection."
+            : "Please analyze selected tag.";
+      }
 
       const composedQuestionBase = primarySelectedText
         ? deps.buildQuestionWithSelectedTextContexts(
@@ -372,10 +401,10 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
           : `/${commandAction}`
         : primarySelectedText
           ? resolvedPromptText
-          : text || resolvedPromptText;
+          : rawSubmittedText || resolvedPromptText;
 
       const titleSeed =
-        deps.normalizeConversationTitleSeed(text) ||
+        deps.normalizeConversationTitleSeed(rawSubmittedText) ||
         deps.normalizeConversationTitleSeed(resolvedPromptText);
       if (titleSeed) {
         const touchTitle = deps.isClaudeConversationSystem()
@@ -436,6 +465,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         const editResult = await deps.editLatestUserMessageAndRetry({
           body: deps.body,
           item,
+          contextSource,
           displayQuestion,
           selectedTexts: selectedTexts.length ? selectedTexts : undefined,
           selectedTextSources: selectedTexts.length
@@ -451,6 +481,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
           paperContexts: selectedPaperContexts,
           fullTextPaperContexts,
           selectedCollectionContexts,
+          selectedTagContexts,
           attachments: selectedFiles.length ? selectedFiles : undefined,
           modelAttachments: selectedFiles.length ? modelFiles : undefined,
           pdfUploadSystemMessages: pdfUploadSystemMessages.length
@@ -485,6 +516,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
 
         if (!options?.preserveInputDraft) {
           deps.inputBox.value = "";
+          deps.onComposerDraftCleared?.();
           deps.persistDraftInput();
         }
         deps.retainPinnedImageState(item.id);
@@ -510,6 +542,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
 
       if (!options?.preserveInputDraft) {
         deps.inputBox.value = "";
+        deps.onComposerDraftCleared?.();
         deps.persistDraftInput();
       }
       deps.retainPinnedImageState(item.id);
@@ -523,26 +556,27 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         deps.updateSelectedTextPreviewPreservingScroll();
       }
 
-      // [webchat] Determine whether to send PDF and/or force a new chat
-      // (isWebChat already computed early from earlyProfile)
-      const webchatForceNewChat = isWebChat
-        ? (deps.consumeWebChatForceNewChatIntent?.() ?? false)
-        : false;
-      const webchatSendPdf = isWebChat
-        ? (deps.hasActivePdfFullTextPapers?.(item, allSelectedPaperContexts) ??
-            false) &&
-          (webchatForceNewChat ||
-            !(deps.hasUploadedPdfInCurrentWebChatConversation?.() ?? false))
-        : false;
-
-      const forcedSkillIds = deps.consumeForcedSkillIds?.();
+      const consumedForcedSkillIds = deps.consumeForcedSkillIds?.() || [];
+      const forcedSkillIds = Array.from(
+        new Set([
+          ...consumedForcedSkillIds,
+          ...(codexNativeSkillText.forcedSkillId
+            ? [codexNativeSkillText.forcedSkillId]
+            : []),
+        ]),
+      );
+      const questionForSend =
+        selectedProfile?.authMode === "codex_app_server" && forcedSkillIds[0]
+          ? prependNativeSkillMention(composedQuestion, forcedSkillIds[0])
+          : composedQuestion;
       if (shouldRetainClaudeRuntime) {
         await deps.retainClaudeRuntime?.(deps.body, item);
       }
       const sendTask = deps.sendQuestion({
         body: deps.body,
         item,
-        question: composedQuestion,
+        contextSource,
+        question: questionForSend,
         images,
         model: selectedProfile?.model,
         apiBase: selectedProfile?.apiBase,
@@ -567,16 +601,15 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         paperContexts: selectedPaperContexts,
         fullTextPaperContexts,
         selectedCollectionContexts,
+        selectedTagContexts,
         attachments: selectedFiles.length ? selectedFiles : undefined,
         modelAttachments: selectedFiles.length ? modelFiles : undefined,
         runtimeMode,
         pdfModePaperKeys: pdfModeKeySet.size > 0 ? pdfModeKeySet : undefined,
-        forcedSkillIds,
+        forcedSkillIds: forcedSkillIds.length ? forcedSkillIds : undefined,
         pdfUploadSystemMessages: pdfUploadSystemMessages.length
           ? pdfUploadSystemMessages
           : undefined,
-        webchatSendPdf,
-        webchatForceNewChat,
       });
       if (hasPaperComposeState) {
         deps.consumePaperModeState(item.id);
@@ -590,9 +623,6 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         }, 120);
       }
       await sendTask;
-      if (isWebChat && webchatSendPdf) {
-        deps.markWebChatPdfUploadedForCurrentConversation?.();
-      }
       deps.refreshGlobalHistoryHeader();
     } finally {
       deps.autoUnlockGlobalChat();

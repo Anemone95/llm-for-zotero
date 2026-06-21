@@ -2,13 +2,13 @@ import { assert } from "chai";
 import { createBuiltInToolRegistry } from "../src/agent/tools";
 import {
   BUILTIN_SKILL_FILES,
+  getSkillContextEligibility,
   getMatchedSkillIds,
   parseSkill,
   setUserSkills,
 } from "../src/agent/skills";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
-import { createWebSearchTool } from "../src/agent/tools/read/webSearch";
 import type { AgentToolContext } from "../src/agent/types";
 
 describe("semantic tool surface", function () {
@@ -27,6 +27,25 @@ describe("semantic tool surface", function () {
     currentAnswerText: "",
     modelName: "gpt-5.5",
   };
+
+  function createTestBuiltInRegistry() {
+    return createBuiltInToolRegistry({
+      zoteroGateway: {} as never,
+      pdfService: {} as never,
+      pdfPageService: {} as never,
+      retrievalService: {} as never,
+    });
+  }
+
+  function schemaProperties(toolName: string): Record<string, unknown> {
+    const registry = createTestBuiltInRegistry();
+    const tool = registry.getTool(toolName);
+    assert.exists(tool, `${toolName} should be registered`);
+    const schema = tool!.spec.inputSchema as {
+      properties?: Record<string, unknown>;
+    };
+    return schema.properties || {};
+  }
 
   it("keeps internal delegate tools out of model-visible listings", function () {
     const registry = new AgentToolRegistry();
@@ -69,13 +88,8 @@ describe("semantic tool surface", function () {
   });
 
   it("exposes the semantic built-in surface and hides legacy primitive names", function () {
-    const registry = createBuiltInToolRegistry({
-      zoteroGateway: {} as never,
-      pdfService: {} as never,
-      pdfPageService: {} as never,
-      retrievalService: {} as never,
-    });
-    const tools = registry.listTools();
+    const registry = createTestBuiltInRegistry();
+    const tools = registry.listToolsForRequest(baseContext.request);
     const names = tools.map((tool) => tool.name).sort();
 
     assert.deepEqual(names, [
@@ -85,6 +99,7 @@ describe("semantic tool surface", function () {
       "library_delete",
       "library_import",
       "library_read",
+      "library_retrieve",
       "library_search",
       "library_update",
       "literature_search",
@@ -92,8 +107,19 @@ describe("semantic tool surface", function () {
       "paper_read",
       "run_command",
       "undo_last_action",
-      "web_search",
       "zotero_script",
+    ]);
+    const literatureSearch = tools.find(
+      (tool) => tool.name === "literature_search",
+    );
+    const literatureProperties = (
+      literatureSearch?.inputSchema as {
+        properties?: Record<string, { enum?: string[] }>;
+      }
+    )?.properties;
+    assert.deepEqual(literatureProperties?.workflow?.enum, [
+      "answer",
+      "review",
     ]);
     for (const legacyName of [
       "query_library",
@@ -111,6 +137,7 @@ describe("semantic tool surface", function () {
         `${legacyName} remains internally callable`,
       );
     }
+    assert.isUndefined(registry.getTool("web_search"));
     for (const name of ["file_io", "run_command", "zotero_script"]) {
       assert.equal(
         tools.find((tool) => tool.name === name)?.tier,
@@ -118,6 +145,163 @@ describe("semantic tool surface", function () {
         `${name} should be advanced`,
       );
     }
+  });
+
+  it("does not expose loose top-level schemas for model-visible built-ins", function () {
+    const registry = createTestBuiltInRegistry();
+    const looseTools = registry
+      .listToolsForRequest(baseContext.request)
+      .flatMap((tool) => {
+        const schema = tool.inputSchema as { additionalProperties?: unknown };
+        return schema.additionalProperties === true ? [tool.name] : [];
+      });
+    assert.deepEqual(looseTools, []);
+  });
+
+  it("advertises delegate fields on semantic facade schemas", function () {
+    assert.containsAllKeys(schemaProperties("library_import"), [
+      "kind",
+      "identifiers",
+      "filePaths",
+      "targetCollectionId",
+      "collectionId",
+      "libraryID",
+    ]);
+    assert.containsAllKeys(schemaProperties("library_update"), [
+      "kind",
+      "action",
+      "itemIds",
+      "tags",
+      "assignments",
+      "targetCollectionId",
+      "targetCollectionName",
+      "collectionId",
+      "metadata",
+      "operations",
+      "itemId",
+      "paperContext",
+    ]);
+    assert.containsAllKeys(schemaProperties("library_delete"), [
+      "mode",
+      "itemIds",
+      "masterItemId",
+      "otherItemIds",
+    ]);
+  });
+
+  it("exposes batch metadata operations in the update_metadata schema", function () {
+    assert.containsAllKeys(schemaProperties("update_metadata"), [
+      "metadata",
+      "operations",
+      "paperContext",
+    ]);
+  });
+
+  it("normalizes bracketed array strings for identifier imports", function () {
+    const registry = createTestBuiltInRegistry();
+    const tool = registry.getTool("library_import");
+    assert.exists(tool);
+    const validation = tool!.validate({
+      kind: "identifiers",
+      identifiers: '["doi1","doi2",]',
+    });
+    assert.equal(validation.ok, true);
+    if (!validation.ok) return;
+    assert.equal(validation.value.delegateName, "import_identifiers");
+    assert.deepEqual(validation.value.delegateInput.operation.identifiers, [
+      "doi1",
+      "doi2",
+    ]);
+  });
+
+  it("keeps real array identifier imports valid", function () {
+    const registry = createTestBuiltInRegistry();
+    const tool = registry.getTool("library_import");
+    assert.exists(tool);
+    const validation = tool!.validate({
+      kind: "identifiers",
+      identifiers: ["doi1", "doi2"],
+    });
+    assert.equal(validation.ok, true);
+    if (!validation.ok) return;
+    assert.deepEqual(validation.value.delegateInput.operation.identifiers, [
+      "doi1",
+      "doi2",
+    ]);
+  });
+
+  it("rejects non-bracketed string arrays for identifier imports", function () {
+    const registry = createTestBuiltInRegistry();
+    const tool = registry.getTool("library_import");
+    assert.exists(tool);
+    for (const identifiers of ["doi1", "doi1,doi2"]) {
+      const validation = tool!.validate({
+        kind: "identifiers",
+        identifiers,
+      });
+      assert.equal(validation.ok, false, identifiers);
+    }
+  });
+
+  it("normalizes bracketed array strings for library delete and update", function () {
+    const registry = createTestBuiltInRegistry();
+    const deleteTool = registry.getTool("library_delete");
+    const updateTool = registry.getTool("library_update");
+    assert.exists(deleteTool);
+    assert.exists(updateTool);
+
+    const deleteValidation = deleteTool!.validate({
+      mode: "trash",
+      itemIds: "[101,102,]",
+    });
+    assert.equal(deleteValidation.ok, true);
+    if (!deleteValidation.ok) return;
+    assert.deepEqual(
+      deleteValidation.value.delegateInput.operation.itemIds,
+      [101, 102],
+    );
+
+    const updateValidation = updateTool!.validate({
+      kind: "tags",
+      action: "add",
+      itemIds: "[101,102,]",
+      tags: '["ml","vision",]',
+    });
+    assert.equal(updateValidation.ok, true);
+    if (!updateValidation.ok) return;
+    assert.deepEqual(
+      updateValidation.value.delegateInput.operation.itemIds,
+      [101, 102],
+    );
+    assert.deepEqual(updateValidation.value.delegateInput.operation.tags, [
+      "ml",
+      "vision",
+    ]);
+  });
+
+  it("rejects non-bracketed string arrays for library delete and update", function () {
+    const registry = createTestBuiltInRegistry();
+    const deleteTool = registry.getTool("library_delete");
+    const updateTool = registry.getTool("library_update");
+    assert.exists(deleteTool);
+    assert.exists(updateTool);
+
+    assert.equal(
+      deleteTool!.validate({
+        mode: "trash",
+        itemIds: "101,102",
+      }).ok,
+      false,
+    );
+    assert.equal(
+      updateTool!.validate({
+        kind: "tags",
+        action: "add",
+        itemIds: [101],
+        tags: "ml,vision",
+      }).ok,
+      false,
+    );
   });
 
   it("paper_read fails loudly for invalid explicit targets", async function () {
@@ -356,74 +540,10 @@ describe("semantic tool surface", function () {
     assert.equal(result?.contentStatus, "no_extractable_pdf_text");
     assert.include(String(result?.text || ""), "This abstract is enough");
     assert.equal(result?.sourceLabel, "(Charest, 2014)");
-  });
-
-  it("paper_read overview keeps MinerU failure warning while using Zotero metadata fallback", async function () {
-    const globalScope = globalThis as typeof globalThis & {
-      IOUtils?: { read?: unknown };
-    };
-    const originalIOUtils = globalScope.IOUtils;
-    const paperContext = {
-      itemId: 11,
-      contextItemId: 22,
-      title: "Metadata After MinerU Failure",
-      firstCreator: "Charest",
-      year: "2014",
-      mineruCacheDir: "/tmp/missing-mineru-paper",
-    };
-    globalScope.IOUtils = {
-      read: async () => {
-        throw new Error("full.md disappeared");
-      },
-    };
-    try {
-      const tool = createPaperReadTool(
-        {
-          getOverviewExcerpt: async () => {
-            throw new Error("PDF text extraction failed");
-          },
-        } as never,
-        {} as never,
-        {} as never,
-        {
-          listPaperContexts: () => [paperContext],
-          resolvePaperContextTarget: () => paperContext,
-          resolveMetadataItem: () => ({ id: 11 }),
-          getEditableArticleMetadata: () => ({
-            itemId: 11,
-            itemType: "journalArticle",
-            title: "Metadata After MinerU Failure",
-            fields: {
-              title: "Metadata After MinerU Failure",
-              abstractNote: "Abstract fallback should still be available.",
-            },
-            creators: [
-              {
-                creatorType: "author",
-                firstName: "Iva",
-                lastName: "Charest",
-              },
-            ],
-          }),
-        } as never,
-      );
-      const validated = tool.validate({ mode: "overview" });
-      assert.equal(validated.ok, true);
-      if (!validated.ok) return;
-      const output = await tool.execute(validated.value, baseContext);
-      const result = (output as { results?: Array<Record<string, unknown>> })
-        .results?.[0];
-      assert.equal(result?.backend, "zotero_metadata");
-      assert.include(String(result?.text || ""), "Abstract fallback");
-      assert.include(String(result?.warning || ""), "full.md disappeared");
-      assert.include(String(result?.warning || ""), "PDF text extraction failed");
-    } finally {
-      if (originalIOUtils === undefined) {
-        delete globalScope.IOUtils;
-      } else {
-        globalScope.IOUtils = originalIOUtils;
-      }
-    }
+    assert.lengthOf(
+      (output as { quoteCitations?: unknown[] }).quoteCitations || [],
+      0,
+    );
   });
 
   it("paper_read overview labels metadata fallback when no PDF is attached", async function () {
@@ -478,51 +598,152 @@ describe("semantic tool surface", function () {
     assert.equal(result?.sourceLabel, "(Charest, 2014)");
   });
 
-  it("paper_read MinerU overview uses citation-compatible source labels", async function () {
-    const globalScope = globalThis as typeof globalThis & {
-      IOUtils?: { read?: unknown };
-    };
-    const originalIOUtils = globalScope.IOUtils;
+  it("paper_read visual renders explicit PDF pages", async function () {
     const paperContext = {
       itemId: 11,
       contextItemId: 22,
-      title: "MinerU Paper",
+      title: "PDF Figure Paper",
       firstCreator: "Miller",
       year: "2025",
-      mineruCacheDir: "/tmp/mineru-paper",
     };
-    globalScope.IOUtils = {
-      read: async () =>
-        new TextEncoder().encode(
-          "# MinerU Paper\n\nAbstract text.\n\n# Discussion\n\nDiscussion text.",
-        ),
+    let requestedPages: number[] = [];
+    const tool = createPaperReadTool(
+      {} as never,
+      {} as never,
+      {
+        preparePagesForModel: async ({ pages }: { pages: number[] }) => {
+          requestedPages = pages;
+          return {
+            target: {
+              source: "library",
+              title: "PDF Figure Paper",
+              paperContext,
+              contextItemId: 22,
+              itemId: 11,
+            },
+            pages: [
+              {
+                pageIndex: 3,
+                pageLabel: "4",
+                imagePath: "/tmp/page-4.png",
+                contentHash: "hash-page-4",
+              },
+            ],
+            artifacts: [
+              {
+                kind: "image" as const,
+                mimeType: "image/png",
+                storedPath: "/tmp/page-4.png",
+                pageIndex: 3,
+                pageLabel: "4",
+              },
+            ],
+            pageTexts: { 3: "Rendered page text" },
+          };
+        },
+      } as never,
+      {
+        listPaperContexts: () => [paperContext],
+        resolvePaperContextTarget: () => paperContext,
+      } as never,
+    );
+    const validated = tool.validate({
+      mode: "visual",
+      target: { paperContext },
+      pages: [4],
+      query: "Render page 4 from the raw PDF",
+    });
+    assert.equal(validated.ok, true);
+    if (!validated.ok) return;
+    const output = (await tool.execute(validated.value, {
+      ...baseContext,
+      request: {
+        ...baseContext.request,
+        userText: "Render page 4 from the raw PDF",
+        selectedPaperContexts: [paperContext],
+      },
+    })) as {
+      content?: { pageCount?: number };
+      artifacts?: unknown[];
     };
-    try {
-      const tool = createPaperReadTool(
-        {} as never,
-        {} as never,
-        {} as never,
-        {
-          listPaperContexts: () => [paperContext],
-          resolvePaperContextTarget: () => paperContext,
-        } as never,
-      );
-      const validated = tool.validate({ mode: "overview" });
-      assert.equal(validated.ok, true);
-      if (!validated.ok) return;
-      const output = await tool.execute(validated.value, baseContext);
-      const result = (output as { results?: Array<Record<string, unknown>> })
-        .results?.[0];
-      assert.equal(result?.backend, "mineru");
-      assert.equal(result?.citationLabel, "Miller, 2025");
-      assert.equal(result?.sourceLabel, "(Miller, 2025)");
-    } finally {
-      if (originalIOUtils === undefined) {
-        delete globalScope.IOUtils;
-      } else {
-        globalScope.IOUtils = originalIOUtils;
-      }
-    }
+
+    assert.deepEqual(requestedPages, [3]);
+    assert.equal(output.content?.pageCount, 1);
+    assert.lengthOf(output.artifacts || [], 1);
+  });
+
+  it("paper_read visual renders PDF pages when MinerU cache is absent", async function () {
+    const paperContext = {
+      itemId: 11,
+      contextItemId: 22,
+      title: "PDF Figure Paper",
+      firstCreator: "Miller",
+      year: "2025",
+    };
+    let requestedPages: number[] = [];
+    const tool = createPaperReadTool(
+      {} as never,
+      {} as never,
+      {
+        preparePagesForModel: async ({ pages }: { pages: number[] }) => {
+          requestedPages = pages;
+          return {
+            target: {
+              source: "library",
+              title: "PDF Figure Paper",
+              paperContext,
+              contextItemId: 22,
+              itemId: 11,
+            },
+            pages: [
+              {
+                pageIndex: 1,
+                pageLabel: "2",
+                imagePath: "/tmp/page-2.png",
+                contentHash: "hash-page-2",
+              },
+            ],
+            artifacts: [
+              {
+                kind: "image" as const,
+                mimeType: "image/png",
+                storedPath: "/tmp/page-2.png",
+                pageIndex: 1,
+                pageLabel: "2",
+              },
+            ],
+            pageTexts: { 1: "Rendered page text" },
+          };
+        },
+      } as never,
+      {
+        listPaperContexts: () => [paperContext],
+        resolvePaperContextTarget: () => paperContext,
+      } as never,
+    );
+    const validated = tool.validate({
+      mode: "visual",
+      target: { paperContext },
+      pages: [2],
+      query: "Explain Figure 1",
+    });
+    assert.equal(validated.ok, true);
+    if (!validated.ok) return;
+    const output = (await tool.execute(validated.value, {
+      ...baseContext,
+      request: {
+        ...baseContext.request,
+        userText: "Explain Figure 1",
+        selectedPaperContexts: [paperContext],
+      },
+    })) as {
+      content?: { pageCount?: number };
+      artifacts?: unknown[];
+    };
+
+    assert.deepEqual(requestedPages, [1]);
+    assert.equal(output.content?.pageCount, 1);
+    assert.lengthOf(output.artifacts || [], 1);
   });
 
   it("paper_read overview dedupes default paper contexts and traces the source label", async function () {
@@ -579,6 +800,67 @@ describe("semantic tool surface", function () {
         },
       }),
       "Read paper overviews from 2 sources",
+    );
+  });
+
+  it("paper_read overview returns quote anchors for extractable paper text", async function () {
+    const paperContext = {
+      itemId: 11,
+      contextItemId: 22,
+      title: "Recurrent Attention Paper",
+      firstCreator: "Mnih et al.",
+      year: "2014",
+    };
+    const tool = createPaperReadTool(
+      {
+        getOverviewExcerpt: async () => ({
+          backend: "raw_pdf_text",
+          text:
+            "[chunk 0]\nRecurrent models reduce computation by selecting only a sequence of image locations.\n\n" +
+            "[chunk 4]\nThe agent learns where to attend using reinforcement learning from task reward.",
+          citationLabel: "Mnih et al., 2014",
+          sourceLabel: "(Mnih et al., 2014)",
+          paperContext,
+        }),
+      } as never,
+      {} as never,
+      {} as never,
+      {
+        listPaperContexts: () => [paperContext],
+        resolvePaperContextTarget: () => paperContext,
+      } as never,
+    );
+    const validated = tool.validate({ mode: "overview" });
+    assert.equal(validated.ok, true);
+    if (!validated.ok) return;
+    const output = (await tool.execute(validated.value, baseContext)) as {
+      results?: Array<{
+        quoteCitationIds?: string[];
+        quoteAnchors?: string[];
+      }>;
+      quoteCitations?: Array<{
+        id: string;
+        quoteText: string;
+        citationLabel: string;
+      }>;
+    };
+
+    assert.lengthOf(output.quoteCitations || [], 2);
+    assert.equal(
+      output.quoteCitations?.[0]?.quoteText,
+      "Recurrent models reduce computation by selecting only a sequence of image locations.",
+    );
+    assert.equal(
+      output.quoteCitations?.[0]?.citationLabel,
+      "(Mnih et al., 2014)",
+    );
+    assert.deepEqual(
+      output.results?.[0]?.quoteCitationIds,
+      output.quoteCitations?.map((citation) => citation.id),
+    );
+    assert.deepEqual(
+      output.results?.[0]?.quoteAnchors,
+      output.quoteCitations?.map((citation) => `[[quote:${citation.id}]]`),
     );
   });
 
@@ -642,7 +924,11 @@ describe("semantic tool surface", function () {
     if (!validated.ok) return;
     const output = (await tool.execute(validated.value, baseContext)) as {
       results?: unknown[];
-      quoteCitations?: Array<{ id: string; quoteText: string; citationLabel: string }>;
+      quoteCitations?: Array<{
+        id: string;
+        quoteText: string;
+        citationLabel: string;
+      }>;
       papers?: Array<{
         status?: string;
         sourceLabel?: string;
@@ -666,7 +952,10 @@ describe("semantic tool surface", function () {
       "Second method passage.",
     );
     assert.lengthOf(output.quoteCitations || [], 2);
-    assert.equal(output.quoteCitations?.[0]?.quoteText, "First method passage.");
+    assert.equal(
+      output.quoteCitations?.[0]?.quoteText,
+      "First method passage.",
+    );
     assert.equal(output.quoteCitations?.[0]?.citationLabel, "(Huys, 2016)");
     assert.equal(
       output.papers?.[0]?.passages?.[0]?.quoteCitationId,
@@ -694,7 +983,9 @@ describe("semantic tool surface", function () {
     const tool = createPaperReadTool(
       {
         ensurePaperContext: async () => {
-          throw new Error("semantic retrieval should not prepare paper context");
+          throw new Error(
+            "semantic retrieval should not prepare paper context",
+          );
         },
       } as never,
       {
@@ -782,7 +1073,9 @@ describe("semantic tool surface", function () {
       {} as never,
       {
         retrieveEvidence: async () => {
-          throw new Error("semantic retrieval should not run for explicit pages");
+          throw new Error(
+            "semantic retrieval should not run for explicit pages",
+          );
         },
       } as never,
       {
@@ -1048,7 +1341,16 @@ describe("semantic tool surface", function () {
 
   it("compare-papers guidance prefers one targeted batched read for method comparisons", function () {
     const raw = BUILTIN_SKILL_FILES["compare-papers.md"];
+    assert.include(raw, "contexts: paper-set,library-corpus");
     assert.include(raw, "targeted first when the dimension is known");
+    assert.include(
+      raw,
+      "A selected Zotero collection/folder is also a valid comparison corpus",
+    );
+    assert.include(
+      raw,
+      "library_retrieve({ query:'methods methodology method section'",
+    );
     assert.include(
       raw,
       "paper_read({ mode:'targeted', query:'methods methodology method section', targets:[...] })",
@@ -1064,57 +1366,75 @@ describe("semantic tool surface", function () {
     );
   });
 
-  it("web_search returns cited URL results without fetching result pages", async function () {
-    const globalScope = globalThis as typeof globalThis & {
-      Zotero?: { HTTP?: { request?: unknown } };
-    };
-    const originalZotero = globalScope.Zotero;
-    let requestedUrl = "";
-    globalScope.Zotero = {
-      HTTP: {
-        request: async (_method: string, url: string) => {
-          requestedUrl = url;
-          return {
-            responseText: `
-              <html><body>
-                <div class="result">
-                  <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdocs">Example Docs</a>
-                  <a class="result__snippet">Current documentation snippet.</a>
-                </div>
-              </body></html>
-            `,
-          };
-        },
-      },
-    };
-    try {
-      const tool = createWebSearchTool();
-      const validated = tool.validate({
-        query: "example docs",
-        mode: "docs",
-        limit: 3,
-      });
-      assert.equal(validated.ok, true);
-      if (!validated.ok) return;
-      const output = await tool.execute(validated.value, baseContext);
-      const content = output as {
-        query?: string;
-        mode?: string;
-        results?: Array<{ title?: string; url?: string; source?: string }>;
-      };
-      assert.include(requestedUrl, "html.duckduckgo.com");
-      assert.equal(content.query, "example docs");
-      assert.equal(content.mode, "docs");
-      assert.deepEqual(content.results, [
-        {
-          title: "Example Docs",
-          url: "https://example.com/docs",
-          snippet: "Current documentation snippet.",
-          source: "example.com",
-        },
-      ]);
-    } finally {
-      globalScope.Zotero = originalZotero;
-    }
+  it("matches compare-papers for collection-scoped comparison requests", function () {
+    setUserSkills([parseSkill(BUILTIN_SKILL_FILES["compare-papers.md"])]);
+
+    assert.include(
+      getMatchedSkillIds({
+        userText: "compare the methods of all papers in this folder",
+        selectedCollectionContexts: [
+          { collectionId: 4, name: "Computational_Psychiatry", libraryID: 1 },
+        ],
+      }),
+      "compare-papers",
+    );
+  });
+
+  it("allows compare-papers slash selection for selected collections", function () {
+    const skill = parseSkill(BUILTIN_SKILL_FILES["compare-papers.md"]);
+
+    assert.deepEqual(
+      getSkillContextEligibility(skill, {
+        userText: "",
+        selectedCollectionContexts: [
+          { collectionId: 4, name: "Computational_Psychiatry", libraryID: 1 },
+        ],
+      }),
+      { eligible: true },
+    );
+  });
+
+  it("matches evidence-based-qa for collection-scoped evidence requests", function () {
+    setUserSkills([parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"])]);
+
+    assert.include(
+      getMatchedSkillIds({
+        userText: "find evidence in these papers for this claim",
+        selectedCollectionContexts: [
+          { collectionId: 4, name: "Computational_Psychiatry", libraryID: 1 },
+        ],
+      }),
+      "evidence-based-qa",
+    );
+  });
+
+  it("allows evidence-based-qa slash selection for selected collections", function () {
+    const skill = parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"]);
+
+    assert.deepEqual(
+      getSkillContextEligibility(skill, {
+        userText: "",
+        selectedCollectionContexts: [
+          { collectionId: 4, name: "Computational_Psychiatry", libraryID: 1 },
+        ],
+      }),
+      { eligible: true },
+    );
+  });
+
+  it("keeps multi-context skills selectable without attached context", function () {
+    const evidenceSkill = parseSkill(
+      BUILTIN_SKILL_FILES["evidence-based-qa.md"],
+    );
+    const compareSkill = parseSkill(BUILTIN_SKILL_FILES["compare-papers.md"]);
+
+    assert.deepEqual(
+      getSkillContextEligibility(evidenceSkill, { userText: "" }),
+      { eligible: true },
+    );
+    assert.deepEqual(
+      getSkillContextEligibility(compareSkill, { userText: "" }),
+      { eligible: true },
+    );
   });
 });

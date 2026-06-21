@@ -1,4 +1,4 @@
-import type { PaperContextRef } from "../../shared/types";
+import type { PaperContextRef, TagContextRef } from "../../shared/types";
 import type { AgentRuntimeRequest } from "../types";
 import type { AgentCacheEvidenceActivity } from "./cacheManagement";
 
@@ -6,9 +6,9 @@ export type AgentCoverageSourceKind =
   | "zotero_metadata"
   | "library_read"
   | "zotero_fulltext"
-  | "mineru"
   | "embedding_retrieval"
   | "pdf_visual"
+  | "attachment_text"
   | "note"
   | "annotation"
   | "web_literature";
@@ -223,6 +223,15 @@ function collectionResourceKey(value: {
   if (!collectionId) return "";
   const libraryID = normalizePositiveInt(value.libraryID) || 0;
   return `collection:${libraryID}:${collectionId}`;
+}
+
+function tagResourceKey(value: Partial<TagContextRef>): string {
+  const libraryID = normalizePositiveInt(value.libraryID) || 0;
+  if (value.scope) return `tag:${libraryID}:scope:${value.scope}`;
+  const name = normalizeText(value.normalizedName || value.name, 180)
+    .toLowerCase()
+    .trim();
+  return name ? `tag:${libraryID}:${name}` : "";
 }
 
 function libraryResourceKey(libraryID: unknown): string {
@@ -475,8 +484,17 @@ function collectRequestResourceKeys(request: AgentRuntimeRequest): Set<string> {
     add(collectionResourceKey(collection));
     add(libraryResourceKey(collection.libraryID));
   }
+  for (const tag of request.selectedTagContexts || []) {
+    add(tagResourceKey(tag));
+    add(libraryResourceKey(tag.libraryID));
+  }
   for (const attachment of request.attachments || []) {
     add(normalizeText(attachment.id, 180) ? `attachment:${attachment.id}` : "");
+  }
+  for (const attachment of request.availableAttachmentResources || []) {
+    add(itemResourceKey(attachment.parentItemId));
+    add(attachmentResourceKey(attachment.contextItemId));
+    add(`paper:${attachment.parentItemId}:${attachment.contextItemId}`);
   }
   return keys;
 }
@@ -524,21 +542,18 @@ function paperContextFromRecord(value: unknown): Partial<PaperContextRef> {
       normalizePositiveInt(record.contextItemId) ||
       normalizePositiveInt(nested.contextItemId),
     title: normalizeText(record.title, 160) || normalizeText(nested.title, 160),
-    mineruCacheDir:
-      normalizeText(record.mineruCacheDir, 1024) ||
-      normalizeText(nested.mineruCacheDir, 1024),
   };
 }
 
 function sourceKindFromPaperBackend(value: unknown): AgentCoverageSourceKind {
   const normalized = normalizeText(value, 80);
-  if (normalized === "mineru" || normalized === "mineru_file") return "mineru";
   if (normalized === "zotero_metadata") return "zotero_metadata";
   return "zotero_fulltext";
 }
 
 function sourceKindFromFilePath(filePath: string): AgentCoverageSourceKind {
-  return /mineru/i.test(filePath) ? "mineru" : "library_read";
+  void filePath;
+  return "library_read";
 }
 
 function buildPaperReadCoverageEntries(
@@ -589,10 +604,7 @@ function buildPaperReadCoverageEntries(
       const entry = createCoverageEntry({
         resourceKey: paperResourceKey(paper),
         resourceLabel: getPaperLabel(paper),
-        sourceKind:
-          sourceKindFromPaperBackend(record.sourceKind) === "mineru"
-            ? "mineru"
-            : "embedding_retrieval",
+        sourceKind: "embedding_retrieval",
         topic,
         granularity: "passage",
         coverage: passages.length ? "targeted" : "partial",
@@ -711,19 +723,7 @@ function buildFileIoCoverageEntries(
   const sourceKind = sourceKindFromFilePath(filePath);
   const normalizedPath = filePath.replace(/\\/g, "/");
   const fileName = normalizedPath.split("/").pop() || normalizedPath;
-  const matchingPaper = [
-    ...(activity.request.selectedPaperContexts || []),
-    ...(activity.request.fullTextPaperContexts || []),
-    ...(activity.request.pinnedPaperContexts || []),
-  ].find((paper) => {
-    const cacheDir = normalizeText(paper.mineruCacheDir, 1024).replace(
-      /\\/g,
-      "/",
-    );
-    return (
-      cacheDir && normalizedPath.startsWith(`${cacheDir.replace(/\/+$/g, "")}/`)
-    );
-  });
+  const matchingPaper = undefined;
   const resourceKey = matchingPaper
     ? paperResourceKey(matchingPaper)
     : normalizeText(input.attachmentId, 120)
@@ -738,13 +738,50 @@ function buildFileIoCoverageEntries(
     topic: normalizeTopic(input.query, activity.request.userText),
     granularity: isFigure ? "figure" : isManifest ? "metadata" : "section",
     coverage: isManifest ? "partial" : "targeted",
-    confidence: sourceKind === "mineru" ? "high" : "medium",
+    confidence: "medium",
     contentHash: activityContentHash(activity),
     toolName: activity.toolName,
     evidenceRefs: [
       evidenceRefFor(activity, { filePath, content: activity.content }),
     ],
-    durable: Boolean(resourceKey && sourceKind === "mineru"),
+    durable: false,
+    updatedAt: activity.timestamp,
+  });
+  return entry ? [entry] : [];
+}
+
+function buildReadAttachmentCoverageEntries(
+  activity: AgentCacheEvidenceActivity,
+): AgentCoverageEntry[] {
+  const input = normalizeRecord(activity.input);
+  const targetInput = normalizeRecord(input.target);
+  const content = normalizeRecord(activity.content);
+  const paper = paperContextFromRecord(content.paperContext);
+  const attachmentId =
+    normalizePositiveInt(content.attachmentId) ||
+    normalizePositiveInt(targetInput.contextItemId) ||
+    normalizePositiveInt(input.contextItemId);
+  const resourceKey =
+    paperResourceKey(paper) || attachmentResourceKey(attachmentId);
+  const text = normalizeText(content.textContent, 1200);
+  const sourceLabel = normalizeText(content.sourceLabel, 160);
+  const title =
+    normalizeText(content.title, 120) ||
+    normalizeText(content.attachmentTitle, 120);
+  const entry = createCoverageEntry({
+    resourceKey,
+    resourceLabel: sourceLabel || title || getPaperLabel(paper),
+    sourceKind: "attachment_text",
+    topic: normalizeTopic(input.query, activity.request.userText),
+    granularity: "attachment",
+    coverage: text ? "targeted" : "partial",
+    confidence: text ? "high" : "medium",
+    contentHash: text
+      ? activityContentHash(activity, { resourceKey, text })
+      : undefined,
+    toolName: activity.toolName,
+    evidenceRefs: [evidenceRefFor(activity, { attachmentId, title })],
+    durable: Boolean(resourceKey && text),
     updatedAt: activity.timestamp,
   });
   return entry ? [entry] : [];
@@ -888,6 +925,147 @@ function buildLibraryReadCoverageEntries(
     .filter((entry): entry is AgentCoverageEntry => Boolean(entry));
 }
 
+function sourceKindFromLibraryRetrieveSnippet(
+  snippet: Record<string, unknown>,
+): AgentCoverageSourceKind {
+  const matchMethod = normalizeText(snippet.matchMethod, 40);
+  if (matchMethod === "semantic") return "embedding_retrieval";
+  const sourceKind = normalizeText(snippet.sourceKind, 40);
+  if (sourceKind === "note") return "note";
+  if (sourceKind === "attachment") return "attachment_text";
+  if (sourceKind === "metadata" || sourceKind === "abstract") {
+    return "zotero_metadata";
+  }
+  return "zotero_fulltext";
+}
+
+function buildLibraryRetrieveCoverageEntries(
+  activity: AgentCacheEvidenceActivity,
+): AgentCoverageEntry[] {
+  const input = normalizeRecord(activity.input);
+  const content = normalizeRecord(activity.content);
+  const pool = normalizeRecord(content.resourcePool);
+  const scope = normalizeRecord(pool.scope);
+  const queryCoverage = normalizeRecord(pool.queryCoverage);
+  const snippets = Array.isArray(content.snippets) ? content.snippets : [];
+  const topic = normalizeTopic(input.query, activity.request.userText);
+  const collectionIds = Array.isArray(scope.collectionIds)
+    ? scope.collectionIds
+    : [];
+  const firstCollectionId = collectionIds
+    .map((value) => normalizePositiveInt(value))
+    .find(Boolean);
+  const tagNames = Array.isArray(scope.tagNames) ? scope.tagNames : [];
+  const tagScopes = Array.isArray(scope.tagScopes) ? scope.tagScopes : [];
+  const libraryID =
+    normalizePositiveInt(scope.libraryID) || activity.request.libraryID;
+  const firstTagKey = tagScopes.length
+    ? tagResourceKey({ libraryID, scope: tagScopes[0] })
+    : tagNames.length
+      ? tagResourceKey({ libraryID, name: normalizeText(tagNames[0], 180) })
+      : "";
+  const resourceKey =
+    (normalizeText(pool.type, 40) === "collection" ||
+      normalizeText(pool.type, 40) === "mixed") &&
+    firstCollectionId
+      ? collectionResourceKey({ collectionId: firstCollectionId, libraryID })
+      : (normalizeText(pool.type, 40) === "tag" ||
+            normalizeText(pool.type, 40) === "mixed") &&
+          firstTagKey
+        ? firstTagKey
+      : libraryResourceKey(libraryID);
+  const entries: AgentCoverageEntry[] = [];
+  const scopeEntry = createCoverageEntry({
+    resourceKey,
+    resourceLabel:
+      normalizeText(pool.name, 120) ||
+      (normalizeText(pool.type, 40) === "collection"
+        ? "collection resource pool"
+        : normalizeText(pool.type, 40) === "tag"
+          ? "tag resource pool"
+          : normalizeText(pool.type, 40) === "mixed"
+            ? "mixed resource pool"
+        : "library resource pool"),
+    sourceKind: "zotero_metadata",
+    topic,
+    granularity: "scope",
+    coverage: normalizePositiveInt(queryCoverage.indexedTextScanned)
+      ? "broad"
+      : normalizePositiveInt(queryCoverage.snippetPapersExpanded) ||
+          normalizePositiveInt(queryCoverage.fullTextSearched)
+        ? "broad"
+        : "listed",
+    confidence: "high",
+    contentHash: activityContentHash(activity, {
+      scope,
+      totalItems: pool.totalItems,
+      queryCoverage,
+      depth: content.depth,
+      methodsUsed: content.methodsUsed,
+    }),
+    toolName: activity.toolName,
+    evidenceRefs: [
+      evidenceRefFor(activity, {
+        scope,
+        queryCoverage,
+        depth: content.depth,
+      }),
+    ],
+    durable: Boolean(resourceKey),
+    updatedAt: activity.timestamp,
+  });
+  if (scopeEntry) entries.push(scopeEntry);
+
+  const byResource = new Map<
+    string,
+    {
+      paper: Partial<PaperContextRef>;
+      rows: Record<string, unknown>[];
+    }
+  >();
+  for (const rawSnippet of snippets) {
+    const snippet = normalizeRecord(rawSnippet);
+    const itemId = normalizePositiveInt(snippet.itemId);
+    const contextItemId = normalizePositiveInt(snippet.contextItemId);
+    const paper = {
+      itemId,
+      contextItemId,
+      title: normalizeText(snippet.title, 160),
+    };
+    const resource = paperResourceKey(paper);
+    if (!resource) continue;
+    let group = byResource.get(resource);
+    if (!group) {
+      group = { paper, rows: [] };
+      byResource.set(resource, group);
+    }
+    group.rows.push(snippet);
+  }
+  for (const { paper, rows } of byResource.values()) {
+    const first = rows[0] || {};
+    const granularity: AgentCoverageGranularity =
+      normalizeText(first.sourceKind, 40) === "abstract"
+        ? "abstract"
+        : "passage";
+    const entry = createCoverageEntry({
+      resourceKey: paperResourceKey(paper),
+      resourceLabel: getPaperLabel(paper),
+      sourceKind: sourceKindFromLibraryRetrieveSnippet(first),
+      topic,
+      granularity,
+      coverage: rows.length ? "targeted" : "partial",
+      confidence: rows.length ? "high" : "medium",
+      contentHash: activityContentHash(activity, rows.slice(0, 4)),
+      toolName: activity.toolName,
+      evidenceRefs: [evidenceRefFor(activity, rows.slice(0, 4))],
+      durable: true,
+      updatedAt: activity.timestamp,
+    });
+    if (entry) entries.push(entry);
+  }
+  return entries;
+}
+
 export function buildAgentCoverageEntriesForActivity(
   activity: AgentCacheEvidenceActivity,
 ): AgentCoverageEntry[] {
@@ -906,6 +1084,9 @@ export function buildAgentCoverageEntriesForActivity(
   if (activity.toolName === "file_io") {
     return buildFileIoCoverageEntries(activity);
   }
+  if (activity.toolName === "read_attachment") {
+    return buildReadAttachmentCoverageEntries(activity);
+  }
   if (
     activity.toolName === "library_search" ||
     activity.toolName === "query_library"
@@ -917,6 +1098,9 @@ export function buildAgentCoverageEntriesForActivity(
     activity.toolName === "read_library"
   ) {
     return buildLibraryReadCoverageEntries(activity);
+  }
+  if (activity.toolName === "library_retrieve") {
+    return buildLibraryRetrieveCoverageEntries(activity);
   }
   return [];
 }

@@ -4,6 +4,7 @@ import { config } from "../../package.json";
 import {
   DEFAULT_CODEX_RUNTIME_MODEL,
   CODEX_REASONING_OPTIONS,
+  getCodexAllocatedConversationKeyRange,
   getCodexGlobalConversationKeyRange,
   getCodexPaperConversationKeyRange,
   getCodexProfileSignature,
@@ -16,6 +17,7 @@ export type CodexNativeSkillRoutingMode =
   | "hybrid"
   | "deterministic"
   | "classifier";
+export type CodexNativeSkillMode = "native" | "legacy" | "off";
 
 type ZoteroPrefsAPI = {
   get?: (key: string, global?: boolean) => unknown;
@@ -153,6 +155,14 @@ export function setCodexZoteroMcpToolsEnabled(enabled: boolean): void {
   setPref("codexAppServerZoteroMcpToolsEnabled", Boolean(enabled));
 }
 
+export function isNativeZoteroMcpToolsEnabled(): boolean {
+  return isCodexZoteroMcpToolsEnabled();
+}
+
+export function setNativeZoteroMcpToolsEnabled(enabled: boolean): void {
+  setCodexZoteroMcpToolsEnabled(enabled);
+}
+
 export function getCodexNativeSkillRoutingModePref(): CodexNativeSkillRoutingMode {
   const raw = getStringPref("codexNativeSkillRoutingMode").trim().toLowerCase();
   if (raw === "deterministic" || raw === "classifier" || raw === "hybrid") {
@@ -168,6 +178,17 @@ export function setCodexNativeSkillRoutingModePref(
     return;
   }
   setPref("codexNativeSkillRoutingMode", mode);
+}
+
+export function getCodexNativeSkillModePref(): CodexNativeSkillMode {
+  const raw = getStringPref("codexNativeSkillMode").trim().toLowerCase();
+  if (raw === "legacy" || raw === "off") return raw;
+  return "native";
+}
+
+export function setCodexNativeSkillModePref(mode: CodexNativeSkillMode): void {
+  if (mode !== "native" && mode !== "legacy" && mode !== "off") return;
+  setPref("codexNativeSkillMode", mode);
 }
 
 export function getLastUsedCodexConversationMode(
@@ -218,6 +239,15 @@ export function isConversationKeyInRange(
   return value >= range.start && value < range.endExclusive;
 }
 
+function isConversationKeyInAllocatedRange(
+  value: number,
+  kind: "global" | "paper",
+): boolean {
+  if (!Number.isFinite(value) || value <= 0) return false;
+  const range = getCodexAllocatedConversationKeyRange(kind);
+  return value >= range.start && value < range.endExclusive;
+}
+
 export function getLastUsedCodexGlobalConversationKey(
   libraryID: number,
 ): number | null {
@@ -234,6 +264,7 @@ export function setLastUsedCodexGlobalConversationKey(
 ): void {
   if (!Number.isFinite(libraryID) || libraryID <= 0) return;
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
+  if (!isConversationKeyInRange(conversationKey, "global")) return;
   const map = getJsonPref("codexAppServerGlobalConversationMap");
   map[buildGlobalConversationMapKey(libraryID)] = Math.floor(conversationKey);
   setJsonPref("codexAppServerGlobalConversationMap", map);
@@ -266,6 +297,7 @@ export function setLastUsedCodexPaperConversationKey(
   if (!Number.isFinite(libraryID) || libraryID <= 0) return;
   if (!Number.isFinite(paperItemID) || paperItemID <= 0) return;
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
+  if (!isConversationKeyInRange(conversationKey, "paper")) return;
   const map = getJsonPref("codexAppServerPaperConversationMap");
   map[buildPaperConversationMapKey(libraryID, paperItemID)] = Math.floor(conversationKey);
   setJsonPref("codexAppServerPaperConversationMap", map);
@@ -292,18 +324,21 @@ function getScopedLegacyAllocatedConversationKey(kind: "global" | "paper"): numb
       ? "codexAppServerLastAllocatedGlobalConversationKey"
       : "codexAppServerLastAllocatedPaperConversationKey",
   );
-  return value && isConversationKeyInRange(value, kind) ? value : null;
+  return value && isConversationKeyInAllocatedRange(value, kind) ? value : null;
 }
 
 export function getLastAllocatedCodexGlobalConversationKey(): number | null {
   const map = getJsonPref("codexAppServerLastAllocatedConversationKeyMap");
   const value = Number(map[buildLastAllocatedMapKey("global")]);
-  if (Number.isFinite(value) && value > 0) return Math.floor(value);
+  if (Number.isFinite(value) && isConversationKeyInAllocatedRange(value, "global")) {
+    return Math.floor(value);
+  }
   return getScopedLegacyAllocatedConversationKey("global");
 }
 
 export function setLastAllocatedCodexGlobalConversationKey(conversationKey: number): void {
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
+  if (!isConversationKeyInAllocatedRange(conversationKey, "global")) return;
   const current = getLastAllocatedCodexGlobalConversationKey() || 0;
   const normalized = Math.floor(conversationKey);
   if (normalized <= current) return;
@@ -316,12 +351,15 @@ export function setLastAllocatedCodexGlobalConversationKey(conversationKey: numb
 export function getLastAllocatedCodexPaperConversationKey(): number | null {
   const map = getJsonPref("codexAppServerLastAllocatedConversationKeyMap");
   const value = Number(map[buildLastAllocatedMapKey("paper")]);
-  if (Number.isFinite(value) && value > 0) return Math.floor(value);
+  if (Number.isFinite(value) && isConversationKeyInAllocatedRange(value, "paper")) {
+    return Math.floor(value);
+  }
   return getScopedLegacyAllocatedConversationKey("paper");
 }
 
 export function setLastAllocatedCodexPaperConversationKey(conversationKey: number): void {
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
+  if (!isConversationKeyInAllocatedRange(conversationKey, "paper")) return;
   const current = getLastAllocatedCodexPaperConversationKey() || 0;
   const normalized = Math.floor(conversationKey);
   if (normalized <= current) return;

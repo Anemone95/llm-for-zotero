@@ -22,10 +22,15 @@ import {
   tokenizeRetrievalQuery,
   tokenizeRetrievalText,
 } from "./retrievalTokenizer";
+import type { RetrievalQueryPlan } from "./retrievalQueryPlan";
 import {
+  buildGenericSourceQuoteCitationGuidance,
   buildPaperQuoteCitationGuidance,
+  formatAttachmentSourceType,
+  formatPaperAttachmentTitle,
   formatPaperCitationLabel,
   formatPaperSourceLabel,
+  isTextLikeAttachmentSourceMode,
 } from "./paperAttribution";
 import {
   buildQuoteAnchorPromptBlock,
@@ -33,117 +38,28 @@ import {
   mergeQuoteCitations,
 } from "./quoteCitations";
 import { readNoteSnapshot } from "./notes";
+import { readAttachmentBytes } from "./attachmentStorage";
 import { pdfTextCache, pdfTextLoadingTasks } from "./state";
-import {
-  buildAndWriteManifest,
-  ensureManifest,
-  readCachedMineruMd,
-} from "./mineruCache";
-import type { MineruManifest, ManifestSection } from "./mineruCache";
-import { ensureMineruRuntimeCacheForAttachment } from "./mineruSync";
-import { isMineruEnabled } from "../../utils/mineruConfig";
 import type {
   PdfContext,
   ChunkStat,
+  PaperContentSourceMode,
   PaperContextRef,
   PaperContextCandidate,
   PdfChunkMeta,
   PdfChunkKind,
   QuoteCitation,
 } from "./types";
+import {
+  extractTextAttachmentContent,
+  resolveTextAttachmentSourceModeFromMetadata,
+} from "./textAttachmentExtraction";
+import type { TextAttachmentSourceMode } from "./contextAttachmentTypes";
+import { isPdfContextAttachment } from "./contextAttachmentSupport";
 import { config } from "./constants";
 
 const prefKey = (key: string) => `${config.prefsPrefix}.${key}`;
 const getPref = (key: string) => Zotero.Prefs.get(prefKey(key), true);
-
-// ── HTML table → Markdown table conversion ──────────────────────────────────
-// MinerU sometimes emits tables as raw <table> HTML in the markdown.
-// LLMs struggle with HTML table markup, so we convert to markdown tables
-// at ingestion time (once, in memory) for better readability.
-
-const HTML_ENTITY_MAP: Record<string, string> = {
-  "&amp;": "&",
-  "&lt;": "<",
-  "&gt;": ">",
-  "&quot;": '"',
-  "&#39;": "'",
-  "&#x27;": "'",
-  "&apos;": "'",
-  "&nbsp;": " ",
-};
-
-function decodeHtmlEntities(text: string): string {
-  let result = text;
-  for (const [entity, char] of Object.entries(HTML_ENTITY_MAP)) {
-    result = result.split(entity).join(char);
-  }
-  // Decode numeric entities: &#123; and &#x1A;
-  result = result.replace(/&#(\d+);/g, (_, code) =>
-    String.fromCharCode(Number(code)),
-  );
-  result = result.replace(/&#x([0-9a-fA-F]+);/g, (_, hex) =>
-    String.fromCharCode(parseInt(hex, 16)),
-  );
-  return result;
-}
-
-function htmlTableToMarkdown(tableHtml: string): string {
-  // Extract rows: split by <tr> tags
-  const rowPattern = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-  const cellPattern = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
-
-  const rows: string[][] = [];
-  let rowMatch: RegExpExecArray | null;
-  while ((rowMatch = rowPattern.exec(tableHtml)) !== null) {
-    const rowHtml = rowMatch[1];
-    const cells: string[] = [];
-    let cellMatch: RegExpExecArray | null;
-    const cellRe = new RegExp(cellPattern.source, cellPattern.flags);
-    while ((cellMatch = cellRe.exec(rowHtml)) !== null) {
-      // Strip any nested HTML tags, decode entities, trim
-      const cellText = decodeHtmlEntities(
-        cellMatch[1].replace(/<[^>]*>/g, "").trim(),
-      );
-      cells.push(cellText);
-    }
-    if (cells.length > 0) {
-      rows.push(cells);
-    }
-  }
-
-  if (rows.length === 0) return "";
-
-  // Normalize column count (pad shorter rows)
-  const maxCols = Math.max(...rows.map((r) => r.length));
-  for (const row of rows) {
-    while (row.length < maxCols) row.push("");
-  }
-
-  // Build markdown table
-  const lines: string[] = [];
-  // Header row
-  lines.push("| " + rows[0].map((c) => c || " ").join(" | ") + " |");
-  // Separator
-  lines.push("| " + rows[0].map(() => "---").join(" | ") + " |");
-  // Data rows
-  for (let i = 1; i < rows.length; i++) {
-    lines.push("| " + rows[i].map((c) => c || " ").join(" | ") + " |");
-  }
-
-  return lines.join("\n");
-}
-
-function convertHtmlTablesToMarkdown(mdText: string): string {
-  // Match <table>...</table> blocks (possibly spanning multiple lines)
-  return mdText.replace(/<table[^>]*>[\s\S]*?<\/table>/gi, (tableBlock) => {
-    try {
-      const md = htmlTableToMarkdown(tableBlock);
-      return md || tableBlock; // Keep original if conversion produces nothing
-    } catch {
-      return tableBlock; // Keep original on error
-    }
-  });
-}
 
 function formatErrorForLog(error: unknown): string {
   if (error instanceof Error) {
@@ -169,14 +85,16 @@ function decodeFileContents(data: unknown): string {
 }
 
 async function readLocalTextFile(source: string | nsIFile): Promise<string> {
-  const zoteroFile = (Zotero as unknown as {
-    File?: {
-      getContentsAsync?: (
-        source: string | nsIFile,
-        charset?: string,
-      ) => Promise<unknown> | unknown;
-    };
-  }).File;
+  const zoteroFile = (
+    Zotero as unknown as {
+      File?: {
+        getContentsAsync?: (
+          source: string | nsIFile,
+          charset?: string,
+        ) => Promise<unknown> | unknown;
+      };
+    }
+  ).File;
   if (zoteroFile?.getContentsAsync) {
     try {
       const data = await zoteroFile.getContentsAsync(source, "utf-8");
@@ -191,22 +109,26 @@ async function readLocalTextFile(source: string | nsIFile): Promise<string> {
   }
 
   const path = typeof source === "string" ? source : source.path;
-  const IOUtils = (globalThis as unknown as {
-    IOUtils?: {
-      read?: (path: string) => Promise<Uint8Array | ArrayBuffer>;
-    };
-  }).IOUtils;
+  const IOUtils = (
+    globalThis as unknown as {
+      IOUtils?: {
+        read?: (path: string) => Promise<Uint8Array | ArrayBuffer>;
+      };
+    }
+  ).IOUtils;
   if (IOUtils?.read) {
     return decodeFileContents(await IOUtils.read(path));
   }
 
-  const OS = (globalThis as unknown as {
-    OS?: {
-      File?: {
-        read?: (path: string) => Promise<Uint8Array | ArrayBuffer>;
+  const OS = (
+    globalThis as unknown as {
+      OS?: {
+        File?: {
+          read?: (path: string) => Promise<Uint8Array | ArrayBuffer>;
+        };
       };
-    };
-  }).OS;
+    }
+  ).OS;
   if (OS?.File?.read) {
     return decodeFileContents(await OS.File.read(path));
   }
@@ -214,16 +136,20 @@ async function readLocalTextFile(source: string | nsIFile): Promise<string> {
   return "";
 }
 
-async function readZoteroFulltextCache(
-  item: Zotero.Item,
-): Promise<string> {
+async function readZoteroFulltextCache(item: Zotero.Item): Promise<string> {
   try {
-    const fulltext = (Zotero as unknown as {
-      Fulltext?: { getItemCacheFile?: (item: Zotero.Item) => nsIFile };
-      FullText?: { getItemCacheFile?: (item: Zotero.Item) => nsIFile };
-    }).Fulltext || (Zotero as unknown as {
-      FullText?: { getItemCacheFile?: (item: Zotero.Item) => nsIFile };
-    }).FullText;
+    const fulltext =
+      (
+        Zotero as unknown as {
+          Fulltext?: { getItemCacheFile?: (item: Zotero.Item) => nsIFile };
+          FullText?: { getItemCacheFile?: (item: Zotero.Item) => nsIFile };
+        }
+      ).Fulltext ||
+      (
+        Zotero as unknown as {
+          FullText?: { getItemCacheFile?: (item: Zotero.Item) => nsIFile };
+        }
+      ).FullText;
     const cacheFile = fulltext?.getItemCacheFile?.(item);
     if (!cacheFile) return "";
     if (typeof cacheFile.exists === "function" && !cacheFile.exists()) {
@@ -239,10 +165,156 @@ async function readZoteroFulltextCache(
   }
 }
 
-async function cachePDFText(item: Zotero.Item) {
+function getAttachmentFilename(item: Zotero.Item): string {
+  return sanitizePdfText(
+    String(
+      (item as unknown as { attachmentFilename?: unknown })
+        .attachmentFilename || "",
+    ),
+  );
+}
+
+function getAttachmentContentType(item: Zotero.Item): string {
+  return sanitizePdfText(
+    String(
+      (item as unknown as { attachmentContentType?: unknown })
+        .attachmentContentType || "",
+    ),
+  ).toLowerCase();
+}
+
+function getAttachmentTitle(item: Zotero.Item): string {
+  return sanitizePdfText(
+    String(item.getField("title") || getAttachmentFilename(item) || ""),
+  );
+}
+
+export function resolveTextAttachmentSourceMode(
+  item: Zotero.Item | null | undefined,
+): TextAttachmentSourceMode | null {
+  if (!item?.isAttachment?.()) return null;
+  return resolveTextAttachmentSourceModeFromMetadata({
+    contentType: getAttachmentContentType(item),
+    filename: getAttachmentFilename(item),
+  });
+}
+
+function sourceTypeForTextAttachment(
+  mode: TextAttachmentSourceMode,
+): PdfContext["sourceType"] {
+  return `attachment-${mode}` as PdfContext["sourceType"];
+}
+
+function cachedContextMatchesSourceMode(
+  cached: PdfContext,
+  sourceMode?: PaperContentSourceMode,
+): boolean {
+  if (!sourceMode) return true;
+  if (sourceMode === "pdf") return true;
+  if (
+    sourceMode === "markdown" ||
+    sourceMode === "html" ||
+    sourceMode === "txt" ||
+    sourceMode === "docx"
+  ) {
+    return cached.sourceType === sourceTypeForTextAttachment(sourceMode);
+  }
+  return true;
+}
+
+async function cacheTextAttachment(
+  item: Zotero.Item,
+  sourceMode: TextAttachmentSourceMode,
+): Promise<void> {
+  const title = getAttachmentTitle(item) || `Attachment ${item.id}`;
+  try {
+    const filePath: string | undefined =
+      (
+        item as unknown as { getFilePath?: () => string | undefined }
+      ).getFilePath?.() || undefined;
+    if (!filePath) {
+      pdfTextCache.set(item.id, {
+        title,
+        chunks: [],
+        chunkMeta: [],
+        chunkStats: [],
+        docFreq: {},
+        avgChunkLength: 0,
+        fullLength: 0,
+        sourceType: sourceTypeForTextAttachment(sourceMode),
+      });
+      return;
+    }
+    const bytes = await readAttachmentBytes(filePath);
+    const text = sanitizePdfText(
+      extractTextAttachmentContent(bytes, sourceMode),
+    );
+    if (text) {
+      const chunks = splitIntoChunks(text, CHUNK_TARGET_LENGTH);
+      const chunkMeta = buildChunkMetadata(
+        chunks,
+        sourceTypeForTextAttachment(sourceMode),
+      );
+      const { chunkStats, docFreq, avgChunkLength } = buildChunkIndex(chunks);
+      pdfTextCache.set(item.id, {
+        title,
+        chunks,
+        chunkMeta,
+        chunkStats,
+        docFreq,
+        avgChunkLength,
+        fullLength: text.length,
+        sourceType: sourceTypeForTextAttachment(sourceMode),
+      });
+    } else {
+      pdfTextCache.set(item.id, {
+        title,
+        chunks: [],
+        chunkMeta: [],
+        chunkStats: [],
+        docFreq: {},
+        avgChunkLength: 0,
+        fullLength: 0,
+        sourceType: sourceTypeForTextAttachment(sourceMode),
+      });
+    }
+  } catch (error) {
+    ztoolkit.log("Error caching text attachment:", error);
+    pdfTextCache.set(item.id, {
+      title,
+      chunks: [],
+      chunkMeta: [],
+      chunkStats: [],
+      docFreq: {},
+      avgChunkLength: 0,
+      fullLength: 0,
+      sourceType: sourceTypeForTextAttachment(sourceMode),
+    });
+  }
+}
+
+async function cachePDFText(
+  item: Zotero.Item,
+  options?: { sourceMode?: PaperContentSourceMode },
+) {
   if (pdfTextCache.has(item.id)) return;
 
   try {
+    const requestedTextAttachmentMode =
+      options?.sourceMode === "markdown" ||
+      options?.sourceMode === "html" ||
+      options?.sourceMode === "txt" ||
+      options?.sourceMode === "docx"
+        ? options.sourceMode
+        : null;
+    const inferredTextAttachmentMode = resolveTextAttachmentSourceMode(item);
+    const textAttachmentMode =
+      requestedTextAttachmentMode || inferredTextAttachmentMode;
+    if (textAttachmentMode) {
+      await cacheTextAttachment(item, textAttachmentMode);
+      return;
+    }
+
     let pdfText = "";
     let sourceType: PdfContext["sourceType"];
     const mainItem =
@@ -252,29 +324,10 @@ async function cachePDFText(item: Zotero.Item) {
 
     const title = mainItem?.getField("title") || item.getField("title") || "";
 
-    const pdfItem =
-      item.isAttachment() && item.attachmentContentType === "application/pdf"
-        ? item
-        : null;
+    const pdfItem = isPdfContextAttachment(item) ? item : null;
 
-    // 1. Try MinerU disk cache (only if MinerU is enabled)
-    if (isMineruEnabled() && pdfItem) {
-      try {
-        await ensureMineruRuntimeCacheForAttachment(pdfItem);
-      } catch (error) {
-        ztoolkit.log("LLM: MinerU sync restore failed", error);
-      }
-    }
-    const cachedMd = isMineruEnabled()
-      ? await readCachedMineruMd(item.id)
-      : null;
-    if (cachedMd) {
-      pdfText = convertHtmlTablesToMarkdown(cachedMd);
-      sourceType = "mineru";
-    }
-
-    // 2. Fallback to Zotero.PDFWorker
-    if (!pdfText && pdfItem) {
+    // 1. Extract text through Zotero.PDFWorker.
+    if (pdfItem) {
       try {
         const result = await Zotero.PDFWorker.getFullText(pdfItem.id);
         if (result && result.text) {
@@ -286,7 +339,7 @@ async function cachePDFText(item: Zotero.Item) {
       }
     }
 
-    // 3. Fallback to Zotero's full-text cache/index. PDFWorker can return no
+    // 2. Fallback to Zotero's full-text cache/index. PDFWorker can return no
     // text even when Zotero already has indexed text for the attachment.
     if (!pdfText && pdfItem) {
       const cachedText = await readZoteroFulltextCache(pdfItem);
@@ -297,79 +350,8 @@ async function cachePDFText(item: Zotero.Item) {
     }
 
     if (pdfText) {
-      // Try manifest-aware chunking for MinerU papers
-      let manifest: MineruManifest | null = null;
-      if (sourceType === "mineru") {
-        try {
-          manifest = await ensureManifest(item.id);
-          if (
-            manifest &&
-            cachedMd &&
-            typeof manifest.totalChars === "number" &&
-            manifest.totalChars !== cachedMd.length
-          ) {
-            ztoolkit.log("LLM: MinerU manifest length mismatch; rebuilding", {
-              attachmentId: item.id,
-              manifestTotalChars: manifest.totalChars,
-              mdLength: cachedMd.length,
-            });
-            manifest = await buildAndWriteManifest(item.id);
-          }
-        } catch (e) {
-          ztoolkit.log(
-            "LLM: MinerU manifest unavailable; using markdown chunks",
-            formatErrorForLog(e),
-          );
-          // Non-critical — fall back to heuristic chunking
-        }
-      }
-
-      let chunks: string[];
-      let chunkMeta: PdfChunkMeta[];
-
-      if (manifest && !manifest.noSections && manifest.sections.length > 0) {
-        // Manifest-aware chunking: slice from the raw markdown (offsets match raw full.md),
-        // build metadata from the raw chunks, then convert HTML tables for LLM readability.
-        // Using pdfText (post-conversion) would misalign because convertHtmlTablesToMarkdown
-        // changes character counts.
-        try {
-          const rawMd = cachedMd!;
-          const rawChunks = splitWithManifestSections(
-            rawMd,
-            manifest.sections,
-            CHUNK_TARGET_LENGTH,
-          );
-          chunkMeta = buildChunkMetadataFromManifest(
-            rawChunks,
-            rawMd,
-            manifest.sections,
-          );
-          chunks = rawChunks.map((chunk) => convertHtmlTablesToMarkdown(chunk));
-          // Update chunkMeta text fields to reflect converted content
-          for (let i = 0; i < chunks.length; i++) {
-            chunkMeta[i].text = chunks[i];
-            chunkMeta[i].normalizedText = normalizeEvidenceText(chunks[i]);
-          }
-        } catch (e) {
-          ztoolkit.log(
-            "LLM: MinerU manifest chunking failed; using full markdown fallback",
-            {
-              attachmentId: item.id,
-              manifestTotalChars: manifest.totalChars,
-              mdLength: cachedMd?.length || 0,
-              error: formatErrorForLog(e),
-            },
-          );
-          chunks = splitMarkdownIntoChunks(pdfText, CHUNK_TARGET_LENGTH);
-          chunkMeta = buildChunkMetadata(chunks, sourceType);
-        }
-      } else if (sourceType === "mineru") {
-        chunks = splitMarkdownIntoChunks(pdfText, CHUNK_TARGET_LENGTH);
-        chunkMeta = buildChunkMetadata(chunks, sourceType);
-      } else {
-        chunks = splitIntoChunks(pdfText, CHUNK_TARGET_LENGTH);
-        chunkMeta = buildChunkMetadata(chunks, sourceType);
-      }
+      const chunks = splitIntoChunks(pdfText, CHUNK_TARGET_LENGTH);
+      const chunkMeta = buildChunkMetadata(chunks, sourceType);
 
       const { chunkStats, docFreq, avgChunkLength } = buildChunkIndex(chunks);
       pdfTextCache.set(item.id, {
@@ -408,16 +390,34 @@ async function cachePDFText(item: Zotero.Item) {
   }
 }
 
-export async function ensurePDFTextCached(item: Zotero.Item): Promise<void> {
-  if (pdfTextCache.has(item.id)) return;
+export async function ensurePDFTextCached(
+  item: Zotero.Item,
+  options?: { sourceMode?: PaperContentSourceMode },
+): Promise<void> {
+  const cached = pdfTextCache.get(item.id);
+  if (cached && cachedContextMatchesSourceMode(cached, options?.sourceMode)) {
+    return;
+  }
+  if (cached) {
+    pdfTextCache.delete(item.id);
+  }
   const existingTask = pdfTextLoadingTasks.get(item.id);
   if (existingTask) {
     await existingTask;
+    const latest = pdfTextCache.get(item.id);
+    if (latest && cachedContextMatchesSourceMode(latest, options?.sourceMode)) {
+      return;
+    }
+    if (latest) {
+      pdfTextCache.delete(item.id);
+    }
+  }
+  if (pdfTextCache.has(item.id)) {
     return;
   }
   const task = (async () => {
     try {
-      await cachePDFText(item);
+      await cachePDFText(item, options);
     } finally {
       pdfTextLoadingTasks.delete(item.id);
     }
@@ -506,112 +506,19 @@ export function invalidateCachedContextText(itemId: number): void {
   const normalizedItemId = Math.floor(itemId);
   pdfTextCache.delete(normalizedItemId);
   pdfTextLoadingTasks.delete(normalizedItemId);
-  // Clear retrieval candidate cache — cached candidates carry stale chunk
-  // text and scores after a MinerU refresh.  Lazy import to avoid circular
-  // dependency (multiContextPlanner imports from pdfContext).
+  // Clear retrieval candidate cache. Lazy import to avoid circular dependency
+  // (multiContextPlanner imports from pdfContext).
   import("./multiContextPlanner")
     .then(({ clearRetrievalCandidateCache }) =>
       clearRetrievalCandidateCache(normalizedItemId),
     )
     .catch(() => {});
-  // Clear embedding cache — chunks will change when MinerU content is refreshed,
-  // so cached embeddings are stale. Do NOT delete MinerU files themselves:
-  // this function is called right after writeMineruCacheFiles(), so deleting
-  // the MinerU directory would destroy the freshly written content.
+  // Clear embedding cache because chunks may have changed.
   import("./embeddingCache")
     .then(({ clearEmbeddingCache }) => clearEmbeddingCache(normalizedItemId))
     .catch((e) => {
       ztoolkit.log("Embedding cache invalidation failed:", e);
     });
-}
-
-// ── Markdown-aware chunking (MinerU only) ─────────────────────────────────────
-
-function splitMarkdownIntoChunks(text: string, targetLength: number): string[] {
-  if (!text) return [];
-  const normalized = text.replace(/\r\n?/g, "\n").trim();
-  if (!normalized) return [];
-
-  // Phase 1: Split into sections by heading boundaries
-  const lines = normalized.split("\n");
-  const sections: string[] = [];
-  let currentSection = "";
-
-  for (const line of lines) {
-    if (/^#{1,4}\s+/.test(line) && currentSection.trim()) {
-      // New heading — flush previous section
-      sections.push(currentSection.trim());
-      currentSection = line + "\n";
-    } else {
-      currentSection += line + "\n";
-    }
-  }
-  if (currentSection.trim()) {
-    sections.push(currentSection.trim());
-  }
-
-  if (sections.length === 0) return [];
-
-  // Phase 2: Accumulate small sections, split large ones
-  const chunks: string[] = [];
-  let accumulator = "";
-
-  const flushAccumulator = () => {
-    if (accumulator.trim()) {
-      chunks.push(accumulator.trim());
-    }
-    accumulator = "";
-  };
-
-  for (const section of sections) {
-    if (section.length > targetLength) {
-      // Large section: flush accumulator, then split internally by paragraphs
-      flushAccumulator();
-      const paragraphs = section.split(/\n\s*\n/);
-      let subChunk = "";
-      for (const para of paragraphs) {
-        const p = para.trim();
-        if (!p) continue;
-        if (p.length > targetLength) {
-          // Oversized paragraph: flush and slice with sentence-aware overlap
-          if (subChunk.trim()) {
-            chunks.push(subChunk.trim());
-            subChunk = "";
-          }
-          let start = 0;
-          while (start < p.length) {
-            const prevStart = start;
-            const rawEnd = Math.min(start + targetLength, p.length);
-            const end =
-              rawEnd < p.length ? findSentenceBoundary(p, rawEnd, 200) : rawEnd;
-            const slice = p.slice(start, end).trim();
-            if (slice) chunks.push(slice);
-            if (end >= p.length) break;
-            const rawOverlapStart = Math.max(0, end - CHUNK_OVERLAP);
-            start = findSentenceBoundary(p, rawOverlapStart, 100);
-            // Guard: ensure forward progress to prevent infinite loop
-            if (start <= prevStart) start = prevStart + targetLength;
-          }
-        } else if (subChunk.length + p.length + 2 <= targetLength) {
-          subChunk = subChunk ? `${subChunk}\n\n${p}` : p;
-        } else {
-          if (subChunk.trim()) chunks.push(subChunk.trim());
-          subChunk = p;
-        }
-      }
-      if (subChunk.trim()) chunks.push(subChunk.trim());
-    } else if (accumulator.length + section.length + 2 <= targetLength) {
-      // Small enough to accumulate
-      accumulator = accumulator ? `${accumulator}\n\n${section}` : section;
-    } else {
-      // Would exceed budget — flush and start new
-      flushAccumulator();
-      accumulator = section;
-    }
-  }
-  flushAccumulator();
-
-  return chunks;
 }
 
 // ── Sentence boundary detection ─────────────────────────────────────────────
@@ -698,119 +605,6 @@ function splitIntoChunks(text: string, targetLength: number): string[] {
   return chunks;
 }
 
-// ── Manifest-aware chunking ──────────────────────────────────────────────────
-
-/**
- * Split full.md at section boundaries from the manifest, then sub-chunk
- * large sections using the existing markdown chunking logic.
- */
-function splitWithManifestSections(
-  text: string,
-  sections: ManifestSection[],
-  targetLength: number,
-): string[] {
-  const chunks: string[] = [];
-
-  for (const section of sections) {
-    const sectionText = text.slice(section.charStart, section.charEnd).trim();
-    if (!sectionText) continue;
-
-    if (sectionText.length <= targetLength) {
-      chunks.push(sectionText);
-    } else {
-      // Sub-chunk large sections using markdown-aware splitting
-      const subChunks = splitMarkdownIntoChunks(sectionText, targetLength);
-      chunks.push(...subChunks);
-    }
-  }
-
-  // Handle any text before the first section (preamble)
-  if (sections.length > 0 && sections[0].charStart > 0) {
-    const preamble = text.slice(0, sections[0].charStart).trim();
-    if (preamble) {
-      if (preamble.length <= targetLength) {
-        chunks.unshift(preamble);
-      } else {
-        const preambleChunks = splitMarkdownIntoChunks(preamble, targetLength);
-        chunks.unshift(...preambleChunks);
-      }
-    }
-  }
-
-  return chunks;
-}
-
-/**
- * Build chunk metadata using manifest section boundaries for accurate labels.
- */
-function buildChunkMetadataFromManifest(
-  chunks: string[],
-  fullText: string,
-  sections: ManifestSection[],
-): PdfChunkMeta[] {
-  // Build a lookup: for any char position in fullText, which section is it?
-  function findSectionForText(chunkText: string): ManifestSection | undefined {
-    const pos = fullText.indexOf(chunkText.slice(0, 100));
-    if (pos < 0) return undefined;
-    for (const section of sections) {
-      if (pos >= section.charStart && pos < section.charEnd) return section;
-    }
-    return undefined;
-  }
-
-  // Map standard section headings to chunk kinds
-  function sectionHeadingToKind(heading: string): PdfChunkKind {
-    const lower = heading.toLowerCase().trim();
-    if (/^abstract/.test(lower)) return "abstract";
-    if (/^introduction/.test(lower)) return "introduction";
-    if (
-      /^method/.test(lower) ||
-      /^materials?\s+and\s+method/.test(lower) ||
-      /^experimental/.test(lower)
-    )
-      return "methods";
-    if (/^results?/.test(lower)) return "results";
-    if (/^discussion/.test(lower)) return "discussion";
-    if (/^conclusion/.test(lower)) return "conclusion";
-    if (/^reference/.test(lower) || /^bibliography/.test(lower))
-      return "references";
-    if (/^appendix/.test(lower) || /^supplement/.test(lower)) return "appendix";
-    if (/^fig(?:ure)?\.?\s*\d/i.test(lower)) return "figure-caption";
-    if (/^table\s*\d/i.test(lower)) return "table-caption";
-    return "body";
-  }
-
-  const meta: PdfChunkMeta[] = [];
-  for (const [chunkIndex, chunkText] of chunks.entries()) {
-    const section = findSectionForText(chunkText);
-    const sectionLabel = section?.heading;
-    const chunkKind = section
-      ? sectionHeadingToKind(section.heading)
-      : resolveChunkKind({
-          chunkText,
-          normalizedText: normalizeEvidenceText(chunkText),
-          sectionHeading: matchSectionHeading(chunkText),
-        });
-
-    const normalizedText = normalizeEvidenceText(chunkText);
-    const textWithoutHeading = sectionLabel
-      ? trimLeadingSectionHeading(chunkText, sectionLabel)
-      : sanitizePdfText(chunkText);
-    const cleaned = cleanLeadingEvidenceNoise(textWithoutHeading, chunkKind);
-
-    meta.push({
-      chunkIndex,
-      text: chunkText,
-      normalizedText,
-      sectionLabel,
-      chunkKind,
-      anchorText: buildEvidenceAnchorFromText(cleaned.text) || undefined,
-      leadingNoiseRemoved: cleaned.removedLeadingNoise || undefined,
-    });
-  }
-  return meta;
-}
-
 type SectionHeadingPattern = {
   label: string;
   kind: PdfChunkKind;
@@ -894,7 +688,7 @@ function sectionLabelPatternSource(sectionLabel: string): string {
   return escapeRegExp(sectionLabel).replace(/\s+/g, "\\s+");
 }
 
-// ── Markdown heading detection (MinerU only) ─────────────────────────────────
+// ── Markdown heading detection ───────────────────────────────────────────────
 
 const MARKDOWN_HEADING_MAP: Record<
   string,
@@ -1144,7 +938,7 @@ export function buildChunkMetadata(
   let activeSection: SectionHeadingMatch | undefined;
   for (const [chunkIndex, chunkText] of chunks.entries()) {
     const explicitSection =
-      sourceType === "mineru"
+      sourceType === "attachment-markdown"
         ? matchMarkdownSectionHeading(chunkText) ||
           matchSectionHeading(chunkText)
         : matchSectionHeading(chunkText);
@@ -1263,6 +1057,36 @@ function buildChunkIndex(chunks: string[]): {
 
 function tokenizeQuery(query: string): string[] {
   return tokenizeRetrievalQuery(query);
+}
+
+function queryPlanTerms(
+  question: string,
+  queryPlan: RetrievalQueryPlan | undefined,
+): string[] {
+  return queryPlan?.lexicalTerms?.length
+    ? queryPlan.lexicalTerms
+    : tokenizeQuery(question);
+}
+
+function matchedQueryVariantsForText(
+  text: string,
+  queryPlan: RetrievalQueryPlan | undefined,
+): string[] {
+  if (!queryPlan?.effectiveQueries.length || !text.trim()) return [];
+  const haystack = text.toLocaleLowerCase();
+  const matches: string[] = [];
+  for (const query of queryPlan.effectiveQueries) {
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    if (normalizedQuery.length > 2 && haystack.includes(normalizedQuery)) {
+      matches.push(query);
+      continue;
+    }
+    const terms = tokenizeQuery(query);
+    if (terms.length && terms.some((term) => haystack.includes(term))) {
+      matches.push(query);
+    }
+  }
+  return Array.from(new Set(matches));
 }
 
 function scoreChunkBM25(
@@ -1486,6 +1310,32 @@ function formatPaperMetadataLines(ref: PaperContextRef): string[] {
   return lines;
 }
 
+function formatSelectedAttachmentMetadataLines(ref: PaperContextRef): string[] {
+  const lines = ["Parent Zotero Item:", `Title: ${ref.title}`];
+  if (ref.citationKey) lines.push(`Citation key: ${ref.citationKey}`);
+  if (ref.firstCreator) lines.push(`Author: ${ref.firstCreator}`);
+  if (ref.year) lines.push(`Year: ${ref.year}`);
+  lines.push(
+    "",
+    "Selected Source:",
+    `Type: ${formatAttachmentSourceType(ref.contentSourceMode)}`,
+    `Attachment title: ${formatPaperAttachmentTitle(ref)}`,
+    "Relationship: Child attachment under the parent item; it may be user OCR, a translated file, supplement, notes, or another related file.",
+    `Source label: ${formatPaperSourceLabel(ref)}`,
+  );
+  return lines;
+}
+
+function formatSelectedAttachmentGuidanceLines(): string[] {
+  return [
+    "Selected attachment guidance:",
+    "- Treat this selected attachment as the primary evidence source for the current chat.",
+    "- Use parent item metadata for bibliographic/contextual grounding, but do not override the selected attachment text with inferences from the parent title.",
+    "- Do not infer that the attachment failed or is corrupted merely because its content differs from the parent title.",
+    '- If the user asks about "this paper", state that the current source is the selected attachment under the parent item and answer from this source.',
+  ];
+}
+
 function formatPerPaperQuoteGuidanceLines(ref: PaperContextRef): string[] {
   return buildPaperQuoteCitationGuidance(ref);
 }
@@ -1494,22 +1344,36 @@ export function buildFullPaperContext(
   paperContext: PaperContextRef,
   pdfContext: PdfContext | undefined,
 ): string {
-  const metadata = formatPaperMetadataLines(paperContext);
+  const isSelectedAttachment = isTextLikeAttachmentSourceMode(
+    paperContext.contentSourceMode,
+  );
+  const metadata = isSelectedAttachment
+    ? formatSelectedAttachmentMetadataLines(paperContext)
+    : formatPaperMetadataLines(paperContext);
+  const guidance = isSelectedAttachment
+    ? [
+        ...formatSelectedAttachmentGuidanceLines(),
+        "",
+        ...formatPerPaperQuoteGuidanceLines(paperContext),
+      ]
+    : formatPerPaperQuoteGuidanceLines(paperContext);
   if (!pdfContext || !pdfContext.chunks.length) {
     return [
       ...metadata,
       "",
-      ...formatPerPaperQuoteGuidanceLines(paperContext),
+      ...guidance,
       "",
-      "[No extractable PDF text available. Using metadata only.]",
+      isSelectedAttachment
+        ? "[No extractable selected attachment text available. Using metadata only.]"
+        : "[No extractable PDF text available. Using metadata only.]",
     ].join("\n");
   }
   return [
     ...metadata,
     "",
-    ...formatPerPaperQuoteGuidanceLines(paperContext),
+    ...guidance,
     "",
-    "Paper Text:",
+    isSelectedAttachment ? "Selected Attachment Text:" : "Paper Text:",
     pdfContext.chunks.join("\n\n"),
   ].join("\n");
 }
@@ -1524,14 +1388,28 @@ export function buildTruncatedFullPaperContext(
   truncated: boolean;
   fullLength: number;
 } {
-  const metadata = formatPaperMetadataLines(paperContext);
+  const isSelectedAttachment = isTextLikeAttachmentSourceMode(
+    paperContext.contentSourceMode,
+  );
+  const metadata = isSelectedAttachment
+    ? formatSelectedAttachmentMetadataLines(paperContext)
+    : formatPaperMetadataLines(paperContext);
+  const guidance = isSelectedAttachment
+    ? [
+        ...formatSelectedAttachmentGuidanceLines(),
+        "",
+        ...formatPerPaperQuoteGuidanceLines(paperContext),
+      ]
+    : formatPerPaperQuoteGuidanceLines(paperContext);
   if (!pdfContext || !pdfContext.chunks.length) {
     const text = [
       ...metadata,
       "",
-      ...formatPerPaperQuoteGuidanceLines(paperContext),
+      ...guidance,
       "",
-      "[No extractable PDF text available. Using metadata only.]",
+      isSelectedAttachment
+        ? "[No extractable selected attachment text available. Using metadata only.]"
+        : "[No extractable PDF text available. Using metadata only.]",
     ].join("\n");
     return {
       text,
@@ -1545,9 +1423,9 @@ export function buildTruncatedFullPaperContext(
   const parts = [
     ...metadata,
     "",
-    ...formatPerPaperQuoteGuidanceLines(paperContext),
+    ...guidance,
     "",
-    "Paper Text:",
+    isSelectedAttachment ? "Selected Attachment Text:" : "Paper Text:",
   ];
   let text = parts.join("\n");
   let estimatedTokens = estimateTextTokens(text);
@@ -1764,12 +1642,20 @@ export async function buildPaperRetrievalCandidates(
     mode?: "general" | "evidence";
     /** Pre-computed query embedding to avoid redundant API calls in multi-paper loops. */
     precomputedQueryEmbedding?: number[];
+    /** Disable semantic embeddings even when the global semantic-search preference is enabled. */
+    disableEmbeddings?: boolean;
+    /** Shared retrieval query plan with bounded variants and lexical terms. */
+    queryPlan?: RetrievalQueryPlan;
   },
   compatibilityOptions?: {
     topK?: number;
     mode?: "general" | "evidence";
     /** Pre-computed query embedding to avoid redundant API calls in multi-paper loops. */
     precomputedQueryEmbedding?: number[];
+    /** Disable semantic embeddings even when the global semantic-search preference is enabled. */
+    disableEmbeddings?: boolean;
+    /** Shared retrieval query plan with bounded variants and lexical terms. */
+    queryPlan?: RetrievalQueryPlan;
   },
 ): Promise<PaperContextCandidate[]> {
   if (!pdfContext) return [];
@@ -1777,7 +1663,8 @@ export async function buildPaperRetrievalCandidates(
     compatibilityOptions ||
     ("topK" in (apiOverridesOrOptions || {}) ||
     "mode" in (apiOverridesOrOptions || {}) ||
-    "precomputedQueryEmbedding" in (apiOverridesOrOptions || {})
+    "precomputedQueryEmbedding" in (apiOverridesOrOptions || {}) ||
+    "queryPlan" in (apiOverridesOrOptions || {})
       ? apiOverridesOrOptions
       : undefined);
   const { chunks, chunkStats, docFreq, avgChunkLength } = pdfContext;
@@ -1792,7 +1679,9 @@ export async function buildPaperRetrievalCandidates(
     ? Math.max(1, Math.floor(options?.topK as number))
     : RETRIEVAL_TOP_K_PER_PAPER;
 
-  const terms = tokenizeQuery(question);
+  const queryPlan = options?.queryPlan;
+  const terms = queryPlanTerms(question, queryPlan);
+  const semanticQuery = queryPlan?.semanticQuery || question;
   const bm25Scores = chunkStats.map((chunk) =>
     scoreChunkBM25(chunk, terms, docFreq, chunks.length, avgChunkLength || 1),
   );
@@ -1809,7 +1698,11 @@ export async function buildPaperRetrievalCandidates(
   // Compute embedding ranks if available
   let embedRank: number[] | null = null;
   let rawEmbeddingScores: number[] | null = null;
-  if (question.trim() && shouldTryEmbeddings()) {
+  if (
+    semanticQuery.trim() &&
+    !options?.disableEmbeddings &&
+    shouldTryEmbeddings()
+  ) {
     const embeddingsReady = await ensureEmbeddings(
       pdfContext,
       paperContext.contextItemId,
@@ -1818,7 +1711,7 @@ export async function buildPaperRetrievalCandidates(
       try {
         const queryEmbedding =
           options?.precomputedQueryEmbedding ||
-          (await callEmbeddings([question]))[0] ||
+          (await callEmbeddings([semanticQuery]))[0] ||
           [];
         if (queryEmbedding.length) {
           rawEmbeddingScores = pdfContext.embeddings.map((vec) =>
@@ -1851,6 +1744,10 @@ export async function buildPaperRetrievalCandidates(
       ? 1 / (RRF_K + bm25Rank[idx]) + 1 / (RRF_K + embedRank[idx])
       : 1 / (RRF_K + bm25Rank[idx]);
     const meta = chunkMeta[chunk.index];
+    const matchedQueryVariants = matchedQueryVariantsForText(
+      chunks[chunk.index],
+      queryPlan,
+    );
     const candidate: PaperContextCandidate = {
       paperKey: buildPaperKey(paperContext),
       itemId: paperContext.itemId,
@@ -1870,6 +1767,10 @@ export async function buildPaperRetrievalCandidates(
       embeddingScore,
       hybridScore,
       evidenceScore: hybridScore,
+      matchedQueryVariant: matchedQueryVariants[0],
+      matchedQueryVariants: matchedQueryVariants.length
+        ? matchedQueryVariants
+        : undefined,
     };
     const evidenceScore =
       retrievalMode === "evidence"
@@ -1957,6 +1858,9 @@ export function buildEvidencePack(params: {
   const quoteAnchorGuidance = buildQuoteAnchorPromptBlock(
     normalizedQuoteCitations,
   );
+  const hasSelectedAttachmentSource = papers.some((paper) =>
+    isTextLikeAttachmentSourceMode(paper.contentSourceMode),
+  );
 
   const blocks: string[] = [
     [
@@ -1964,8 +1868,12 @@ export function buildEvidencePack(params: {
       "",
       ...quoteAnchorGuidance,
       ...(quoteAnchorGuidance.length ? [""] : []),
-      ...buildPaperQuoteCitationGuidance(),
-      "The full paper remains available in paper chat.",
+      ...(hasSelectedAttachmentSource
+        ? buildGenericSourceQuoteCitationGuidance()
+        : buildPaperQuoteCitationGuidance()),
+      hasSelectedAttachmentSource
+        ? "The full paper or selected attachment source remains available in paper chat."
+        : "The full paper remains available in paper chat.",
       "For this reply, prioritize these retrieved snippets as the primary evidence pack.",
       "Do not use snippets from references as empirical evidence.",
       "If support is weak or indirect, say so instead of overstating the claim.",
@@ -2028,13 +1936,20 @@ export function renderClaimEvidencePack(params: {
       .filter((entry): entry is QuoteCitation => Boolean(entry)),
   );
   const quoteAnchorGuidance = buildQuoteAnchorPromptBlock(quoteCitations);
+  const hasSelectedAttachmentSource = isTextLikeAttachmentSourceMode(
+    paper.contentSourceMode,
+  );
   const lines = [
     "Claim Evidence:",
     "",
     ...quoteAnchorGuidance,
     ...(quoteAnchorGuidance.length ? [""] : []),
-    ...buildPaperQuoteCitationGuidance(),
-    "The full paper remains available in paper chat.",
+    ...(hasSelectedAttachmentSource
+      ? buildGenericSourceQuoteCitationGuidance()
+      : buildPaperQuoteCitationGuidance()),
+    hasSelectedAttachmentSource
+      ? "The full paper or selected attachment source remains available in paper chat."
+      : "The full paper remains available in paper chat.",
     "Use the evidence snippets below as the primary grounding for this claim assessment.",
     "Do not treat references or background citations as direct empirical evidence.",
     "If the evidence is indirect or mixed, say so explicitly.",

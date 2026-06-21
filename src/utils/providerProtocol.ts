@@ -1,13 +1,11 @@
 import { isResponsesBase } from "./apiHelpers";
-import { WEBCHAT_TARGETS } from "../webchat/types";
 
 export type ProviderProtocol =
   | "codex_responses"
   | "responses_api"
   | "openai_chat_compat"
   | "anthropic_messages"
-  | "gemini_native"
-  | "web_sync"; // [webchat]
+  | "gemini_native";
 
 export type ProviderProtocolSpec = {
   id: ProviderProtocol;
@@ -78,17 +76,6 @@ export const PROVIDER_PROTOCOL_SPECS: ProviderProtocolSpec[] = [
     multimodal: true,
     fileInputs: false,
     reasoning: true,
-  },
-  {
-    id: "web_sync",
-    label: "Web Sync (ChatGPT / DeepSeek)",
-    helperText:
-      `Relay questions to ${WEBCHAT_TARGETS.map((wt) => wt.label).join(", ")} via the browser extension web-sync bridge.`,
-    streaming: false,
-    toolCalls: false,
-    multimodal: true,
-    fileInputs: false,
-    reasoning: false,
   },
 ];
 
@@ -185,9 +172,6 @@ export function normalizeProviderProtocolForAuthMode(params: {
     return normalized === "openai_chat_compat" || normalized === "responses_api"
       ? normalized
       : "openai_chat_compat";
-  }
-  if (params.authMode === "webchat") {
-    return "web_sync";
   }
   if (normalized === "codex_responses") {
     return fallback === "codex_responses" ? inferred : fallback;

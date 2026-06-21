@@ -1,8 +1,10 @@
 import {
+  buildDefaultUpstreamGlobalConversationKey,
   GLOBAL_CONVERSATION_KEY_BASE,
   PAPER_CONVERSATION_KEY_BASE,
   isUpstreamGlobalConversationKey,
 } from "./constants";
+import { isSupportedContextAttachment } from "./contextAttachmentSupport";
 import { normalizePositiveInt } from "./normalizers";
 import {
   buildPaperStateKey,
@@ -102,7 +104,8 @@ export function createGlobalPortalItem(
 ): Zotero.Item {
   const normalizedLibraryID = normalizePositiveInt(libraryID) || 1;
   const normalizedConversationKey =
-    normalizePositiveInt(conversationKey) || GLOBAL_CONVERSATION_KEY_BASE;
+    normalizePositiveInt(conversationKey) ||
+    buildDefaultUpstreamGlobalConversationKey(normalizedLibraryID);
   const portalItem: GlobalPortalItem = {
     __llmGlobalPortalItem: true,
     id: normalizedConversationKey,
@@ -154,8 +157,9 @@ export function createPaperPortalItem(
       const resolvedBase = basePaperItemID
         ? Zotero.Items.get(basePaperItemID) || null
         : null;
-      if (!resolvedBase?.isRegularItem?.()) return [];
-      return resolvedBase.getAttachments();
+      if (resolvedBase?.isRegularItem?.()) return resolvedBase.getAttachments();
+      if (isSupportedContextAttachment(resolvedBase)) return [basePaperItemID];
+      return [];
     },
     getField: (field: string) => {
       const resolvedBase = basePaperItemID
@@ -204,7 +208,7 @@ export function resolvePaperPortalBaseItem(
   const baseItemID = getPaperPortalBaseItemID(item);
   if (!baseItemID) return null;
   const resolved = Zotero.Items.get(baseItemID) || null;
-  return resolved?.isRegularItem?.() ? resolved : null;
+  return isPaperChatBaseItem(resolved) ? resolved : null;
 }
 
 export function resolveNoteParentItem(
@@ -229,9 +233,8 @@ function resolveActiveTabTitleForNote(
     (Zotero.getActiveZoteroPane?.() as { document?: Document } | undefined)
       ?.document?.defaultView &&
       (
-        (
-          Zotero.getActiveZoteroPane?.() as { document?: Document } | undefined
-        )?.document?.defaultView as { Zotero?: { Tabs?: unknown } }
+        (Zotero.getActiveZoteroPane?.() as { document?: Document } | undefined)
+          ?.document?.defaultView as { Zotero?: { Tabs?: unknown } }
       ).Zotero?.Tabs,
   ];
   for (const candidate of tabsCandidates) {
@@ -272,9 +275,7 @@ function resolveActiveTabTitleForNote(
   return "";
 }
 
-export function resolveNoteTitle(
-  item: Zotero.Item | null | undefined,
-): string {
+export function resolveNoteTitle(item: Zotero.Item | null | undefined): string {
   if (!(item as any)?.isNote?.()) return "";
   const activeTabTitle = resolveActiveTabTitleForNote(item);
   if (activeTabTitle) return activeTabTitle;
@@ -374,13 +375,49 @@ export function resolveConversationBaseItem(
   if ((targetItem as any).isNote?.()) {
     return targetItem;
   }
+  return resolvePaperChatSourceItem(targetItem);
+}
+
+export function isPaperChatBaseItem(
+  item: Zotero.Item | null | undefined,
+): item is Zotero.Item {
+  if (!item) return false;
+  if (item.isAttachment?.()) {
+    return isSupportedContextAttachment(item);
+  }
+  return Boolean(item.isRegularItem?.());
+}
+
+export function resolvePaperChatSourceItem(
+  targetItem: Zotero.Item | null | undefined,
+): Zotero.Item | null {
+  if (!targetItem) return null;
+  if (
+    isGlobalPortalItem(targetItem) ||
+    isClaudeGlobalPortalItem(targetItem) ||
+    isCodexGlobalPortalItem(targetItem)
+  ) {
+    return null;
+  }
+  if (isPaperPortalItem(targetItem)) {
+    return resolvePaperPortalBaseItem(targetItem);
+  }
+  if (isClaudePaperPortalItem(targetItem)) {
+    return resolveClaudePaperPortalBaseItem(targetItem);
+  }
+  if (isCodexPaperPortalItem(targetItem)) {
+    return resolveCodexPaperPortalBaseItem(targetItem);
+  }
+  if ((targetItem as any).isNote?.()) {
+    return resolveNoteParentItem(targetItem);
+  }
   if (targetItem.isAttachment() && targetItem.parentID) {
+    if (!isSupportedContextAttachment(targetItem)) return null;
     const parent = Zotero.Items.get(targetItem.parentID) || null;
     return parent?.isRegularItem?.() ? parent : null;
   }
-  return targetItem?.isRegularItem?.() ? targetItem : null;
+  return isPaperChatBaseItem(targetItem) ? targetItem : null;
 }
-
 
 function resolveLibraryIdFromItem(
   targetItem: Zotero.Item | null | undefined,
@@ -409,9 +446,7 @@ export function resolvePreferredConversationSystem(params: {
   item: Zotero.Item | null | undefined;
   preferredSystem?: ConversationSystem | null;
 }): ConversationSystem {
-  const preferred =
-    params.preferredSystem ||
-    getConversationSystemPref();
+  const preferred = params.preferredSystem || getConversationSystemPref();
   if (resolveActiveNoteSession(params.item)) {
     return preferred === "codex" && isCodexAppServerModeEnabled()
       ? "codex"
@@ -450,14 +485,16 @@ function resolvePreferredConversationMode(
 ): "global" | "paper" {
   if (system === "claude_code") {
     const rememberedMode =
-      activeClaudeConversationModeByLibrary.get(buildClaudeLibraryStateKey(libraryID)) ||
-      getLastUsedClaudeConversationMode(libraryID);
+      activeClaudeConversationModeByLibrary.get(
+        buildClaudeLibraryStateKey(libraryID),
+      ) || getLastUsedClaudeConversationMode(libraryID);
     return rememberedMode === "global" ? "global" : "paper";
   }
   if (system === "codex") {
     const rememberedMode =
-      activeCodexConversationModeByLibrary.get(buildCodexLibraryStateKey(libraryID)) ||
-      getLastUsedCodexConversationMode(libraryID);
+      activeCodexConversationModeByLibrary.get(
+        buildCodexLibraryStateKey(libraryID),
+      ) || getLastUsedCodexConversationMode(libraryID);
     return rememberedMode === "global" ? "global" : "paper";
   }
   const rememberedMode = activeConversationModeByLibrary.get(libraryID);
@@ -477,7 +514,9 @@ function resolveGlobalConversationKey(
   if (system === "claude_code") {
     return Math.floor(
       Number(
-        activeClaudeGlobalConversationByLibrary.get(buildClaudeLibraryStateKey(libraryID)) ||
+        activeClaudeGlobalConversationByLibrary.get(
+          buildClaudeLibraryStateKey(libraryID),
+        ) ||
           getLastUsedClaudeGlobalConversationKey(libraryID) ||
           buildDefaultClaudeGlobalConversationKey(libraryID),
       ),
@@ -486,19 +525,29 @@ function resolveGlobalConversationKey(
   if (system === "codex") {
     return Math.floor(
       Number(
-        activeCodexGlobalConversationByLibrary.get(buildCodexLibraryStateKey(libraryID)) ||
+        activeCodexGlobalConversationByLibrary.get(
+          buildCodexLibraryStateKey(libraryID),
+        ) ||
           getLastUsedCodexGlobalConversationKey(libraryID) ||
           buildDefaultCodexGlobalConversationKey(libraryID),
       ),
     );
   }
   const lockedKey = getLockedGlobalConversationKey(libraryID);
-  if (lockedKey !== null) return lockedKey;
-  const activeKey = Number(activeGlobalConversationByLibrary.get(libraryID) || 0);
-  if (isUpstreamGlobalConversationKey(activeKey)) {
-    return Math.floor(activeKey);
+  if (lockedKey !== null) {
+    return lockedKey === GLOBAL_CONVERSATION_KEY_BASE
+      ? buildDefaultUpstreamGlobalConversationKey(libraryID)
+      : lockedKey;
   }
-  return GLOBAL_CONVERSATION_KEY_BASE;
+  const activeKey = Number(
+    activeGlobalConversationByLibrary.get(libraryID) || 0,
+  );
+  if (isUpstreamGlobalConversationKey(activeKey)) {
+    return activeKey === GLOBAL_CONVERSATION_KEY_BASE
+      ? buildDefaultUpstreamGlobalConversationKey(libraryID)
+      : Math.floor(activeKey);
+  }
+  return buildDefaultUpstreamGlobalConversationKey(libraryID);
 }
 
 export function resolveInitialPanelItemState(
@@ -535,6 +584,14 @@ export function resolveInitialPanelItemState(
   }
 
   if (
+    item?.isAttachment?.() &&
+    item.parentID &&
+    basePaperItem.isRegularItem?.()
+  ) {
+    item = basePaperItem;
+  }
+
+  if (
     isPaperPortalItem(item) ||
     (isClaudePaperPortalItem(item) && isClaudeCodeModeEnabled()) ||
     (isCodexPaperPortalItem(item) && isCodexAppServerModeEnabled())
@@ -557,11 +614,12 @@ export function resolveInitialPanelItemState(
       libraryID,
       conversationSystem,
     );
-    item = conversationSystem === "claude_code"
-      ? createClaudeGlobalPortalItem(libraryID, conversationKey)
-      : conversationSystem === "codex"
-        ? createCodexGlobalPortalItem(libraryID, conversationKey)
-        : createGlobalPortalItem(libraryID, conversationKey);
+    item =
+      conversationSystem === "claude_code"
+        ? createClaudeGlobalPortalItem(libraryID, conversationKey)
+        : conversationSystem === "codex"
+          ? createCodexGlobalPortalItem(libraryID, conversationKey)
+          : createGlobalPortalItem(libraryID, conversationKey);
     return { item, basePaperItem };
   }
 
@@ -577,11 +635,11 @@ export function resolveInitialPanelItemState(
         ? activeCodexPaperConversationByPaper.get(
             buildCodexPaperStateKey(libraryID, paperItemID),
           ) ||
-            getLastUsedCodexPaperConversationKey(libraryID, paperItemID) ||
-            buildDefaultCodexPaperConversationKey(paperItemID)
-      : activePaperConversationByPaper.get(
-          buildPaperStateKey(libraryID, paperItemID),
-        ) ||
+          getLastUsedCodexPaperConversationKey(libraryID, paperItemID) ||
+          buildDefaultCodexPaperConversationKey(paperItemID)
+        : activePaperConversationByPaper.get(
+            buildPaperStateKey(libraryID, paperItemID),
+          ) ||
           getLastUsedPaperConversationKey(libraryID, paperItemID) ||
           0,
   );
@@ -590,15 +648,22 @@ export function resolveInitialPanelItemState(
     rememberedPaperKey > 0 &&
     Math.floor(rememberedPaperKey) !== paperItemID
   ) {
-    item = conversationSystem === "claude_code"
-      ? createClaudePaperPortalItem(basePaperItem, Math.floor(rememberedPaperKey))
-      : conversationSystem === "codex"
-        ? createCodexPaperPortalItem(basePaperItem, Math.floor(rememberedPaperKey))
-        : createPaperPortalItem(
+    item =
+      conversationSystem === "claude_code"
+        ? createClaudePaperPortalItem(
             basePaperItem,
             Math.floor(rememberedPaperKey),
-            0,
-          );
+          )
+        : conversationSystem === "codex"
+          ? createCodexPaperPortalItem(
+              basePaperItem,
+              Math.floor(rememberedPaperKey),
+            )
+          : createPaperPortalItem(
+              basePaperItem,
+              Math.floor(rememberedPaperKey),
+              0,
+            );
   }
 
   return { item, basePaperItem };

@@ -1,5 +1,6 @@
 import { assert } from "chai";
 import {
+  __setMarkdownParserDisabledForTest,
   normalizeBlockBoundaries,
   renderMarkdown,
   renderMarkdownForNote,
@@ -124,6 +125,82 @@ describe("normalizeBlockBoundaries", function () {
     });
   });
 
+  describe("ordered-list normalization", function () {
+    it("inserts a list boundary after an inline source parenthetical", function () {
+      const input =
+        '(Methods, "Real-time data processing") 4. **From scalar to avatar movement**';
+      const result = normalizeBlockBoundaries(input);
+      assert.include(
+        result,
+        '(Methods, "Real-time data processing")\n\n4. **From',
+      );
+    });
+
+    it("inserts a list boundary after a standalone source parenthetical", function () {
+      const input =
+        '(Methods, "Real-time data processing")\n4. **From scalar to avatar movement**';
+      const result = normalizeBlockBoundaries(input);
+      assert.include(
+        result,
+        '(Methods, "Real-time data processing")\n\n4. **From',
+      );
+    });
+
+    it("does not split decimal prose after a parenthetical", function () {
+      const input = "(Figure 2) 4.5 mm was the measured offset.";
+      const result = normalizeBlockBoundaries(input);
+      assert.equal(result, input);
+    });
+  });
+
+  describe("source-label continuation normalization", function () {
+    it("inserts an unordered-list boundary after a source parenthetical", function () {
+      const input =
+        "(Carrasco et al., 2026) - **Environment Classification:** Classifiers were trained.";
+      const result = normalizeBlockBoundaries(input);
+      assert.include(result, "(Carrasco et al., 2026)\n\n- **Environment");
+    });
+
+    it("inserts a boundary before heading-like emphasized continuation text", function () {
+      const input =
+        "(Carrasco et al., 2026) *Environment Classification:* Classifiers were trained.";
+      const result = normalizeBlockBoundaries(input);
+      assert.include(
+        result,
+        "(Carrasco et al., 2026)\n\n*Environment Classification:*",
+      );
+    });
+
+    it("inserts an unordered-list boundary after a no-year source parenthetical", function () {
+      const input =
+        "(Smith) - **Environment Classification:** Classifiers were trained.";
+      const result = normalizeBlockBoundaries(input);
+      assert.include(result, "(Smith)\n\n- **Environment Classification:**");
+    });
+
+    it("inserts an emphasized-heading boundary after a no-year source parenthetical", function () {
+      const input =
+        "(Smith and Jones) *Environment Classification:* Classifiers were trained.";
+      const result = normalizeBlockBoundaries(input);
+      assert.include(
+        result,
+        "(Smith and Jones)\n\n*Environment Classification:*",
+      );
+    });
+
+    it("does not split statistical emphasis after a source parenthetical", function () {
+      const input = "(Carrasco et al., 2026) *p* < 0.05 across sessions.";
+      const result = normalizeBlockBoundaries(input);
+      assert.equal(result, input);
+    });
+
+    it("does not split unordered-looking prose after a non-source parenthetical", function () {
+      const input = "(Figure 2) - 4.5 mm was the measured offset.";
+      const result = normalizeBlockBoundaries(input);
+      assert.equal(result, input);
+    });
+  });
+
   describe("mixed normalization", function () {
     it("handles multiple headers and blockquotes on one line", function () {
       const input =
@@ -178,6 +255,31 @@ describe("renderMarkdown with inline block tokens", function () {
     assert.include(html, "olfactory bulb");
   });
 
+  it("keeps dashed separator lines as horizontal rules, matching the legacy renderer", function () {
+    const input = "Paragraph before\n---\nParagraph after";
+    const html = renderMarkdown(input);
+
+    assert.include(html, "<p>Paragraph before</p><hr/>");
+    assert.include(html, "<p>Paragraph after</p>");
+    assert.notInclude(html, "<h2>Paragraph before</h2>");
+    assert.notInclude(html, "<h3>Paragraph before</h3>");
+  });
+
+  it("emits XHTML-compatible void tags for Zotero chrome documents", function () {
+    const html = renderMarkdown(
+      ["---", "", "First line  ", "Second line", "", "- [x] done"].join("\n"),
+    );
+
+    assert.include(html, "<hr/>");
+    assert.notInclude(html, "<hr>");
+    assert.include(html, "<br/>");
+    assert.include(
+      html,
+      '<input type="checkbox" disabled="disabled" checked="checked" />',
+    );
+    assert.notInclude(html, 'type="checkbox">');
+  });
+
   it("renders blockquote + citation combo correctly for decoration", function () {
     const input =
       "discussed:\n\n> How the olfactory bulb maintains stability\n\n(Zheng et al., 2026)";
@@ -191,6 +293,103 @@ describe("renderMarkdown with inline block tokens", function () {
       "(Zheng et al., 2026) > By analyzing longitudinal datasets we found a rotation";
     const html = renderMarkdown(input);
     assert.include(html, "<blockquote>");
+  });
+
+  it("preserves text-token spacing before inline bold across soft breaks", function () {
+    const html = renderMarkdown(
+      "[[quote:Q]]\nSo **one component** handles it.",
+    );
+    assert.include(html, "So <strong>one component</strong>");
+    assert.notInclude(html, "So<strong>one component</strong>");
+  });
+
+  it("renders ordered-list markers after source labels as list items", function () {
+    const html = renderMarkdown(
+      '(Methods, "Real-time data processing")\n4. **From scalar to avatar movement**\nThe scalar projection value is scaled.',
+    );
+    assert.include(html, '<ol start="4">');
+    assert.include(
+      html,
+      "<li><strong>From scalar to avatar movement</strong> The scalar projection value is scaled.</li>",
+    );
+    assert.notInclude(html, "4.<strong>From scalar");
+  });
+
+  it("renders inline ordered-list markers after source labels as list items", function () {
+    const html = renderMarkdown(
+      '(Methods, "Real-time data processing") 4. **From scalar to avatar movement**\nThe scalar projection value is scaled.',
+    );
+    assert.include(html, '<ol start="4">');
+    assert.notInclude(html, "4.<strong>From scalar");
+  });
+
+  it("renders inline unordered-list markers after source labels as list items", function () {
+    const html = renderMarkdown(
+      "(Carrasco et al., 2026) - **Environment Classification:** Classifiers were trained.",
+    );
+
+    assert.include(html, "<ul>");
+    assert.include(
+      html,
+      "<li><strong>Environment Classification:</strong> Classifiers were trained.</li>",
+    );
+    assert.notInclude(html, "- <strong>Environment");
+  });
+
+  it("renders inline unordered-list markers after no-year source labels as list items", function () {
+    const html = renderMarkdown(
+      "(Smith) - **Environment Classification:** Classifiers were trained.",
+    );
+
+    assert.include(html, "<p>(Smith)</p>");
+    assert.include(html, "<ul>");
+    assert.include(
+      html,
+      "<li><strong>Environment Classification:</strong> Classifiers were trained.</li>",
+    );
+    assert.notInclude(html, "(Smith) - <strong>Environment");
+  });
+
+  it("renders heading-like emphasized continuation after source labels", function () {
+    const html = renderMarkdown(
+      "(Carrasco et al., 2026) *Environment Classification:* Classifiers were trained.",
+    );
+
+    assert.include(html, "<p>(Carrasco et al., 2026)</p>");
+    assert.include(
+      html,
+      "<p><em>Environment Classification:</em> Classifiers were trained.</p>",
+    );
+    assert.notInclude(html, "*Environment Classification:*");
+  });
+
+  it("renders heading-like emphasized continuation after no-year source labels", function () {
+    const html = renderMarkdown(
+      "(Smith) *Environment Classification:* Classifiers were trained.",
+    );
+
+    assert.include(html, "<p>(Smith)</p>");
+    assert.include(
+      html,
+      "<p><em>Environment Classification:</em> Classifiers were trained.</p>",
+    );
+    assert.notInclude(html, "(Smith) <em>Environment");
+  });
+
+  it("renders source-label continuation boundaries in the legacy renderer", function () {
+    __setMarkdownParserDisabledForTest(true);
+    try {
+      const html = renderMarkdown(
+        "(Carrasco et al., 2026) - **Environment Classification:** Classifiers were trained.\n\n(Carrasco et al., 2026) *Decoding:* Models transferred across sessions.",
+      );
+
+      assert.include(html, "<ul>");
+      assert.include(html, "<strong>Environment Classification:</strong>");
+      assert.include(html, "<em>Decoding:</em>");
+      assert.notInclude(html, "*Decoding:*");
+    } finally {
+      __setMarkdownParserDisabledForTest(false);
+    }
   });
 
   it("renders markdown tables without turning divider syntax into plain text", function () {
@@ -320,5 +519,294 @@ describe("renderMarkdown with inline block tokens", function () {
       '<annotation encoding="application/x-tex">x</annotation>',
     );
     assert.include(html, " costs $5 in the toy example.");
+  });
+
+  it("renders nested lists without flattening child items", function () {
+    const html = renderMarkdown("- parent\n  - child\n- next");
+    assert.include(html, "<li>parent<ul>");
+    assert.include(html, "<li>child</li>");
+    assert.include(html, "<li>next</li>");
+  });
+
+  it("renders GFM task lists and strikethrough", function () {
+    const html = renderMarkdown("- [x] done\n- [ ] todo\n\n~~deleted~~");
+    assert.include(html, 'type="checkbox"');
+    assert.include(html, "checked");
+    assert.include(html, "<del>deleted</del>");
+  });
+
+  it("renders autolinks and links containing parentheses", function () {
+    const html = renderMarkdown(
+      "Visit https://example.com and [paper](https://example.com/a(b)).",
+    );
+    assert.include(
+      html,
+      '<a href="https://example.com" target="_blank" rel="noopener">https://example.com</a>',
+    );
+    assert.include(html, 'href="https://example.com/a(b)"');
+  });
+
+  it("does not render unsafe link or image URLs", function () {
+    const html = renderMarkdown(
+      "[bad](javascript:alert(1)) ![x](vbscript:alert(1)) ![y](data:text/html;base64,AAAA)",
+    );
+    assert.notInclude(html.toLowerCase(), "javascript:");
+    assert.notInclude(html.toLowerCase(), "vbscript:");
+    assert.notInclude(html.toLowerCase(), "data:text/html");
+    assert.notInclude(html, "<img");
+  });
+
+  it("escapes raw unsafe HTML while preserving safe attachment images", function () {
+    const unsafe = renderMarkdown('<script>alert("x")</script>');
+    assert.include(unsafe, "&lt;script&gt;");
+    assert.notInclude(unsafe, "<script>");
+
+    const safeImage = renderMarkdown(
+      '<img data-attachment-key="ABC_123" alt="Figure 1" />',
+    );
+    assert.include(safeImage, 'data-attachment-key="ABC_123"');
+    assert.include(safeImage, 'alt="Figure 1"');
+  });
+
+  it("renders simple raw HTML formatting tags without allowing attributes", function () {
+    const html = renderMarkdown(
+      "<strong>Core Method:</strong> The paper introduces <strong>Gamma-VAE</strong> and <em>latent geometry</em>.<br>Done.",
+    );
+
+    assert.include(html, "<strong>Core Method:</strong>");
+    assert.include(html, "<strong>Gamma-VAE</strong>");
+    assert.include(html, "<em>latent geometry</em>");
+    assert.include(html, "<br/>Done.");
+    assert.notInclude(html, "&lt;strong&gt;");
+
+    const unsafe = renderMarkdown('<strong onclick="alert(1)">Core</strong>');
+    assert.include(unsafe, "<strong>Core</strong>");
+    assert.notInclude(unsafe, "<strong onclick");
+  });
+
+  it("renders escaped safe HTML tags from historical messages", function () {
+    const html = renderMarkdown(
+      "- &lt;strong&gt;Core Method:&lt;/strong&gt; The paper introduces &lt;strong&gt;Gamma-VAE&lt;/strong&gt;.\n- &lt;em&gt;Still formatted&lt;/em&gt;",
+    );
+
+    assert.include(html, "<li><strong>Core Method:</strong>");
+    assert.include(html, "<strong>Gamma-VAE</strong>");
+    assert.include(html, "<li><em>Still formatted</em></li>");
+    assert.notInclude(html, "&lt;strong&gt;");
+    assert.notInclude(html, "&amp;lt;strong");
+  });
+
+  it("does not leak bold tags in loose lists with quote citations", function () {
+    const html = renderMarkdown(
+      [
+        "*   **Core Method:** The paper introduces **Gamma-VAE**.",
+        "> quoted evidence",
+        "(Kim et al., 2024)",
+        "",
+        "*   **Geometric Advantage:** It learns a **smoother** manifold.",
+      ].join("\n"),
+    );
+
+    assert.include(html, "<strong>Core Method:</strong>");
+    assert.include(html, "<strong>Gamma-VAE</strong>");
+    assert.include(html, "<strong>Geometric Advantage:</strong>");
+    assert.include(html, "<strong>smoother</strong>");
+    assert.include(html, "<blockquote>");
+    assert.notInclude(html, "&lt;strong&gt;");
+  });
+
+  it("does not restore escaped unsafe HTML tags", function () {
+    const html = renderMarkdown(
+      '&lt;script&gt;alert("x")&lt;/script&gt; &lt;a href=&quot;javascript:alert(1)&quot; onclick=&quot;alert(2)&quot;&gt;link&lt;/a&gt;',
+    );
+
+    assert.include(html, "&amp;lt;script&amp;gt;");
+    assert.include(html, '<a target="_blank" rel="noopener">link</a>');
+    assert.notInclude(html, "<script>");
+    assert.notInclude(html, "onclick");
+    assert.notInclude(html.toLowerCase(), "javascript:");
+  });
+
+  it("renders common safe raw HTML blocks without leaking tags", function () {
+    const html = renderMarkdown(
+      [
+        "<h3>Summary</h3>",
+        "<p><strong>Core Method:</strong> The paper introduces <em>Gamma-VAE</em>.</p>",
+        "<ul><li><strong>Geometric Advantage:</strong> smoother manifold</li></ul>",
+        "<blockquote><p>Quoted evidence</p></blockquote>",
+        '<ol start="3"><li>Third item</li></ol>',
+        '<a href="https://example.com">safe link</a>',
+      ].join(""),
+    );
+
+    assert.include(html, "<h3>Summary</h3>");
+    assert.include(html, "<p><strong>Core Method:</strong>");
+    assert.include(html, "<ul><li><strong>Geometric Advantage:</strong>");
+    assert.include(html, "<blockquote><p>Quoted evidence</p></blockquote>");
+    assert.include(html, '<ol start="3"><li>Third item</li></ol>');
+    assert.include(html, 'href="https://example.com"');
+    assert.notInclude(html, "&lt;p&gt;");
+    assert.notInclude(html, "&lt;ul&gt;");
+    assert.notInclude(html, "&lt;li&gt;");
+    assert.notInclude(html, "&lt;a");
+  });
+
+  it("strips unsafe raw HTML attributes and keeps unsafe tags escaped", function () {
+    const html = renderMarkdown(
+      '<p onclick="alert(1)">Safe text</p><script>alert("x")</script><a href="javascript:alert(1)" onclick="alert(2)">link</a>',
+    );
+
+    assert.include(html, "<p>Safe text</p>");
+    assert.include(html, "&lt;script&gt;");
+    assert.include(html, "alert(&quot;x&quot;)");
+    assert.include(html, '<a target="_blank" rel="noopener">link</a>');
+    assert.notInclude(html, "onclick");
+    assert.notInclude(html.toLowerCase(), "javascript:");
+    assert.notInclude(html, "<script>");
+  });
+
+  it("falls back to the Zotero renderer instead of escaped raw Markdown", function () {
+    __setMarkdownParserDisabledForTest(true);
+    try {
+      const html = renderMarkdown(
+        "## Methods\n\nThis is **important**.\n\n- one",
+      );
+      assert.include(html, "<h3>Methods</h3>");
+      assert.include(html, "<strong>important</strong>");
+      assert.include(html, "<li>one</li>");
+      assert.notInclude(html, "## Methods");
+      assert.notInclude(html, "**important**");
+      assert.notInclude(html, "render-fallback");
+    } finally {
+      __setMarkdownParserDisabledForTest(false);
+    }
+  });
+});
+
+describe("renderMarkdown code block presentation", function () {
+  it("renders normal fenced code as escaped code inside the polished shell", function () {
+    const input = "```ts\nconst label = '<svg>';\n```";
+    const html = renderMarkdown(input);
+    assert.include(html, "llm-codeblock-shell");
+    assert.include(html, "llm-codeblock-header");
+    assert.include(html, "llm-codeblock-lang");
+    assert.include(html, 'data-code-lang="ts"');
+    assert.include(html, "hljs-keyword");
+    assert.include(html, "&lt;svg&gt;");
+    assert.notInclude(html, "llm-svg-preview");
+  });
+
+  it("syntax-highlights known fenced languages without changing copy source", function () {
+    const input = [
+      "```python",
+      "def top_k(nums):",
+      "    return sorted(nums)",
+      "```",
+    ].join("\n");
+    const html = renderMarkdown(input);
+    assert.include(html, 'data-code-lang="python"');
+    assert.include(html, "language-python");
+    assert.include(html, "hljs-keyword");
+    assert.include(html, 'data-llm-copy-source="```python&#10;');
+  });
+
+  it("renders safe fenced SVG as a bounded preview while keeping source code", function () {
+    const input = [
+      "```svg",
+      '<svg width="120" height="80">',
+      '  <circle cx="40" cy="40" r="24" fill="red"/>',
+      "</svg>",
+      "```",
+    ].join("\n");
+    const html = renderMarkdown(input);
+    assert.include(html, "llm-codeblock-shell");
+    assert.include(html, 'data-code-lang="svg"');
+    assert.include(html, "llm-svg-preview");
+    assert.include(html, "data:image/svg+xml;base64,");
+    assert.include(html, "data-llm-svg-source=");
+    assert.notInclude(html, "data:image/svg+xml;charset=utf-8,");
+    assert.include(html, "&lt;circle");
+    assert.include(html, 'data-llm-copy-source="```svg&#10;');
+  });
+
+  it("renders fenced Mermaid as a hydratable preview while keeping source code", function () {
+    const input = [
+      "```mermaid",
+      "flowchart TD",
+      "  A[Continuous experience] --> B[LEC population activity]",
+      "```",
+    ].join("\n");
+    const html = renderMarkdown(input);
+    assert.include(html, "llm-codeblock-shell");
+    assert.include(html, 'data-code-lang="mermaid"');
+    assert.include(html, "llm-mermaid-preview");
+    assert.include(html, 'data-mermaid-state="pending"');
+    assert.include(html, "flowchart TD");
+    assert.include(html, "Rendering diagram...");
+    assert.include(html, 'data-llm-copy-source="```mermaid&#10;');
+  });
+
+  it("recognizes Mermaid aliases and fence metadata", function () {
+    const input = [
+      '``` mmd title="example"',
+      "flowchart TD",
+      '  A["One<br/>Two"] <--> B["Three"]',
+      "```",
+    ].join("\n");
+    const html = renderMarkdown(input);
+
+    assert.include(html, 'data-code-lang="mmd"');
+    assert.include(html, "llm-mermaid-preview");
+    assert.include(html, 'data-mermaid-state="pending"');
+    assert.include(html, "A[&quot;One&lt;br/&gt;Two&quot;]");
+    assert.include(
+      html,
+      'data-llm-copy-source="``` mmd title=&quot;example&quot;&#10;',
+    );
+  });
+
+  it("falls back to a normal code block for unsafe SVG", function () {
+    const input = [
+      "```svg",
+      '<svg width="120" height="80">',
+      '  <script>alert("x")</script>',
+      "</svg>",
+      "```",
+    ].join("\n");
+    const html = renderMarkdown(input);
+    assert.notInclude(html, "llm-svg-preview");
+    assert.notInclude(html, "data:image/svg+xml");
+    assert.include(html, "&lt;script&gt;");
+  });
+
+  it("keeps raw inline SVG escaped instead of rendering it as HTML", function () {
+    const html = renderMarkdown('<svg><circle cx="4" cy="4" r="2"/></svg>');
+    assert.include(html, "&lt;svg&gt;");
+    assert.notInclude(html, "llm-svg-preview");
+    assert.notInclude(html, "<svg><circle");
+  });
+
+  it("does not add chat SVG preview chrome for Zotero note rendering", function () {
+    const input = [
+      "```svg",
+      '<svg width="120" height="80"><circle cx="40" cy="40" r="24"/></svg>',
+      "```",
+    ].join("\n");
+    const html = renderMarkdownForNote(input);
+    assert.notInclude(html, "llm-codeblock-shell");
+    assert.notInclude(html, "llm-svg-preview");
+    assert.include(html, '<pre class="lang-svg">');
+    assert.notInclude(html, "<code>");
+    assert.include(html, "&lt;svg");
+  });
+
+  it("does not add chat Mermaid preview chrome for Zotero note rendering", function () {
+    const input = ["```mermaid", "flowchart TD", "  A --> B", "```"].join("\n");
+    const html = renderMarkdownForNote(input);
+    assert.notInclude(html, "llm-codeblock-shell");
+    assert.notInclude(html, "llm-mermaid-preview");
+    assert.include(html, '<pre class="lang-mermaid">');
+    assert.notInclude(html, "<code>");
+    assert.include(html, "flowchart TD");
   });
 });

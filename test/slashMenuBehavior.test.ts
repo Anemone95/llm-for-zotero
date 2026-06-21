@@ -12,7 +12,6 @@ describe("slash menu behavior", function () {
     assert.isTrue(
       shouldRenderDynamicSlashMenu({
         itemPresent: true,
-        isWebChat: false,
         runtimeMode: "agent",
         conversationSystem: "upstream",
       }),
@@ -23,7 +22,6 @@ describe("slash menu behavior", function () {
     assert.isTrue(
       shouldRenderDynamicSlashMenu({
         itemPresent: true,
-        isWebChat: false,
         runtimeMode: "chat",
         conversationSystem: "codex",
       }),
@@ -33,7 +31,6 @@ describe("slash menu behavior", function () {
   it("keeps Claude Code commands dynamic without showing original agent skills", function () {
     const params = {
       itemPresent: true,
-      isWebChat: false,
       runtimeMode: "agent",
       conversationSystem: "claude_code",
     } as const;
@@ -46,7 +43,6 @@ describe("slash menu behavior", function () {
     assert.isTrue(
       shouldRenderSkillSlashMenu({
         itemPresent: true,
-        isWebChat: false,
         runtimeMode: "agent",
         conversationSystem: "upstream",
       }),
@@ -54,7 +50,6 @@ describe("slash menu behavior", function () {
     assert.isTrue(
       shouldRenderSkillSlashMenu({
         itemPresent: true,
-        isWebChat: false,
         runtimeMode: "chat",
         conversationSystem: "codex",
       }),
@@ -65,20 +60,8 @@ describe("slash menu behavior", function () {
     assert.isFalse(
       shouldRenderDynamicSlashMenu({
         itemPresent: true,
-        isWebChat: false,
         runtimeMode: "chat",
         conversationSystem: "upstream",
-      }),
-    );
-  });
-
-  it("does not render dynamic sections in webchat", function () {
-    assert.isFalse(
-      shouldRenderDynamicSlashMenu({
-        itemPresent: true,
-        isWebChat: true,
-        runtimeMode: "agent",
-        conversationSystem: "codex",
       }),
     );
   });
@@ -109,12 +92,14 @@ describe("slash menu behavior", function () {
       "discover_related",
     ]);
     assert.notInclude(paperActions, "audit_library");
-    assert.includeMembers(libraryActions, [
+    assert.sameMembers(libraryActions, [
       "audit_library",
       "organize_unfiled",
-      "library_statistics",
-      "literature_review",
+      "auto_tag",
     ]);
     assert.notInclude(libraryActions, "discover_related");
+    assert.notInclude(libraryActions, "complete_metadata");
+    assert.notInclude(libraryActions, "library_statistics");
+    assert.notInclude(libraryActions, "literature_review");
   });
 });

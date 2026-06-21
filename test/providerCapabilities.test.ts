@@ -1,8 +1,5 @@
 import { assert } from "chai";
-import {
-  isTextOnlyModel,
-  resolveProviderCapabilities,
-} from "../src/providers";
+import { isTextOnlyModel, resolveProviderCapabilities } from "../src/providers";
 
 describe("provider capabilities", function () {
   it("routes first-party PDF providers to native support", function () {
@@ -117,6 +114,10 @@ describe("provider capabilities", function () {
         protocol: "anthropic_messages",
       },
       {
+        apiBase: "https://api.xiaomimimo.com/v1",
+        protocol: "openai_chat_compat",
+      },
+      {
         apiBase: "https://third-party.example/gemini",
         protocol: "gemini_native",
       },
@@ -162,8 +163,10 @@ describe("provider capabilities", function () {
     }
   });
 
-  it("treats DeepSeek V4 models as text-only", function () {
+  it("keeps known DeepSeek API models image-disabled", function () {
     for (const model of [
+      "deepseek-chat",
+      "deepseek-reasoner",
       "deepseek-v4-flash",
       "deepseek-v4-pro",
       "deepseek/deepseek-v4-pro",
@@ -181,6 +184,16 @@ describe("provider capabilities", function () {
           multimodal: false,
         },
       );
+    }
+  });
+
+  it("keeps explicit text-only and embedding model names blocked", function () {
+    for (const model of [
+      "local-text-only",
+      "local-reasoner",
+      "deepseek-embedding",
+    ]) {
+      assert.isTrue(isTextOnlyModel(model), model);
     }
   });
 });

@@ -1,7 +1,7 @@
-import { renderMarkdown, renderMarkdownForNote } from "../../utils/markdown";
+import { renderMarkdownForNote } from "../../utils/markdown";
 import {
+  t,
   getWelcomeHtml,
-  getWebChatWelcomeHtml,
   getStandaloneLibraryChatStartPageHtml,
   getPaperChatStartPageHtml,
   getNoteEditingStartPageHtml,
@@ -9,18 +9,14 @@ import {
 import {
   appendMessage as appendStoredMessage,
   clearConversation as clearStoredConversation,
-  loadConversation,
   pruneConversation,
   updateLatestUserMessage as updateStoredLatestUserMessage,
   updateLatestAssistantMessage as updateStoredLatestAssistantMessage,
-  deleteTurnMessages as deleteStoredTurnMessages,
   StoredChatMessage,
 } from "../../utils/chatStore";
-import { loadClaudeConversation } from "../../claudeCode/store";
+import { conversationRepository } from "../../core/conversations/repository";
 import {
   appendCodexMessage,
-  deleteCodexTurnMessages,
-  loadCodexConversation,
   pruneCodexConversation,
   updateLatestCodexAssistantMessage,
   updateLatestCodexUserMessage,
@@ -33,27 +29,24 @@ import {
   appendClaudeConversationMessage,
   buildClaudeScope,
   captureClaudeSessionInfo,
-  deleteClaudeConversationTurnMessages,
   getClaudeBridgeRuntime,
   isClaudeConversationSystemActive,
   updateLatestClaudeConversationAssistantMessage,
   updateLatestClaudeConversationUserMessage,
 } from "../../claudeCode/runtime";
-import { isClaudeConversationKey } from "../../claudeCode/constants";
-import {
-  getCodexProfileSignature,
-  isCodexConversationKey,
-} from "../../codexAppServer/constants";
+import { getCodexProfileSignature } from "../../codexAppServer/constants";
+import { resolveConversationStorageSystem } from "../../shared/conversationStorageRouting";
+import { normalizeForcedSkillIds } from "../../shared/skillIds";
 import {
   getCodexReasoningModePref,
   getCodexRuntimeModelPref,
   isCodexAppServerModeEnabled,
   isCodexZoteroMcpToolsEnabled,
 } from "../../codexAppServer/prefs";
+import { getEffectiveCodexAppServerBinaryPath } from "../../codexAppServer/binaryPath";
 import {
-  getEffectiveCodexAppServerBinaryPath,
-} from "../../codexAppServer/binaryPath";
-import {
+  compactCodexAppServerConversation,
+  NO_CODEX_APP_SERVER_THREAD_TO_COMPACT_MESSAGE,
   resolveCodexNativeApprovalRequest,
   runCodexAppServerNativeTurn,
   type CodexNativeConversationScope,
@@ -79,6 +72,7 @@ import { inferLegacyProviderProtocol } from "../../utils/providerProtocol";
 import {
   PERSISTED_HISTORY_LIMIT,
   AUTO_SCROLL_BOTTOM_THRESHOLD,
+  MAX_FULL_TEXT_PAPER_CONTEXTS,
   MAX_SELECTED_IMAGES,
   formatFigureCountLabel,
   formatPaperCountLabel,
@@ -88,8 +82,25 @@ import {
   type BlockStreamCoalescer,
   type BlockStreamFlushReason,
 } from "./blockStreamCoalescer";
-import type { ConversationSystem, QuoteCitation } from "../../shared/types";
-import { ensureMineruCacheDirForAttachment } from "./mineruSync";
+import type {
+  ConversationSystem,
+  GeneratedChatImage,
+  QuoteCitation,
+} from "../../shared/types";
+import {
+  getConversationForkLink,
+  type ConversationForkLink,
+} from "../../shared/conversationForkLinks";
+import {
+  isRenderableGeneratedImageSrc,
+  normalizeGeneratedChatImages,
+} from "../../shared/generatedImages";
+import {
+  isEmbeddableGeneratedImage,
+  resolveGeneratedImageAsset,
+  resolveGeneratedImageLocalPath,
+  saveGeneratedImageAssetToPath,
+} from "./generatedImageAssets";
 import type {
   Message,
   ChatRuntimeMode,
@@ -100,14 +111,17 @@ import type {
   ChatAttachment,
   CollectionContextRef,
   NoteContextRef,
+  TagContextRef,
   SelectedTextContext,
   SelectedTextSource,
   PaperContextRef,
   PaperContextSendMode,
   ContextAssemblyStrategy,
+  ResolvedContextSource,
 } from "./types";
 import {
   chatHistory,
+  conversationForkLinks,
   loadedConversationKeys,
   loadingConversationTasks,
   selectedModelCache,
@@ -117,6 +131,7 @@ import {
   selectedFileAttachmentCache,
   selectedPaperContextCache,
   selectedCollectionContextCache,
+  selectedTagContextCache,
   paperContextModeOverrides,
   activeContextPanels,
   activeContextPanelStateSync,
@@ -127,6 +142,8 @@ import {
   isRequestPending,
   setPendingRequestId,
   setResponseMenuTarget,
+  getResponseActionRunner,
+  getForkSourceNavigationRunner,
   setPromptMenuTarget,
   inlineEditTarget,
   setInlineEditTarget,
@@ -140,6 +157,8 @@ import {
   setInlineEditSavedDraft,
   selectedRuntimeModeCache,
   pdfTextCache,
+  type ResponseActionKind,
+  type ResponseActionTarget,
 } from "./state";
 import { agentRunTraceCache, agentRunTraceLoadingTasks } from "./agentState";
 import {
@@ -151,9 +170,12 @@ import {
   getAttachmentTypeLabel,
   buildQuestionWithSelectedTextContexts,
   buildModelPromptWithFileContext,
-  getSelectedTextSourceIcon,
   resolvePromptText,
 } from "./textUtils";
+import {
+  createContextIcon,
+  createSelectedTextSourceIcon,
+} from "./contextIcons";
 import {
   buildCodexAppServerNativeAttachmentBlockMessage,
   getBlockedCodexAppServerNativeAttachments,
@@ -165,6 +187,7 @@ import {
   normalizeSelectedTextSources,
   normalizePaperContextRefs,
   normalizeCollectionContextRefs,
+  normalizeTagContextRefs,
   normalizeAttachmentContentHash,
 } from "./normalizers";
 import { positionMenuAtPointer } from "./menuPositioning";
@@ -181,13 +204,19 @@ import {
   setLastUsedReasoningLevelForProvider,
 } from "./prefHelpers";
 import { resolveMultiContextPlan } from "./multiContextPlanner";
-import { resolveContextImages, buildImageResolver } from "./mineruImages";
 import {
   formatPaperCitationLabel,
+  formatPaperSourceLabel,
+  resolvePaperContextDisplayRef,
   resolvePaperContextRefFromAttachment,
   resolvePaperContextRefFromItem,
+  type PaperContextDisplayCache,
 } from "./paperAttribution";
-import { buildPaperKey } from "./pdfContext";
+import {
+  buildPaperKey,
+  ensureNoteTextCached,
+  ensurePDFTextCached,
+} from "./pdfContext";
 import { isTextOnlyModel, resolveProviderCapabilities } from "../../providers";
 import {
   getActiveContextAttachmentFromTabs,
@@ -201,14 +230,17 @@ import {
   resolveConversationSystemForItem,
   resolveDisplayConversationKind,
 } from "./portalScope";
+import { shouldShowForkActionForAssistantTurn } from "./forkActionVisibility";
 import { buildChatHistoryNotePayload } from "./notes";
 import { readNoteSnapshot } from "./noteSnapshot";
 import { extractManagedBlobHash } from "./attachmentStorage";
 import { buildContextPlanSystemMessages } from "./requestSystemMessages";
 import { canEditUserPromptTurn } from "./editability";
 import { renderAgentTrace, renderPendingActionCard } from "./agentTrace/render";
+import { renderRenderedMarkdownInto } from "./renderedMarkdown";
 import { toFileUrl } from "../../utils/pathFileUrl";
 import { replaceOwnerAttachmentRefs } from "../../utils/attachmentRefStore";
+import { getNotesDirectoryConfig } from "../../utils/notesDirectoryConfig";
 import {
   decorateAssistantCitationLinks,
   renderQuoteCitationPlaceholders,
@@ -218,11 +250,20 @@ import {
   mergeCitationPaperContexts,
 } from "./citationContexts";
 import {
+  buildQuoteSourceIndex,
   buildSelectedTextQuoteCitations,
   extractQuoteCitationsFromToolContent,
+  finalizeAssistantQuoteCitations,
   mergeQuoteCitations,
+  normalizeQuoteCitationPlaceholdersForDisplay,
+  replaceQuoteCitationPlaceholdersForMarkdown,
+  type QuoteSourceText,
 } from "./quoteCitations";
-import { getAgentApi, getCoreAgentRuntime } from "../../agent/index";
+import {
+  getAgentApi,
+  getCoreAgentRuntime,
+  initAgentSubsystem,
+} from "../../agent/index";
 import { getClaudeReasoningModePref } from "../../claudeCode/prefs";
 import { getAgentRunTrace } from "../../agent/store/traceStore";
 import {
@@ -231,6 +272,8 @@ import {
   clearConversationSummary,
 } from "./conversationSummaryCache";
 import type {
+  AgentAttachmentResource,
+  AgentAttachmentResourceSummary,
   AgentConfirmationResolution,
   AgentEvent,
   AgentPendingAction,
@@ -250,8 +293,18 @@ import {
 } from "./queuedFollowUps";
 import { getConversationKey } from "./conversationIdentity";
 import { recordContextCacheTelemetry } from "../../contextCache/manager";
+import { resolveContextAttachmentSupportFromMetadata } from "./contextAttachmentSupport";
+import {
+  getConversationScopeValidationDetails,
+  type ConversationRegistryScope,
+} from "../../shared/conversationRegistry";
+import {
+  provisionConversationScopeForItem,
+  resolveConversationStorageSystemForItem,
+} from "./conversationProvisioning";
 
 export { getConversationKey } from "./conversationIdentity";
+export { renderAssistantMarkdownHtmlForChat } from "./renderedMarkdown";
 
 /** Get AbortController constructor from global scope */
 function getAbortControllerCtor(): new () => AbortController {
@@ -263,6 +316,118 @@ function getAbortControllerCtor(): new () => AbortController {
       }
     ).AbortController
   );
+}
+
+const blockedConversationLoadKeys = new Set<number>();
+
+function normalizeConversationScopeInt(value: unknown): number | null {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.floor(parsed);
+}
+
+function buildConversationRegistryScopeForItem(
+  item: Zotero.Item,
+  conversationKey: number,
+  conversationSystem?: ConversationSystem | null,
+): ConversationRegistryScope | null {
+  const normalizedConversationKey =
+    normalizeConversationScopeInt(conversationKey);
+  if (!normalizedConversationKey) return null;
+  const storageSystem = resolveConversationStorageSystemForItem({
+    item,
+    conversationSystem,
+  });
+  if (!storageSystem) return null;
+  const kind = resolveDisplayConversationKind(item);
+  const libraryID = normalizeConversationScopeInt(item?.libraryID);
+  if (!kind || !libraryID) return null;
+  if (kind === "global") {
+    return {
+      conversationKey: normalizedConversationKey,
+      system: storageSystem,
+      kind: "global",
+      libraryID,
+    };
+  }
+  const baseItem = resolveConversationBaseItem(item);
+  const paperItemID = normalizeConversationScopeInt(baseItem?.id);
+  const paperLibraryID =
+    normalizeConversationScopeInt(baseItem?.libraryID) || libraryID;
+  if (!paperItemID || !paperLibraryID) return null;
+  return {
+    conversationKey: normalizedConversationKey,
+    system: storageSystem,
+    kind: "paper",
+    libraryID: paperLibraryID,
+    paperItemID,
+  };
+}
+
+async function validateConversationScopeForItem(params: {
+  item: Zotero.Item;
+  conversationKey: number;
+  conversationSystem?: ConversationSystem | null;
+}): Promise<boolean> {
+  await provisionConversationScopeForItem({
+    item: params.item,
+    conversationSystem: params.conversationSystem,
+  });
+  const scope = buildConversationRegistryScopeForItem(
+    params.item,
+    params.conversationKey,
+    params.conversationSystem,
+  );
+  if (!scope) return true;
+  const validation = await getConversationScopeValidationDetails(scope);
+  if (!validation.valid) {
+    const registered = validation.registered
+      ? `; registered as ${validation.registered.system}/${validation.registered.kind} library ${validation.registered.libraryID} paper ${validation.registered.paperItemID || ""} id ${validation.registered.conversationID}`
+      : "";
+    ztoolkit.log(
+      `LLM: Refused to use mismatched ${scope.system}/${scope.kind} conversation ${scope.conversationKey} for library ${scope.libraryID} paper ${scope.paperItemID || ""} (${validation.reason})${registered}`,
+    );
+  }
+  return validation.valid;
+}
+
+function collectMessagePaperContextIds(
+  refs: (PaperContextRef | undefined)[] | undefined,
+  out: Set<number>,
+): void {
+  if (!Array.isArray(refs)) return;
+  for (const ref of refs) {
+    const itemID = normalizeConversationScopeInt(ref?.itemId);
+    if (itemID) out.add(itemID);
+  }
+}
+
+function storedMessagesMatchActivePaper(
+  item: Zotero.Item,
+  storedMessages: StoredChatMessage[],
+): boolean {
+  if (resolveDisplayConversationKind(item) !== "paper") return true;
+  const baseItem = resolveConversationBaseItem(item);
+  const activePaperItemID = normalizeConversationScopeInt(baseItem?.id);
+  if (!activePaperItemID) return true;
+  const ids = new Set<number>();
+  for (const message of storedMessages) {
+    collectMessagePaperContextIds(message.paperContexts, ids);
+    collectMessagePaperContextIds(message.fullTextPaperContexts, ids);
+    collectMessagePaperContextIds(message.citationPaperContexts, ids);
+    collectMessagePaperContextIds(message.selectedTextPaperContexts, ids);
+  }
+  if (ids.size === 0) return true;
+  return ids.has(activePaperItemID);
+}
+
+function isCompactCommandText(text: string): boolean {
+  return /^\/compact(?:\s|$)/i.test((text || "").trim());
+}
+
+function removeMessageReference(history: Message[], message: Message): void {
+  const index = history.indexOf(message);
+  if (index >= 0) history.splice(index, 1);
 }
 
 function appendReasoningPart(base: string | undefined, next?: string): string {
@@ -357,6 +522,10 @@ function resolveMultimodalRetryHint(
 function openStoredAttachmentFromMessage(attachment: ChatAttachment): boolean {
   const fileUrl = toFileUrl(attachment.storedPath);
   if (!fileUrl) return false;
+  return openFileUrl(fileUrl);
+}
+
+function openFileUrl(fileUrl: string): boolean {
   try {
     const launch = (Zotero as any).launchURL as
       | ((url: string) => void)
@@ -380,6 +549,403 @@ function openStoredAttachmentFromMessage(attachment: ChatAttachment): boolean {
     void _err;
   }
   return false;
+}
+
+function resolveGeneratedChatImageSrc(image: GeneratedChatImage): string {
+  const fileUrl = toFileUrl(image.path);
+  if (fileUrl) return fileUrl;
+  return isRenderableGeneratedImageSrc(image.src) ? image.src.trim() : "";
+}
+
+function bytesToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
+}
+
+export async function copyGeneratedImageToClipboard(
+  body: Element,
+  image: GeneratedChatImage,
+): Promise<"image" | "source"> {
+  let asset: Awaited<ReturnType<typeof resolveGeneratedImageAsset>> = null;
+  try {
+    asset = await resolveGeneratedImageAsset(image);
+  } catch (err) {
+    ztoolkit.log("LLM: Generated image read failed, falling back:", err);
+  }
+  const win = body.ownerDocument?.defaultView as
+    | (Window & {
+        navigator?: Navigator;
+        ClipboardItem?: new (items: Record<string, Blob>) => ClipboardItem;
+      })
+    | undefined;
+  if (asset?.bytes && win?.navigator?.clipboard?.write && win.ClipboardItem) {
+    try {
+      const blob = new Blob([bytesToArrayBuffer(asset.bytes)], {
+        type: asset.mimeType,
+      });
+      const item = new win.ClipboardItem({ [asset.mimeType]: blob });
+      await win.navigator.clipboard.write([item]);
+      return "image";
+    } catch (err) {
+      ztoolkit.log("LLM: Image clipboard write failed, falling back:", err);
+    }
+  }
+
+  const source =
+    asset?.fileUrl ||
+    asset?.path ||
+    toFileUrl(image.path) ||
+    image.path ||
+    (isRenderableGeneratedImageSrc(image.src) ? image.src.trim() : "");
+  if (!source) {
+    throw new Error("Generated image source is unavailable");
+  }
+  await copyTextToClipboard(body, source);
+  return "source";
+}
+
+type GeneratedImageSavePathResult =
+  | { status: "selected"; path: string }
+  | { status: "cancelled" }
+  | { status: "unavailable" };
+
+type GeneratedImageFilePicker = {
+  init?: (parent: unknown, title: string, mode: number) => void;
+  appendFilter?: (title: string, filter: string) => void;
+  appendFilters?: (filterMask: number) => void;
+  open?: (callback: (result: number) => void) => void;
+  show?: () => number | Promise<number>;
+  defaultString?: string;
+  defaultExtension?: string;
+  file?: string | { path?: string };
+  modeSave?: number;
+  returnOK?: number;
+  returnReplace?: number;
+  filterAll?: number;
+};
+
+type GeneratedImageFilePickerConstructor = new () => GeneratedImageFilePicker;
+
+function getGeneratedImagePickerParentWindow(doc: Document): Window | null {
+  const mainWindow = Zotero.getMainWindow?.() as Window | null | undefined;
+  const candidates = [mainWindow, doc.defaultView].filter(Boolean) as Window[];
+  const withBrowsingContext = candidates.find((candidate) =>
+    Boolean(
+      (candidate as unknown as { browsingContext?: unknown }).browsingContext,
+    ),
+  );
+  return withBrowsingContext || candidates[0] || null;
+}
+
+function getZoteroFilePickerConstructor(): GeneratedImageFilePickerConstructor | null {
+  const ZoteroFilePicker = (Zotero as any).FilePicker as
+    | GeneratedImageFilePickerConstructor
+    | undefined;
+  if (typeof ZoteroFilePicker === "function") return ZoteroFilePicker;
+
+  const CU = (globalThis as any).ChromeUtils;
+  if (CU?.importESModule) {
+    try {
+      const mod = CU.importESModule(
+        "chrome://zotero/content/modules/filePicker.mjs",
+      ) as { FilePicker?: GeneratedImageFilePickerConstructor };
+      if (typeof mod.FilePicker === "function") return mod.FilePicker;
+    } catch (err) {
+      ztoolkit.log("LLM: Failed to import Zotero file picker module", err);
+    }
+  }
+  return null;
+}
+
+function getGeneratedImagePickerFilePath(
+  picker: GeneratedImageFilePicker,
+): string {
+  const file = picker.file;
+  if (typeof file === "string") return file.trim();
+  return typeof file?.path === "string" ? file.path.trim() : "";
+}
+
+function configureGeneratedImageFilePicker(
+  picker: GeneratedImageFilePicker,
+  parent: unknown,
+  fileName: string,
+  constants: {
+    modeSave?: number;
+    filterAll?: number;
+  },
+): void {
+  picker.init?.(
+    parent,
+    "Save generated image",
+    picker.modeSave ?? constants.modeSave ?? 0,
+  );
+  const defaultName = fileName || "generated-image.png";
+  try {
+    picker.defaultString = defaultName;
+  } catch (err) {
+    ztoolkit.log("LLM: Failed to set generated image default filename", err);
+  }
+  const extMatch = defaultName.match(/\.([A-Za-z0-9]+)$/);
+  if (extMatch?.[1]) {
+    try {
+      picker.defaultExtension = extMatch[1];
+    } catch (err) {
+      ztoolkit.log("LLM: Failed to set generated image default extension", err);
+    }
+  }
+  try {
+    picker.appendFilter?.("Images", "*.png;*.jpg;*.jpeg;*.gif;*.webp;*.svg");
+  } catch (err) {
+    ztoolkit.log("LLM: Failed to add generated image file filter", err);
+  }
+  const filterAll = picker.filterAll ?? constants.filterAll;
+  if (typeof filterAll === "number") {
+    try {
+      picker.appendFilters?.(filterAll);
+    } catch (err) {
+      ztoolkit.log("LLM: Failed to add generated image all-files filter", err);
+    }
+  }
+}
+
+async function resolveGeneratedImageFilePickerResult(
+  picker: GeneratedImageFilePicker,
+  constants: {
+    returnOK?: number;
+    returnReplace?: number;
+  },
+): Promise<GeneratedImageSavePathResult> {
+  const result = await new Promise<number>((resolve, reject) => {
+    try {
+      if (typeof picker.open === "function") {
+        picker.open((value: number) => resolve(value));
+        return;
+      }
+      if (typeof picker.show === "function") {
+        void Promise.resolve(picker.show()).then(resolve, reject);
+        return;
+      }
+      resolve(-1);
+    } catch (err) {
+      reject(err);
+    }
+  });
+  const returnOK = picker.returnOK ?? constants.returnOK;
+  const returnReplace = picker.returnReplace ?? constants.returnReplace;
+  const ok =
+    result === returnOK ||
+    result === returnReplace ||
+    (typeof returnOK !== "number" &&
+      typeof returnReplace !== "number" &&
+      result === 0);
+  if (!ok) return { status: "cancelled" };
+  const path = getGeneratedImagePickerFilePath(picker);
+  return path ? { status: "selected", path } : { status: "unavailable" };
+}
+
+async function pickGeneratedImageSavePath(
+  doc: Document,
+  fileName: string,
+): Promise<GeneratedImageSavePathResult> {
+  const parentWindow = getGeneratedImagePickerParentWindow(doc);
+  const ZoteroFilePicker = getZoteroFilePickerConstructor();
+  if (ZoteroFilePicker) {
+    try {
+      const picker = new ZoteroFilePicker();
+      if (!parentWindow) {
+        return { status: "unavailable" };
+      }
+      configureGeneratedImageFilePicker(picker, parentWindow, fileName, {});
+      return await resolveGeneratedImageFilePickerResult(picker, {});
+    } catch (err) {
+      ztoolkit.log("LLM: Zotero file picker failed", err);
+    }
+  }
+
+  const components = (globalThis as any).Components;
+  const Cc = components?.classes;
+  const Ci = components?.interfaces;
+  const filePickerFactory = Cc?.["@mozilla.org/filepicker;1"];
+  const nsIFilePicker = Ci?.nsIFilePicker;
+  if (!filePickerFactory?.createInstance || !nsIFilePicker) {
+    return { status: "unavailable" };
+  }
+
+  try {
+    const picker = filePickerFactory.createInstance(
+      nsIFilePicker,
+    ) as GeneratedImageFilePicker;
+    const parentBrowsingContext = (
+      parentWindow as unknown as { browsingContext?: unknown } | null
+    )?.browsingContext;
+    configureGeneratedImageFilePicker(
+      picker,
+      parentBrowsingContext || null,
+      fileName,
+      {
+        modeSave: nsIFilePicker.modeSave,
+        filterAll: nsIFilePicker.filterAll,
+      },
+    );
+    return await resolveGeneratedImageFilePickerResult(picker, {
+      returnOK: nsIFilePicker.returnOK,
+      returnReplace: nsIFilePicker.returnReplace,
+    });
+  } catch (err) {
+    ztoolkit.log("LLM: XPCOM file picker failed", err);
+    return { status: "unavailable" };
+  }
+}
+
+export function renderAssistantGeneratedImagesInto(
+  container: HTMLElement,
+  images: GeneratedChatImage[] | undefined,
+  doc: Document,
+  options: {
+    onImageLoaded?: () => void;
+    onImageActionStatus?: (
+      message: string,
+      level: "ready" | "warning" | "error",
+    ) => void;
+  } = {},
+): boolean {
+  const normalized = normalizeGeneratedChatImages(images);
+  const renderable = normalized
+    .map((image) => ({ image, src: resolveGeneratedChatImageSrc(image) }))
+    .filter((entry) => Boolean(entry.src));
+  if (!renderable.length) return false;
+
+  const wrap = doc.createElement("div") as HTMLDivElement;
+  wrap.className = "llm-assistant-generated-images";
+  for (const { image, src } of renderable) {
+    const figure = doc.createElement("figure") as HTMLElement;
+    figure.className = "llm-assistant-generated-image-frame";
+
+    const img = doc.createElement("img") as HTMLImageElement;
+    img.className = "llm-assistant-generated-image";
+    img.src = src;
+    img.alt = image.label || "Generated image";
+    img.title = image.revisedPrompt || image.label || "";
+    img.loading = "lazy";
+    if (options.onImageLoaded) {
+      img.addEventListener("load", options.onImageLoaded);
+      img.addEventListener("error", options.onImageLoaded);
+    }
+    figure.appendChild(img);
+
+    const report = (
+      message: string,
+      level: "ready" | "warning" | "error" = "ready",
+    ) => {
+      options.onImageActionStatus?.(message, level);
+    };
+    const createActionButton = (
+      className: string,
+      title: string,
+      onClick: () => Promise<void> | void,
+    ): HTMLButtonElement => {
+      const button = doc.createElement("button") as HTMLButtonElement;
+      button.className = `llm-generated-image-action ${className}`;
+      button.type = "button";
+      button.title = title;
+      button.setAttribute("aria-label", title);
+      button.addEventListener("click", (event: Event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === "function") {
+          event.stopImmediatePropagation();
+        }
+        return Promise.resolve(onClick()).catch((error) => {
+          ztoolkit.log("LLM: Generated image action failed:", error);
+          report(
+            error instanceof Error
+              ? error.message
+              : "Generated image action failed",
+            "error",
+          );
+        });
+      });
+      return button;
+    };
+
+    if (isEmbeddableGeneratedImage(image)) {
+      const actions = doc.createElement("div") as HTMLDivElement;
+      actions.className = "llm-assistant-generated-image-actions";
+      actions.appendChild(
+        createActionButton(
+          "llm-generated-image-action-copy",
+          "Copy image",
+          async () => {
+            const result = await copyGeneratedImageToClipboard(
+              container,
+              image,
+            );
+            report(result === "image" ? "Copied image" : "Copied image source");
+          },
+        ),
+      );
+      actions.appendChild(
+        createActionButton(
+          "llm-generated-image-action-save",
+          "Save image as...",
+          async () => {
+            const asset = await resolveGeneratedImageAsset(image);
+            if (!asset) {
+              report("Generated image file is unavailable", "error");
+              return;
+            }
+            const saveTarget = await pickGeneratedImageSavePath(
+              doc,
+              asset.fileName,
+            );
+            if (saveTarget.status === "cancelled") {
+              report("Image save cancelled", "ready");
+              return;
+            }
+            if (saveTarget.status === "unavailable") {
+              report("Save dialog unavailable", "warning");
+              return;
+            }
+            await saveGeneratedImageAssetToPath(asset, saveTarget.path);
+            report("Saved image", "ready");
+          },
+        ),
+      );
+      const fileUrl = toFileUrl(resolveGeneratedImageLocalPath(image));
+      const openButton = createActionButton(
+        "llm-generated-image-action-open",
+        "Open image",
+        () => {
+          if (fileUrl && openFileUrl(fileUrl)) {
+            report("Opened image", "ready");
+          } else {
+            report("Generated image file is unavailable", "error");
+          }
+        },
+      );
+      if (!fileUrl) {
+        openButton.disabled = true;
+        openButton.title = "Open image unavailable";
+        openButton.setAttribute("aria-label", "Open image unavailable");
+      }
+      actions.appendChild(openButton);
+      figure.appendChild(actions);
+    }
+
+    if (image.label) {
+      const caption = doc.createElement("figcaption") as HTMLElement;
+      caption.className = "llm-assistant-generated-image-caption";
+      caption.textContent = image.label;
+      caption.title = image.label;
+      figure.appendChild(caption);
+    }
+
+    wrap.appendChild(figure);
+  }
+  container.appendChild(wrap);
+  return true;
 }
 
 function normalizeSelectedTexts(
@@ -429,8 +995,13 @@ function normalizeCollectionContexts(
   return normalizeCollectionContextRefs(collectionContexts, { sanitizeText });
 }
 
+function normalizeTagContexts(tagContexts: unknown): TagContextRef[] {
+  return normalizeTagContextRefs(tagContexts, { sanitizeText });
+}
+
 function resolveAutoLoadedPaperContextForItem(
   item: Zotero.Item,
+  contextSource?: ResolvedContextSource | null,
 ): PaperContextRef | null {
   const activeNoteSession = resolveActiveNoteSession(item);
   if (activeNoteSession?.noteKind === "standalone") {
@@ -451,8 +1022,21 @@ function resolveAutoLoadedPaperContextForItem(
   if (resolveDisplayConversationKind(item) === "global") {
     return null;
   }
-  const contextSource = resolveContextSourceItem(item);
-  return resolvePaperContextRefFromAttachment(contextSource.contextItem);
+  const explicitPaperContext = normalizePaperContexts(
+    contextSource?.paperContext ? [contextSource.paperContext] : [],
+  )[0];
+  if (explicitPaperContext) return explicitPaperContext;
+  const sourceItem = contextSource?.contextItem || null;
+  if (sourceItem?.isAttachment?.()) {
+    const explicitSourceContext =
+      resolvePaperContextRefFromAttachment(sourceItem);
+    if (explicitSourceContext) return explicitSourceContext;
+  }
+  const resolvedContextSource = resolveContextSourceItem(sourceItem || item);
+  return (
+    resolvedContextSource.paperContext ||
+    resolvePaperContextRefFromAttachment(resolvedContextSource.contextItem)
+  );
 }
 
 function resolveLibraryDisplayName(libraryID: number): string | undefined {
@@ -582,46 +1166,6 @@ function renderUserBubbleContent(
   }
 }
 
-export function renderAssistantMarkdownHtmlForChat(
-  text: string,
-  options?: { resolveImage?: (src: string) => string | null },
-): string {
-  return renderMarkdown(sanitizeText(text), options);
-}
-
-function attachRenderedCopyButtons(root: ParentNode, doc: Document): void {
-  const copyables = Array.from(
-    root.querySelectorAll(".llm-copyable[data-llm-copy-source]"),
-  ) as HTMLElement[];
-  for (const copyable of copyables) {
-    if (copyable.classList.contains("llm-copyable-inline")) continue;
-    if (!copyable.dataset.copyFeedbackBound) {
-      copyable.dataset.copyFeedbackBound = "true";
-      const clearCopyFeedback = () => {
-        delete copyable.dataset.copyFeedback;
-      };
-      copyable.addEventListener("mouseleave", clearCopyFeedback);
-      copyable.addEventListener("focusout", (event: FocusEvent) => {
-        const next = event.relatedTarget as Node | null;
-        if (!next || !copyable.contains(next)) {
-          clearCopyFeedback();
-        }
-      });
-    }
-    const existing = copyable.querySelector(
-      ":scope > .llm-render-copy-btn",
-    ) as HTMLButtonElement | null;
-    if (existing) continue;
-    const button = doc.createElement("button") as HTMLButtonElement;
-    button.type = "button";
-    button.className = "llm-render-copy-btn";
-    button.textContent = "⧉";
-    button.title = "Copy original markdown";
-    button.setAttribute("aria-label", "Copy original markdown");
-    copyable.insertBefore(button, copyable.firstChild);
-  }
-}
-
 const ASSISTANT_RESPONSE_CONTEXT_MENU_SUPPRESS_SELECTOR = [
   ".llm-action-inline-card",
   ".llm-agent-hitl-card",
@@ -648,9 +1192,101 @@ export function shouldSuppressAssistantResponseContextMenu(
 }
 
 export function shouldAttachAssistantResponseContextMenu(
-  message: Pick<Message, "text">,
+  message: Pick<Message, "text" | "generatedImages">,
 ): boolean {
-  return Boolean(sanitizeText(message.text || "").trim());
+  if (sanitizeText(message.text || "").trim()) return true;
+  return normalizeGeneratedChatImages(message.generatedImages).some(
+    isEmbeddableGeneratedImage,
+  );
+}
+
+export function resolveAssistantResponseMenuContent(
+  message: Pick<Message, "text" | "generatedImages">,
+  selectedText = "",
+): { contentText: string; generatedImages?: GeneratedChatImage[] } | null {
+  const selected = sanitizeText(selectedText || "").trim();
+  if (selected) return { contentText: selected };
+  const contentText = sanitizeText(message.text || "").trim();
+  const generatedImages = normalizeGeneratedChatImages(
+    message.generatedImages,
+  ).filter(isEmbeddableGeneratedImage);
+  if (!contentText && !generatedImages.length) return null;
+  return {
+    contentText,
+    generatedImages: generatedImages.length ? generatedImages : undefined,
+  };
+}
+
+export function buildAssistantResponseActionTarget(params: {
+  item: Zotero.Item;
+  message: Message;
+  pairedUserMessage: Message | null;
+  conversationKey: number;
+  selectedText?: string;
+}): ResponseActionTarget | null {
+  const { item, message, pairedUserMessage, conversationKey, selectedText } =
+    params;
+  const menuContent = resolveAssistantResponseMenuContent(
+    message,
+    selectedText || "",
+  );
+  if (!menuContent) return null;
+  const pairedUser =
+    pairedUserMessage?.role === "user" ? pairedUserMessage : null;
+  return {
+    item,
+    contentText: menuContent.contentText,
+    queryText: pairedUser ? pairedUser.text || "" : "",
+    modelName: message.modelName?.trim() || "unknown",
+    conversationKey,
+    userTimestamp: pairedUser ? Math.floor(pairedUser.timestamp) : 0,
+    assistantTimestamp: Math.floor(message.timestamp),
+    paperContexts: pairedUser
+      ? getMessageCitationPaperContexts(pairedUser)
+      : undefined,
+    quoteCitations: message.quoteCitations,
+    generatedImages: menuContent.generatedImages,
+  };
+}
+
+function buildAssistantResponseDeleteTarget(params: {
+  item: Zotero.Item;
+  message: Message;
+  pairedUserMessage: Message | null;
+  conversationKey: number;
+  contentTarget: ResponseActionTarget | null;
+}): ResponseActionTarget | null {
+  const pairedUser =
+    params.pairedUserMessage?.role === "user" ? params.pairedUserMessage : null;
+  if (!pairedUser) return null;
+  return (
+    params.contentTarget || {
+      item: params.item,
+      contentText: "",
+      queryText: pairedUser.text || "",
+      modelName: params.message.modelName?.trim() || "unknown",
+      conversationKey: params.conversationKey,
+      userTimestamp: Math.floor(pairedUser.timestamp),
+      assistantTimestamp: Math.floor(params.message.timestamp),
+      paperContexts: getMessageCitationPaperContexts(pairedUser),
+      quoteCitations: params.message.quoteCitations,
+      generatedImages: undefined,
+    }
+  );
+}
+
+export function invokeResponseMenuActionButton(params: {
+  body: Element;
+  action: ResponseActionKind;
+  target: ResponseActionTarget | null;
+}): boolean {
+  const { action, body, target } = params;
+  if (!target) return false;
+  const runner = getResponseActionRunner(body);
+  if (!runner) return false;
+  setResponseMenuTarget(target);
+  void runner(action, target);
+  return true;
 }
 
 export function shouldDecorateInterleavedAgentTraceCitations(params: {
@@ -706,12 +1342,28 @@ function attachAssistantResponseContextMenu(params: {
     const responseMenuDeleteBtn = responseMenu?.querySelector(
       "#llm-response-menu-delete",
     ) as HTMLButtonElement | null;
+    const responseMenuForkBtn = responseMenu?.querySelector(
+      "#llm-response-menu-fork",
+    ) as HTMLButtonElement | null;
     const canDeleteResponseTurn = Boolean(
       pairedUserMessage?.role === "user" && !message.streaming,
     );
+    const canForkResponseTurn =
+      canDeleteResponseTurn &&
+      canShowForkActionForAssistantTurn(
+        body,
+        item,
+        conversationKey,
+        message.timestamp,
+        message,
+      );
     if (!responseMenu) return;
     if (responseMenuDeleteBtn) {
       responseMenuDeleteBtn.disabled = !canDeleteResponseTurn;
+    }
+    if (responseMenuForkBtn) {
+      responseMenuForkBtn.disabled = !canForkResponseTurn;
+      responseMenuForkBtn.style.display = canForkResponseTurn ? "" : "none";
     }
     if (exportMenu) exportMenu.style.display = "none";
     if (promptMenu) promptMenu.style.display = "none";
@@ -723,27 +1375,90 @@ function attachAssistantResponseContextMenu(params: {
     // If the user has text selected within this bubble, extract just that
     // portion. Otherwise fall back to the full raw markdown source.
     const selectedText = getSelectedTextWithinBubble(doc, bubble);
-    const fullMarkdown = sanitizeText(message.text || "").trim();
-    const contentText = selectedText || fullMarkdown;
-    if (!contentText) return;
-    setResponseMenuTarget({
+    const menuTarget = buildAssistantResponseActionTarget({
       item,
-      contentText,
-      modelName: message.modelName?.trim() || "unknown",
+      message,
+      pairedUserMessage,
       conversationKey,
-      userTimestamp:
-        pairedUserMessage?.role === "user"
-          ? Math.floor(pairedUserMessage.timestamp)
-          : 0,
-      assistantTimestamp: Math.floor(message.timestamp),
-      paperContexts:
-        pairedUserMessage?.role === "user"
-          ? getMessageCitationPaperContexts(pairedUserMessage)
-          : undefined,
-      quoteCitations: message.quoteCitations,
+      selectedText,
     });
+    if (!menuTarget) return;
+    setResponseMenuTarget(menuTarget);
     positionMenuAtPointer(body, responseMenu, me.clientX, me.clientY);
   });
+}
+
+function canShowForkActionForAssistantTurn(
+  body: Element,
+  item: Zotero.Item,
+  conversationKey: number,
+  assistantTimestamp: unknown,
+  assistantMessage?: Message | null,
+): boolean {
+  return shouldShowForkActionForAssistantTurn({
+    body,
+    item,
+    assistantTimestamp,
+    assistantMessage,
+    history: chatHistory.get(conversationKey) || [],
+  });
+}
+
+function appendMessageMetaActionButton(params: {
+  body?: Element;
+  doc: Document;
+  actions: HTMLElement;
+  className: string;
+  title: string;
+  responseAction?: ResponseActionKind;
+  responseTarget?: ResponseActionTarget | null;
+  conversationKey?: number;
+  userTimestamp?: number;
+  assistantTimestamp?: number;
+}): HTMLButtonElement {
+  const button = params.doc.createElement("button") as HTMLButtonElement;
+  button.type = "button";
+  button.className = `llm-message-action ${params.className}`;
+  button.title = params.title;
+  button.setAttribute("aria-label", params.title);
+  if (params.responseAction) {
+    button.dataset.responseAction = params.responseAction;
+  }
+  if (params.body && params.responseAction && params.responseTarget) {
+    button.addEventListener("click", (event: Event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (typeof event.stopImmediatePropagation === "function") {
+        event.stopImmediatePropagation();
+      }
+      const invoked = invokeResponseMenuActionButton({
+        body: params.body!,
+        action: params.responseAction!,
+        target: params.responseTarget || null,
+      });
+      if (!invoked) {
+        const status = params.body!.querySelector(
+          "#llm-status",
+        ) as HTMLElement | null;
+        if (status) setStatus(status, "Response action unavailable", "error");
+      }
+    });
+  }
+  if (Number.isFinite(params.conversationKey)) {
+    button.dataset.conversationKey = String(
+      Math.floor(params.conversationKey!),
+    );
+  }
+  if (Number.isFinite(params.userTimestamp)) {
+    button.dataset.userTimestamp = String(Math.floor(params.userTimestamp!));
+  }
+  if (Number.isFinite(params.assistantTimestamp)) {
+    button.dataset.assistantTimestamp = String(
+      Math.floor(params.assistantTimestamp!),
+    );
+  }
+  params.actions.appendChild(button);
+  return button;
 }
 
 function getMessageSelectedTextExpandedIndex(
@@ -809,6 +1524,8 @@ const followBottomStabilizers = new Map<
   number,
   { rafId: number | null; timeoutId: number | null }
 >();
+const followBottomCatchupRequests = new Map<number, number>();
+const FOLLOW_BOTTOM_CATCHUP_GRACE_MS = 1200;
 
 /** Legacy cumulative API token usage per conversation key for this UI session. */
 const sessionTokenTotals = new Map<number, number>();
@@ -859,7 +1576,8 @@ function setContextUsageSnapshot(
         ? Math.max(0, Math.min(1, Number(snapshot.cacheHitRatio)))
         : undefined,
     cacheProvider:
-      typeof snapshot.cacheProvider === "string" && snapshot.cacheProvider.trim()
+      typeof snapshot.cacheProvider === "string" &&
+      snapshot.cacheProvider.trim()
         ? snapshot.cacheProvider.trim()
         : undefined,
     estimated: snapshot.estimated !== false,
@@ -1029,6 +1747,24 @@ function buildChatScrollSnapshot(chatBox: HTMLDivElement): ChatScrollSnapshot {
   };
 }
 
+function buildFollowBottomScrollSnapshot(
+  chatBox: HTMLDivElement,
+): ChatScrollSnapshot {
+  return {
+    mode: "followBottom",
+    scrollTop: clampScrollTop(chatBox, chatBox.scrollHeight),
+    updatedAt: Date.now(),
+  };
+}
+
+function hasActiveFollowBottomCatchupRequest(conversationKey: number): boolean {
+  const expiresAt = followBottomCatchupRequests.get(conversationKey);
+  if (!expiresAt) return false;
+  if (expiresAt > Date.now()) return true;
+  followBottomCatchupRequests.delete(conversationKey);
+  return false;
+}
+
 function persistChatScrollSnapshotByKey(
   conversationKey: number,
   chatBox: HTMLDivElement,
@@ -1062,6 +1798,48 @@ function applyChatScrollSnapshot(
   });
 }
 
+function stickChatBoxToBottomIfFollowing(
+  conversationKey: number,
+  chatBox: HTMLDivElement,
+): boolean {
+  const snapshot = chatScrollSnapshots.get(conversationKey);
+  if (
+    (!snapshot || snapshot.mode !== "followBottom") &&
+    !hasActiveFollowBottomCatchupRequest(conversationKey)
+  ) {
+    return false;
+  }
+  if (!chatBox.isConnected) return false;
+  _scrollUpdatesSuspended = true;
+  chatBox.scrollTop = chatBox.scrollHeight;
+  persistChatScrollSnapshotByKey(conversationKey, chatBox);
+  Promise.resolve().then(() => {
+    _scrollUpdatesSuspended = false;
+  });
+  return true;
+}
+
+export function requestChatScrollFollowBottom(
+  body: Element,
+  item: Zotero.Item,
+  chatBox: HTMLDivElement,
+): void {
+  const conversationKey = getConversationKey(item);
+  followBottomCatchupRequests.set(
+    conversationKey,
+    Date.now() + FOLLOW_BOTTOM_CATCHUP_GRACE_MS,
+  );
+  chatScrollSnapshots.set(
+    conversationKey,
+    buildFollowBottomScrollSnapshot(chatBox),
+  );
+  stabilizeFollowBottomAfterAsyncChatContent(body, conversationKey, chatBox);
+}
+
+export function cancelChatScrollFollowBottomRequest(item: Zotero.Item): void {
+  followBottomCatchupRequests.delete(getConversationKey(item));
+}
+
 function scheduleFollowBottomStabilization(
   body: Element,
   conversationKey: number,
@@ -1085,15 +1863,7 @@ function scheduleFollowBottomStabilization(
   clearFollowBottomStabilization();
 
   const stickToBottomIfNeeded = () => {
-    const snapshot = chatScrollSnapshots.get(conversationKey);
-    if (!snapshot || snapshot.mode !== "followBottom") return;
-    if (!chatBox.isConnected) return;
-    _scrollUpdatesSuspended = true;
-    chatBox.scrollTop = chatBox.scrollHeight;
-    persistChatScrollSnapshotByKey(conversationKey, chatBox);
-    Promise.resolve().then(() => {
-      _scrollUpdatesSuspended = false;
-    });
+    stickChatBoxToBottomIfFollowing(conversationKey, chatBox);
   };
 
   const handle = {
@@ -1111,6 +1881,15 @@ function scheduleFollowBottomStabilization(
   followBottomStabilizers.set(conversationKey, handle);
 }
 
+function stabilizeFollowBottomAfterAsyncChatContent(
+  body: Element,
+  conversationKey: number,
+  chatBox: HTMLDivElement,
+): void {
+  if (!stickChatBoxToBottomIfFollowing(conversationKey, chatBox)) return;
+  scheduleFollowBottomStabilization(body, conversationKey, chatBox);
+}
+
 function applyChatScrollPolicy(
   item: Zotero.Item,
   chatBox: HTMLDivElement,
@@ -1126,23 +1905,51 @@ function applyChatScrollPolicy(
 async function loadStoredConversationByKey(
   conversationKey: number,
   limit: number,
+  conversationSystem?: ConversationSystem | null,
 ): Promise<StoredChatMessage[]> {
-  return isClaudeConversationKey(conversationKey)
-    ? loadClaudeConversation(conversationKey, limit)
-    : isCodexConversationKey(conversationKey)
-      ? loadCodexConversation(conversationKey, limit)
-      : loadConversation(conversationKey, limit);
+  const storageSystem = resolveConversationStorageSystem({
+    conversationKey,
+    conversationSystem,
+  });
+  if (!storageSystem) return [];
+  return conversationRepository.loadMessages({
+    system: storageSystem,
+    conversationKey,
+    limit,
+  });
+}
+
+async function loadConversationForkLinkCache(
+  conversationKey: number,
+): Promise<void> {
+  try {
+    const link = await getConversationForkLink(conversationKey);
+    if (link) {
+      conversationForkLinks.set(conversationKey, link);
+    } else {
+      conversationForkLinks.delete(conversationKey);
+    }
+  } catch (err) {
+    conversationForkLinks.delete(conversationKey);
+    ztoolkit.log("LLM: Failed to load conversation fork link", err);
+  }
 }
 
 async function updateStoredLatestUserMessageByConversation(
   conversationKey: number,
   message: Parameters<typeof updateStoredLatestUserMessage>[1],
+  conversationSystem?: ConversationSystem | null,
 ): Promise<void> {
-  if (isClaudeConversationKey(conversationKey)) {
+  const storageSystem = resolveConversationStorageSystem({
+    conversationKey,
+    conversationSystem,
+  });
+  if (!storageSystem) return;
+  if (storageSystem === "claude_code") {
     await updateLatestClaudeConversationUserMessage(conversationKey, message);
     return;
   }
-  if (isCodexConversationKey(conversationKey)) {
+  if (storageSystem === "codex") {
     await updateLatestCodexUserMessage(conversationKey, message);
     return;
   }
@@ -1152,8 +1959,14 @@ async function updateStoredLatestUserMessageByConversation(
 async function updateStoredLatestAssistantMessageByConversation(
   conversationKey: number,
   message: Parameters<typeof updateStoredLatestAssistantMessage>[1],
+  conversationSystem?: ConversationSystem | null,
 ): Promise<void> {
-  if (isClaudeConversationKey(conversationKey)) {
+  const storageSystem = resolveConversationStorageSystem({
+    conversationKey,
+    conversationSystem,
+  });
+  if (!storageSystem) return;
+  if (storageSystem === "claude_code") {
     const latestContextSnapshot = contextUsageSnapshots.get(conversationKey);
     await updateLatestClaudeConversationAssistantMessage(conversationKey, {
       ...message,
@@ -1170,7 +1983,7 @@ async function updateStoredLatestAssistantMessageByConversation(
     });
     return;
   }
-  if (isCodexConversationKey(conversationKey)) {
+  if (storageSystem === "codex") {
     const latestContextSnapshot = contextUsageSnapshots.get(conversationKey);
     await updateLatestCodexAssistantMessage(conversationKey, {
       ...message,
@@ -1193,11 +2006,17 @@ async function updateStoredLatestAssistantMessageByConversation(
 async function persistConversationMessage(
   conversationKey: number,
   message: StoredChatMessage,
+  conversationSystem?: ConversationSystem | null,
 ): Promise<void> {
   try {
-    if (isClaudeConversationKey(conversationKey)) {
+    const storageSystem = resolveConversationStorageSystem({
+      conversationKey,
+      conversationSystem,
+    });
+    if (!storageSystem) return;
+    if (storageSystem === "claude_code") {
       await appendClaudeConversationMessage(conversationKey, message);
-    } else if (isCodexConversationKey(conversationKey)) {
+    } else if (storageSystem === "codex") {
       await appendCodexMessage(conversationKey, message);
       await pruneCodexConversation(conversationKey, PERSISTED_HISTORY_LIMIT);
     } else {
@@ -1207,6 +2026,7 @@ async function persistConversationMessage(
     const storedMessages = await loadStoredConversationByKey(
       conversationKey,
       PERSISTED_HISTORY_LIMIT,
+      storageSystem,
     );
     const attachmentHashes =
       collectAttachmentHashesFromStoredMessages(storedMessages);
@@ -1246,6 +2066,7 @@ function toPanelMessage(message: StoredChatMessage): Message {
           Boolean(entry.name.trim()),
       )
     : undefined;
+  const generatedImages = normalizeGeneratedChatImages(message.generatedImages);
   const selectedTexts = normalizeSelectedTexts(
     message.selectedTexts,
     message.selectedText,
@@ -1262,6 +2083,7 @@ function toPanelMessage(message: StoredChatMessage): Message {
     (message as Message).selectedTextNoteContexts,
     selectedTexts.length,
   );
+  const forcedSkillIds = normalizeForcedSkillIds(message.forcedSkillIds);
   const paperContexts = normalizePaperContexts(message.paperContexts);
   const fullTextPaperContexts = normalizePaperContexts(
     message.fullTextPaperContexts,
@@ -1269,6 +2091,7 @@ function toPanelMessage(message: StoredChatMessage): Message {
   const selectedCollectionContexts = normalizeCollectionContexts(
     message.selectedCollectionContexts,
   );
+  const selectedTagContexts = normalizeTagContexts(message.selectedTagContexts);
   return {
     role: message.role,
     text: message.text,
@@ -1291,6 +2114,7 @@ function toPanelMessage(message: StoredChatMessage): Message {
     )
       ? selectedTextNoteContexts
       : undefined,
+    forcedSkillIds: forcedSkillIds.length ? forcedSkillIds : undefined,
     selectedTextExpandedIndex: -1,
     paperContexts: paperContexts.length ? paperContexts : undefined,
     fullTextPaperContexts: fullTextPaperContexts.length
@@ -1299,10 +2123,14 @@ function toPanelMessage(message: StoredChatMessage): Message {
     selectedCollectionContexts: selectedCollectionContexts.length
       ? selectedCollectionContexts
       : undefined,
+    selectedTagContexts: selectedTagContexts.length
+      ? selectedTagContexts
+      : undefined,
     paperContextsExpanded: false,
     screenshotImages,
     attachments,
     modelAttachments,
+    generatedImages: generatedImages.length ? generatedImages : undefined,
     attachmentsExpanded: false,
     screenshotExpanded: false,
     screenshotActiveIndex: screenshotImages?.length ? 0 : undefined,
@@ -1323,11 +2151,23 @@ export async function ensureConversationLoaded(
   item: Zotero.Item,
 ): Promise<void> {
   const conversationKey = getConversationKey(item);
-
-  if (loadedConversationKeys.has(conversationKey)) return;
-  if (chatHistory.has(conversationKey)) {
+  const conversationSystem = resolveConversationSystemForItem(item);
+  if (loadedConversationKeys.has(conversationKey)) {
+    await loadConversationForkLinkCache(conversationKey);
+    return;
+  }
+  if (
+    chatHistory.has(conversationKey) &&
+    !blockedConversationLoadKeys.has(conversationKey)
+  ) {
+    await loadConversationForkLinkCache(conversationKey);
     loadedConversationKeys.add(conversationKey);
     return;
+  }
+  if (blockedConversationLoadKeys.has(conversationKey)) {
+    chatHistory.delete(conversationKey);
+    conversationForkLinks.delete(conversationKey);
+    blockedConversationLoadKeys.delete(conversationKey);
   }
 
   const existingTask = loadingConversationTasks.get(conversationKey);
@@ -1337,11 +2177,33 @@ export async function ensureConversationLoaded(
   }
 
   const task = (async () => {
+    let shouldMarkLoaded = false;
     try {
+      const validScope = await validateConversationScopeForItem({
+        item,
+        conversationKey,
+        conversationSystem,
+      });
+      if (!validScope) {
+        blockedConversationLoadKeys.add(conversationKey);
+        chatHistory.set(conversationKey, []);
+        conversationForkLinks.delete(conversationKey);
+        return;
+      }
       const storedMessages = await loadStoredConversationByKey(
         conversationKey,
         PERSISTED_HISTORY_LIMIT,
+        conversationSystem,
       );
+      if (!storedMessagesMatchActivePaper(item, storedMessages)) {
+        ztoolkit.log(
+          `LLM: Refused to render conversation ${conversationKey} because stored paper contexts do not include the active paper.`,
+        );
+        blockedConversationLoadKeys.add(conversationKey);
+        chatHistory.set(conversationKey, []);
+        conversationForkLinks.delete(conversationKey);
+        return;
+      }
       const panelMessages = storedMessages.map((message) =>
         toPanelMessage(message),
       );
@@ -1360,14 +2222,23 @@ export async function ensureConversationLoaded(
           source: "persisted",
         });
       }
+      blockedConversationLoadKeys.delete(conversationKey);
       chatHistory.set(conversationKey, panelMessages);
+      await loadConversationForkLinkCache(conversationKey);
+      shouldMarkLoaded = true;
     } catch (err) {
       ztoolkit.log("LLM: Failed to load chat history", err);
       if (!chatHistory.has(conversationKey)) {
         chatHistory.set(conversationKey, []);
       }
+      conversationForkLinks.delete(conversationKey);
+      shouldMarkLoaded = true;
     } finally {
-      loadedConversationKeys.add(conversationKey);
+      if (shouldMarkLoaded) {
+        loadedConversationKeys.add(conversationKey);
+      } else {
+        loadedConversationKeys.delete(conversationKey);
+      }
       loadingConversationTasks.delete(conversationKey);
     }
   })();
@@ -1423,6 +2294,9 @@ export function detectReasoningProvider(
   }
   if (name.startsWith("kimi")) {
     return "kimi";
+  }
+  if (/(^|[/:])mimo-v2(?:\.5)?(?:-(?:pro|omni|flash))?(?:\b|[.-])/.test(name)) {
+    return "mimo";
   }
   if (/(^|[/:])(?:qwen(?:\d+)?|qwq|qvq)(?:\b|[.-])/.test(name)) {
     return "qwen";
@@ -1500,19 +2374,43 @@ export async function copyTextToClipboard(
   }
 }
 
-/**
- * Render markdown text through renderMarkdownForNote and copy the result
- * to the clipboard as both text/html and text/plain.  When pasted into a
- * Zotero note, the HTML version is used — producing the same rendering as
- * "Save as note".  When pasted into a plain-text editor, the raw markdown
- * is used — matching "Copy chat as md".
- */
-export async function copyRenderedMarkdownToClipboard(
-  body: Element,
+export function buildAssistantDisplayMarkdownForRender(
+  message: Pick<Message, "text" | "quoteCitations">,
+): string {
+  return normalizeQuoteCitationPlaceholdersForDisplay(
+    replaceQuoteCitationPlaceholdersForMarkdown(
+      sanitizeText(message.text || ""),
+      message.quoteCitations,
+      { resolved: "preserve", unresolved: "omit" },
+    ),
+  );
+}
+
+export function buildPlainMarkdownClipboardText(
   markdownText: string,
-): Promise<void> {
-  const safeText = sanitizeText(markdownText).trim();
-  if (!safeText) return;
+  quoteCitations?: QuoteCitation[],
+): string | null {
+  const safeText = replaceQuoteCitationPlaceholdersForMarkdown(
+    sanitizeText(markdownText).trim(),
+    quoteCitations,
+    { unresolved: "omit" },
+  );
+  return safeText || null;
+}
+
+/**
+ * Prepare both clipboard forms from markdown. Quote anchors are expanded before
+ * rendering so structural citation tokens never leak into copied responses.
+ */
+export function buildRenderedMarkdownClipboardPayload(
+  markdownText: string,
+  quoteCitations?: QuoteCitation[],
+): { plainText: string; renderedHtml: string } | null {
+  const safeText = buildPlainMarkdownClipboardText(
+    markdownText,
+    quoteCitations,
+  );
+  if (!safeText) return null;
 
   let renderedHtml = "";
   try {
@@ -1520,6 +2418,27 @@ export async function copyRenderedMarkdownToClipboard(
   } catch (err) {
     ztoolkit.log("LLM: Copy markdown render error:", err);
   }
+  return { plainText: safeText, renderedHtml };
+}
+
+/**
+ * Render markdown text through renderMarkdownForNote and copy the result
+ * to the clipboard as both text/html and text/plain.  When pasted into a
+ * Zotero note, the HTML version is used — producing the same rendering as
+ * "Save as note".  When pasted into a plain-text editor, the expanded markdown
+ * is used — matching "Copy chat as md" without internal quote anchors.
+ */
+export async function copyRenderedMarkdownToClipboard(
+  body: Element,
+  markdownText: string,
+  quoteCitations?: QuoteCitation[],
+): Promise<void> {
+  const payload = buildRenderedMarkdownClipboardPayload(
+    markdownText,
+    quoteCitations,
+  );
+  if (!payload) return;
+  const { plainText: safeText, renderedHtml } = payload;
 
   // Try rich clipboard (HTML + plain) first so that paste into Zotero
   // notes gives properly rendered content with math.
@@ -1735,7 +2654,7 @@ function showNativeMcpActionCard(
     }
     ui.chatBox.querySelector(".llm-action-inline-card")?.remove();
     const wrapper = ownerDoc.createElement("div");
-    wrapper.className = "llm-action-inline-card";
+    wrapper.className = "llm-action-inline-card llm-action-inline-card-review";
     wrapper.dataset.requestId = requestId;
     wrapper.appendChild(
       renderPendingActionCard(ownerDoc, { requestId, action }),
@@ -1750,13 +2669,6 @@ function showNativeMcpActionCard(
       source: "inline",
     });
   });
-}
-
-function isPanelWebChatMode(body: Element): boolean {
-  return (
-    (body.querySelector("#llm-main") as HTMLElement | null)?.dataset
-      ?.webchatMode === "true"
-  );
 }
 
 type QueuedInputDrainScope = {
@@ -1817,12 +2729,139 @@ function setRequestUIBusy(
     }
     if (ui.cancelBtn) ui.cancelBtn.style.display = "";
     if (ui.inputBox) {
-      ui.inputBox.disabled = isPanelWebChatMode(body);
+      ui.inputBox.disabled = true;
     }
     if (ui.status) setStatus(ui.status, statusText, "sending");
   });
   // History controls are intentionally left enabled so the user can
   // switch conversations or create new ones while a request is in flight.
+}
+
+function getPanelBodyConversationKey(
+  body: Element,
+  fallbackItem?: Zotero.Item | null,
+): number | null {
+  const panelRoot = body.querySelector("#llm-main") as HTMLElement | null;
+  const displayedKey = Number(panelRoot?.dataset.itemId || 0);
+  if (Number.isFinite(displayedKey) && displayedKey > 0) {
+    return displayedKey;
+  }
+  if (fallbackItem) {
+    return getConversationKey(fallbackItem);
+  }
+  const getItem = activeContextPanels.get(body);
+  const item = getItem?.() || null;
+  if (item) {
+    return getConversationKey(item);
+  }
+  return null;
+}
+
+function cleanupDisconnectedPanelBody(body: Element): void {
+  activeContextPanels.delete(body);
+  activeContextPanelStateSync.delete(body);
+}
+
+function visitConversationPanelBodies(
+  conversationKey: number,
+  primaryBody: Element | null | undefined,
+  primaryItem: Zotero.Item | null | undefined,
+  visit: (body: Element) => void,
+): void {
+  const visited = new Set<Element>();
+  const visitIfMatching = (
+    body: Element,
+    fallbackItem?: Zotero.Item | null,
+  ) => {
+    if (visited.has(body)) return;
+    visited.add(body);
+    if (!body.isConnected) {
+      cleanupDisconnectedPanelBody(body);
+      return;
+    }
+    if (getPanelBodyConversationKey(body, fallbackItem) !== conversationKey) {
+      return;
+    }
+    visit(body);
+  };
+
+  if (primaryBody) {
+    visitIfMatching(primaryBody, primaryItem);
+  }
+  for (const [body, getItem] of activeContextPanels.entries()) {
+    visitIfMatching(body, getItem?.() || null);
+  }
+  for (const body of activeContextPanelStateSync.keys()) {
+    visitIfMatching(body);
+  }
+}
+
+function syncRequestUIForConversation(
+  conversationKey: number,
+  primaryBody?: Element | null,
+  primaryItem?: Zotero.Item | null,
+): void {
+  visitConversationPanelBodies(
+    conversationKey,
+    primaryBody,
+    primaryItem,
+    (body) => activeContextPanelStateSync.get(body)?.(),
+  );
+}
+
+function setPendingRequestIdAndSync(
+  conversationKey: number,
+  requestId: number,
+  primaryBody?: Element | null,
+  primaryItem?: Zotero.Item | null,
+): void {
+  setPendingRequestId(conversationKey, requestId);
+  syncRequestUIForConversation(conversationKey, primaryBody, primaryItem);
+}
+
+export function clearPendingRequestIdAndSync(
+  conversationKey: number,
+  primaryBody?: Element | null,
+  primaryItem?: Zotero.Item | null,
+): void {
+  setPendingRequestIdAndSync(conversationKey, 0, primaryBody, primaryItem);
+}
+
+function setStatusForConversationPanels(
+  conversationKey: number,
+  primaryBody: Element,
+  primaryItem: Zotero.Item,
+  primaryUi: PanelRequestUI,
+  text: string,
+  kind: Parameters<typeof setStatus>[2],
+): void {
+  visitConversationPanelBodies(
+    conversationKey,
+    primaryBody,
+    primaryItem,
+    (panelBody) => {
+      const liveStatus = panelBody.querySelector(
+        "#llm-status",
+      ) as HTMLElement | null;
+      const status =
+        liveStatus ||
+        (panelBody === primaryBody && primaryUi.status?.isConnected
+          ? primaryUi.status
+          : null);
+      if (!status) return;
+      const liveChatBox = panelBody.querySelector(
+        "#llm-chat-box",
+      ) as HTMLDivElement | null;
+      const chatBox =
+        liveChatBox ||
+        (panelBody === primaryBody && primaryUi.chatBox?.isConnected
+          ? primaryUi.chatBox
+          : null);
+      withScrollGuard(chatBox, conversationKey, () => {
+        setStatus(status, text, kind);
+      });
+    },
+  );
 }
 
 function restoreRequestUIIdle(
@@ -1870,32 +2909,13 @@ function createPanelUpdateHelpers(
   ) => void;
 } {
   const refreshChatSafely = () => {
-    // Guard: only refresh if the panel is still showing this conversation.
-    // When the user switches conversations mid-stream, the panel's dataset
-    // changes but the streaming closure still references the old body/item.
-    // Without this check the streamed content would overwrite the new
-    // conversation's display.
-    const panelRoot = body.querySelector("#llm-main") as HTMLElement | null;
-    if (panelRoot) {
-      const displayedKey = Number(panelRoot.dataset.itemId || 0);
-      if (displayedKey > 0 && displayedKey !== conversationKey) return;
-    }
     refreshConversationPanels(body, item);
   };
   const setStatusSafely = (
     text: string,
     kind: Parameters<typeof setStatus>[2],
   ) => {
-    if (!ui.status) return;
-    // Same guard for status updates.
-    const panelRoot = body.querySelector("#llm-main") as HTMLElement | null;
-    if (panelRoot) {
-      const displayedKey = Number(panelRoot.dataset.itemId || 0);
-      if (displayedKey > 0 && displayedKey !== conversationKey) return;
-    }
-    withScrollGuard(ui.chatBox, conversationKey, () => {
-      setStatus(ui.status as HTMLElement, text, kind);
-    });
+    setStatusForConversationPanels(conversationKey, body, item, ui, text, kind);
   };
   return {
     refreshChatSafely,
@@ -1907,12 +2927,7 @@ export type EffectiveRequestConfig = {
   model: string;
   apiBase: string;
   apiKey: string;
-  authMode:
-    | "api_key"
-    | "codex_auth"
-    | "codex_app_server"
-    | "copilot_auth"
-    | "webchat";
+  authMode: ChatAuthMode;
   providerProtocol?: ProviderProtocol;
   modelEntryId?: string;
   modelProviderLabel?: string;
@@ -1920,14 +2935,28 @@ export type EffectiveRequestConfig = {
   advanced: AdvancedModelParams | undefined;
 };
 
+type ChatAuthMode =
+  | "api_key"
+  | "codex_auth"
+  | "codex_app_server"
+  | "copilot_auth";
+
+function normalizeChatAuthMode(value: unknown): ChatAuthMode | undefined {
+  if (
+    value === "api_key" ||
+    value === "codex_auth" ||
+    value === "codex_app_server" ||
+    value === "copilot_auth"
+  ) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) return "codex_app_server";
+  return undefined;
+}
+
 function isCodexAppServerConversationRequest(params: {
   item: Zotero.Item;
-  authMode?:
-    | "api_key"
-    | "codex_auth"
-    | "codex_app_server"
-    | "copilot_auth"
-    | "webchat";
+  authMode?: ChatAuthMode;
   providerProtocol?: ProviderProtocol;
   modelProviderLabel?: string;
 }): boolean {
@@ -1942,12 +2971,7 @@ function isCodexAppServerConversationRequest(params: {
 
 function resolveEffectiveConversationSystem(params: {
   item: Zotero.Item;
-  authMode?:
-    | "api_key"
-    | "codex_auth"
-    | "codex_app_server"
-    | "copilot_auth"
-    | "webchat";
+  authMode?: ChatAuthMode;
   providerProtocol?: ProviderProtocol;
   modelProviderLabel?: string;
 }): ConversationSystem {
@@ -1968,12 +2992,7 @@ function resolveEffectiveRequestConfig(params: {
   model?: string;
   apiBase?: string;
   apiKey?: string;
-  authMode?:
-    | "api_key"
-    | "codex_auth"
-    | "codex_app_server"
-    | "copilot_auth"
-    | "webchat";
+  authMode?: ChatAuthMode;
   providerProtocol?: ProviderProtocol;
   modelEntryId?: string;
   modelProviderLabel?: string;
@@ -2057,15 +3076,13 @@ function resolveEffectiveRequestConfig(params: {
   const authMode =
     params.authMode ||
     explicitEntry?.authMode ||
-    (fallbackEntry?.authMode === "webchat"
-      ? "webchat"
-      : fallbackEntry?.authMode === "codex_auth"
-        ? "codex_auth"
-        : fallbackEntry?.authMode === "codex_app_server"
-          ? "codex_app_server"
-          : fallbackEntry?.authMode === "copilot_auth"
-            ? "copilot_auth"
-            : "api_key");
+    (fallbackEntry?.authMode === "codex_auth"
+      ? "codex_auth"
+      : fallbackEntry?.authMode === "codex_app_server"
+        ? "codex_app_server"
+        : fallbackEntry?.authMode === "copilot_auth"
+          ? "copilot_auth"
+          : "api_key");
   const providerProtocol =
     params.providerProtocol ||
     explicitEntry?.providerProtocol ||
@@ -2084,7 +3101,7 @@ function resolveEffectiveRequestConfig(params: {
     model,
     apiBase,
     apiKey,
-    authMode,
+    authMode: normalizeChatAuthMode(authMode) || "codex_app_server",
     providerProtocol,
     modelEntryId:
       params.modelEntryId || explicitEntry?.entryId || fallbackEntry?.entryId,
@@ -2099,6 +3116,7 @@ function resolveEffectiveRequestConfig(params: {
 
 function resolveCodexNativeConversationScope(params: {
   item: Zotero.Item;
+  contextSource?: ResolvedContextSource | null;
   conversationKey: number;
   title?: string;
 }): CodexNativeConversationScope {
@@ -2124,8 +3142,10 @@ function resolveCodexNativeConversationScope(params: {
       : undefined;
   const paperContext =
     kind === "paper"
-      ? resolveAutoLoadedPaperContextForItem(params.item) ||
-        resolvePaperContextRefFromItem(baseItem || params.item)
+      ? resolveAutoLoadedPaperContextForItem(
+          params.item,
+          params.contextSource,
+        ) || resolvePaperContextRefFromItem(baseItem || params.item)
       : null;
   const paperTitle =
     sanitizeText(
@@ -2174,10 +3194,7 @@ function formatCodexNativeDiagnosticsStatus(
     diagnostics.historyVerified === undefined
       ? ""
       : `, history ${diagnostics.historyVerified ? "verified" : "unverified"}`;
-  const lifecycleLabel = diagnostics.lifecycleState
-    ? `, ${diagnostics.lifecycleState}`
-    : "";
-  return `Codex app-server ${threadShort} (${source}), library ${libraryLabel}, ${mcpLabel}${historyLabel}${lifecycleLabel}`;
+  return `Codex app-server ${threadShort} (${source}), library ${libraryLabel}, ${mcpLabel}${historyLabel}`;
 }
 
 function buildCodexNativeSkillContext(params: {
@@ -2187,7 +3204,9 @@ function buildCodexNativeSkillContext(params: {
   selectedTextPaperContexts?: (PaperContextRef | undefined)[];
   paperContexts?: PaperContextRef[];
   fullTextPaperContexts?: PaperContextRef[];
+  pinnedPaperContexts?: PaperContextRef[];
   selectedCollectionContexts?: CollectionContextRef[];
+  selectedTagContexts?: TagContextRef[];
   screenshots?: string[];
   attachments?: ChatAttachment[];
 }): CodexNativeSkillContext {
@@ -2210,8 +3229,14 @@ function buildCodexNativeSkillContext(params: {
     fullTextPaperContexts: params.fullTextPaperContexts?.length
       ? params.fullTextPaperContexts
       : undefined,
+    pinnedPaperContexts: params.pinnedPaperContexts?.length
+      ? params.pinnedPaperContexts
+      : undefined,
     selectedCollectionContexts: params.selectedCollectionContexts?.length
       ? params.selectedCollectionContexts
+      : undefined,
+    selectedTagContexts: params.selectedTagContexts?.length
+      ? params.selectedTagContexts
       : undefined,
     screenshots: params.screenshots?.length ? params.screenshots : undefined,
     attachments: params.attachments?.length ? params.attachments : undefined,
@@ -2228,7 +3253,7 @@ type ContextPlanForRequest = {
   citationPaperContexts: PaperContextRef[];
   quoteCitations: QuoteCitation[];
   recentPaperContexts: PaperContextRef[];
-  mineruImages: string[];
+  contextImages: string[];
 };
 
 function shouldUseCodexNativeLightContext(params: {
@@ -2241,6 +3266,7 @@ function buildLightCodexNativeMcpContextPlan(params: {
   paperContexts: PaperContextRef[];
   fullTextPaperContexts: PaperContextRef[];
   selectedCollectionContexts?: CollectionContextRef[];
+  selectedTagContexts?: TagContextRef[];
   recentPaperContexts: PaperContextRef[];
   setStatusSafely: (
     text: string,
@@ -2260,18 +3286,20 @@ function buildLightCodexNativeMcpContextPlan(params: {
     ),
     quoteCitations: [],
     recentPaperContexts: params.recentPaperContexts,
-    mineruImages: [],
+    contextImages: [],
   };
 }
 
 async function buildContextPlanForRequest(params: {
   item: Zotero.Item;
+  contextSource?: ResolvedContextSource | null;
   question: string;
   images?: string[];
   selectedTextSources?: SelectedTextSource[];
   paperContexts: PaperContextRef[];
   fullTextPaperContexts: PaperContextRef[];
   selectedCollectionContexts?: CollectionContextRef[];
+  selectedTagContexts?: TagContextRef[];
   recentPaperContexts: PaperContextRef[];
   history: ChatMessage[];
   effectiveRequestConfig: EffectiveRequestConfig;
@@ -2283,14 +3311,37 @@ async function buildContextPlanForRequest(params: {
     kind: Parameters<typeof setStatus>[2],
   ) => void;
 }): Promise<ContextPlanForRequest> {
-  const contextSource = resolveContextSourceItem(params.item);
+  const explicitPaperContext = normalizePaperContexts(
+    params.contextSource?.paperContext
+      ? [params.contextSource.paperContext]
+      : [],
+  )[0];
+  const explicitContextItem =
+    params.contextSource?.contextItem ||
+    (explicitPaperContext
+      ? Zotero.Items.get(explicitPaperContext.contextItemId) || null
+      : null);
+  const contextSource =
+    params.contextSource ||
+    (explicitPaperContext
+      ? {
+          contextItem: explicitContextItem,
+          paperContext: explicitPaperContext,
+          statusText: explicitPaperContext.attachmentTitle
+            ? `using the selected ${explicitPaperContext.attachmentTitle} as context`
+            : "using the selected attachment as context",
+        }
+      : resolveContextSourceItem(params.item));
   params.setStatusSafely(contextSource.statusText, "sending");
   const rawActiveContextItem = contextSource.contextItem;
   // If the active paper is in PDF mode (sent as file attachment),
   // exclude it from the text retrieval pipeline entirely.
   const activeContextItemInPdfMode = (() => {
     if (!rawActiveContextItem || !params.pdfModePaperKeys?.size) return false;
-    const autoLoaded = resolveAutoLoadedPaperContextForItem(params.item);
+    const autoLoaded = resolveAutoLoadedPaperContextForItem(
+      params.item,
+      contextSource,
+    );
     if (!autoLoaded) return false;
     return params.pdfModePaperKeys.has(
       `${autoLoaded.itemId}:${autoLoaded.contextItemId}`,
@@ -2317,6 +3368,7 @@ async function buildContextPlanForRequest(params: {
       : params.paperContexts,
     fullTextPaperContexts: params.fullTextPaperContexts,
     collectionContexts: params.selectedCollectionContexts,
+    tagContexts: params.selectedTagContexts,
     historyPaperContexts: params.recentPaperContexts,
     history: params.history,
     images: params.images,
@@ -2381,50 +3433,6 @@ async function buildContextPlanForRequest(params: {
     .filter(Boolean)
     .join("\n\n");
 
-  // Extract MinerU figure images from the context (if applicable).
-  // Skip for text-only models (e.g. DeepSeek) that reject image_url content.
-  const effectiveModel = params.effectiveRequestConfig.model || "";
-  let mineruImages: string[] = [];
-  if (planContext && !isTextOnlyModel(effectiveModel)) {
-    // Collect all MinerU-cached attachment IDs from context papers
-    const mineruAttachmentIds: number[] = [];
-    if (activeContextItem) {
-      const activePdfCtx = pdfTextCache.get(activeContextItem.id);
-      if (activePdfCtx?.sourceType === "mineru") {
-        mineruAttachmentIds.push(activeContextItem.id);
-      }
-    }
-    // Also include @-referenced papers with MinerU cache
-    for (const paper of [
-      ...params.paperContexts,
-      ...params.fullTextPaperContexts,
-    ]) {
-      if (
-        paper.contextItemId &&
-        !mineruAttachmentIds.includes(paper.contextItemId)
-      ) {
-        const pdfCtx = pdfTextCache.get(paper.contextItemId);
-        if (pdfCtx?.sourceType === "mineru") {
-          mineruAttachmentIds.push(paper.contextItemId);
-        }
-      }
-    }
-    // Resolve images from all MinerU papers (cap total at 5)
-    for (const attachmentId of mineruAttachmentIds) {
-      if (mineruImages.length >= 5) break;
-      try {
-        const images = await resolveContextImages({
-          contextText: planContext,
-          attachmentId,
-          maxImages: 5 - mineruImages.length,
-        });
-        mineruImages.push(...images);
-      } catch (err) {
-        ztoolkit.log("LLM: MinerU figure resolution failed (best-effort)", err);
-      }
-    }
-  }
-
   return {
     combinedContext,
     strategy: plan.strategy,
@@ -2439,8 +3447,151 @@ async function buildContextPlanForRequest(params: {
     ),
     quoteCitations: plan.quoteCitations || [],
     recentPaperContexts: params.recentPaperContexts,
-    mineruImages,
+    contextImages: [],
   };
+}
+
+function quoteSourcePaperKey(paper: PaperContextRef): string {
+  return `${Math.floor(Number(paper.itemId || 0))}:${Math.floor(
+    Number(paper.contextItemId || 0),
+  )}:${paper.contentSourceMode || ""}`;
+}
+
+function cachedQuoteSourceText(contextItemId: number): string {
+  const cached = pdfTextCache.get(contextItemId);
+  return Array.isArray(cached?.chunks) ? cached.chunks.join("\n\n") : "";
+}
+
+function hasCachedQuoteSourceText(contextItemId: number): boolean {
+  return Boolean(cachedQuoteSourceText(contextItemId).trim());
+}
+
+function resolveQuoteSourceContextItem(
+  paper: PaperContextRef,
+): Zotero.Item | null {
+  const contextItemId = Math.floor(Number(paper.contextItemId || 0));
+  if (!Number.isFinite(contextItemId) || contextItemId <= 0) return null;
+  try {
+    const item = Zotero.Items.get(contextItemId);
+    return item || null;
+  } catch (error) {
+    ztoolkit.log("LLM: unable to resolve quote source context item", {
+      contextItemId,
+      error,
+    });
+    return null;
+  }
+}
+
+async function ensureQuoteSourceTextCachedForPaper(
+  paper: PaperContextRef,
+): Promise<void> {
+  const contextItemId = Math.floor(Number(paper.contextItemId || 0));
+  if (!Number.isFinite(contextItemId) || contextItemId <= 0) return;
+
+  const contextItem = resolveQuoteSourceContextItem(paper);
+  if (!contextItem) return;
+
+  // An empty cache entry means an earlier extraction attempt did not provide
+  // searchable text. Retry here before the provenance finalizer gives up.
+  if (
+    !hasCachedQuoteSourceText(contextItemId) &&
+    pdfTextCache.has(contextItemId)
+  ) {
+    pdfTextCache.delete(contextItemId);
+  }
+
+  try {
+    if ((contextItem as any).isNote?.()) {
+      if (hasCachedQuoteSourceText(contextItemId)) return;
+      await ensureNoteTextCached(contextItem);
+    } else {
+      await ensurePDFTextCached(contextItem, {
+        sourceMode: paper.contentSourceMode,
+      });
+    }
+  } catch (error) {
+    ztoolkit.log("LLM: quote source text cache warm failed", {
+      contextItemId,
+      sourceMode: paper.contentSourceMode,
+      error,
+    });
+  }
+}
+
+async function buildQuoteSourceTextsForPaperContexts(
+  ...groups: Array<PaperContextRef[] | undefined | null>
+): Promise<QuoteSourceText[]> {
+  const papers = normalizePaperContexts(groups.flatMap((group) => group || []));
+  const out: QuoteSourceText[] = [];
+  const seen = new Set<string>();
+  const uniquePapers: PaperContextRef[] = [];
+  for (const paper of papers) {
+    const contextItemId = Number(paper.contextItemId || 0);
+    if (!Number.isFinite(contextItemId) || contextItemId <= 0) continue;
+    const key = quoteSourcePaperKey(paper);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    uniquePapers.push(paper);
+  }
+
+  for (const paper of uniquePapers) {
+    await ensureQuoteSourceTextCachedForPaper(paper);
+    const contextItemId = Math.floor(Number(paper.contextItemId || 0));
+    if (!Number.isFinite(contextItemId) || contextItemId <= 0) continue;
+    const sourceText = cachedQuoteSourceText(contextItemId);
+    if (!sourceText.trim()) continue;
+    out.push({
+      sourceText,
+      sourceLabel: formatPaperSourceLabel(paper),
+      contextItemId: paper.contextItemId,
+      itemId: paper.itemId,
+    });
+  }
+  return out;
+}
+
+function assistantMarkdownNeedsQuoteSourceSearch(markdown: string): boolean {
+  return /^[ \t]*>/.test(markdown || "") || /\n[ \t]*>/.test(markdown || "");
+}
+
+async function finalizeAssistantMessageQuoteCitations(
+  assistantMessage: Pick<Message, "text" | "quoteCitations">,
+  options: {
+    pairedUserMessage?: Message | null;
+    paperContexts?: PaperContextRef[];
+    fullTextPaperContexts?: PaperContextRef[];
+    citationPaperContexts?: PaperContextRef[];
+  } = {},
+): Promise<void> {
+  const sourceTexts = assistantMarkdownNeedsQuoteSourceSearch(
+    assistantMessage.text || "",
+  )
+    ? await buildQuoteSourceTextsForPaperContexts(
+        options.paperContexts,
+        options.fullTextPaperContexts,
+        options.citationPaperContexts,
+        options.pairedUserMessage?.paperContexts,
+        options.pairedUserMessage?.fullTextPaperContexts,
+        options.pairedUserMessage?.citationPaperContexts,
+        options.pairedUserMessage?.selectedTextPaperContexts?.filter(
+          (entry): entry is PaperContextRef => Boolean(entry),
+        ),
+      )
+    : [];
+  const sourceIndex = buildQuoteSourceIndex({
+    quoteCitations: assistantMessage.quoteCitations,
+    sourceTexts,
+  });
+  const finalized = finalizeAssistantQuoteCitations({
+    markdown: assistantMessage.text || "",
+    quoteCitations: assistantMessage.quoteCitations,
+    sourceIndex,
+  });
+  assistantMessage.text = finalized.markdown;
+  assistantMessage.quoteCitations = finalized.quoteCitations.length
+    ? finalized.quoteCitations
+    : undefined;
 }
 
 function createQueuedRefresh(refresh: () => void): () => void {
@@ -2598,6 +3749,7 @@ type AssistantMessageSnapshot = Pick<
   | "modelEntryId"
   | "modelProviderLabel"
   | "pendingAgentTraceEvents"
+  | "generatedImages"
   | "reasoningSummary"
   | "reasoningDetails"
   | "reasoningOpen"
@@ -2634,6 +3786,9 @@ function takeAssistantSnapshot(message: Message): AssistantMessageSnapshot {
           payload: { ...entry.payload },
         }))
       : undefined,
+    generatedImages: message.generatedImages
+      ? message.generatedImages.map((entry) => ({ ...entry }))
+      : undefined,
     reasoningSummary: message.reasoningSummary,
     reasoningDetails: message.reasoningDetails,
     reasoningOpen: message.reasoningOpen,
@@ -2659,6 +3814,9 @@ function restoreAssistantSnapshot(
         ...entry,
         payload: { ...entry.payload },
       }))
+    : undefined;
+  message.generatedImages = snapshot.generatedImages
+    ? snapshot.generatedImages.map((entry) => ({ ...entry }))
     : undefined;
   message.reasoningSummary = snapshot.reasoningSummary;
   message.reasoningDetails = snapshot.reasoningDetails;
@@ -2697,6 +3855,7 @@ type CodexNativeTraceItemEvent = {
   id?: string;
   type?: string;
   role?: string;
+  status?: string;
   summary?: string;
   details?: string;
   error?: string;
@@ -2705,6 +3864,21 @@ type CodexNativeTraceItemEvent = {
   title?: string;
   serverName?: string;
   arguments?: unknown;
+  query?: string;
+  action?: unknown;
+  command?: string;
+  cwd?: string;
+  path?: string;
+  result?: unknown;
+  savedPath?: string;
+  revisedPrompt?: string;
+  exitCode?: number;
+  durationMs?: number;
+  changes?: unknown;
+  success?: boolean;
+  namespace?: string;
+  model?: string;
+  receiverThreadIds?: unknown;
   raw?: Record<string, unknown>;
 };
 
@@ -2840,7 +4014,10 @@ function humanizeCodexNativeItemType(type: string | undefined): string {
     .toLowerCase();
 }
 
-function compactCodexNativeTraceLine(text: string, maxLength = 260): string {
+function compactCodexNativeTraceLine(
+  text: string,
+  maxLength = Number.MAX_SAFE_INTEGER,
+): string {
   const clean = sanitizeText(text).replace(/\s+/g, " ").trim();
   if (clean.length <= maxLength) return clean;
   return `${clean.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
@@ -2848,6 +4025,81 @@ function compactCodexNativeTraceLine(text: string, maxLength = 260): string {
 
 function normalizeCodexNativeTraceCompare(text: string): string {
   return sanitizeText(text).replace(/\s+/g, " ").trim();
+}
+
+function normalizeCodexNativeItemTypeKey(type: string | undefined): string {
+  return sanitizeText(type || "")
+    .replace(/[-_\s]+/g, "")
+    .toLowerCase();
+}
+
+function getCodexNativeRawString(
+  event: CodexNativeTraceItemEvent,
+  keys: string[],
+  maxLength = 4000,
+): string {
+  for (const key of keys) {
+    const value =
+      (event as unknown as Record<string, unknown>)[key] ??
+      readCodexNativeRawField(event, [key]);
+    if (typeof value !== "string") continue;
+    const text = value.trim();
+    if (text) return text.slice(0, maxLength);
+  }
+  return "";
+}
+
+function getCodexNativeStatus(event: CodexNativeTraceItemEvent): string {
+  return (
+    sanitizeText(event.status || "").trim() ||
+    getCodexNativeRawString(event, ["status"], 120)
+  );
+}
+
+function isCodexNativeItemType(
+  event: CodexNativeTraceItemEvent,
+  keys: string[],
+): boolean {
+  const itemType = normalizeCodexNativeItemTypeKey(event.type);
+  return keys.some((key) => itemType.includes(key));
+}
+
+function compactCodexNativePathBasename(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() || path;
+}
+
+function getCodexNativeGeneratedImage(
+  event: CodexNativeTraceItemEvent,
+): GeneratedChatImage | null {
+  const itemId = sanitizeText(event.id || "").trim();
+  if (!itemId) return null;
+  const savedPath =
+    sanitizeText(event.savedPath || "").trim() ||
+    getCodexNativeRawString(event, ["savedPath", "saved_path"], 4000);
+  const result =
+    typeof event.result === "string"
+      ? event.result.trim()
+      : getCodexNativeRawString(event, ["result"], Number.MAX_SAFE_INTEGER);
+  const revisedPrompt =
+    sanitizeText(event.revisedPrompt || "").trim() ||
+    getCodexNativeRawString(event, ["revisedPrompt", "revised_prompt"], 8000);
+  if (savedPath) {
+    return {
+      id: itemId,
+      label: compactCodexNativePathBasename(savedPath),
+      path: savedPath,
+      ...(revisedPrompt ? { revisedPrompt } : {}),
+    };
+  }
+  if (isRenderableGeneratedImageSrc(result)) {
+    return {
+      id: itemId,
+      label: "Generated image",
+      src: result,
+      ...(revisedPrompt ? { revisedPrompt } : {}),
+    };
+  }
+  return null;
 }
 
 function createCodexNativeActivityTraceController(
@@ -3018,6 +4270,7 @@ function createCodexNativeActivityTraceController(
       args?: unknown;
       ok?: boolean;
       text?: string;
+      codeBlock?: string;
     },
     options: { matchRecentUnknown?: boolean } = {},
   ): string | null => {
@@ -3047,6 +4300,7 @@ function createCodexNativeActivityTraceController(
       ...(activity.args !== undefined ? { args: activity.args } : {}),
       ...(typeof activity.ok === "boolean" ? { ok: activity.ok } : {}),
       ...(activity.text ? { text: activity.text } : {}),
+      ...(activity.codeBlock ? { codeBlock: activity.codeBlock } : {}),
     };
     if (existingIndex !== undefined) {
       const existing = events[existingIndex];
@@ -3061,6 +4315,7 @@ function createCodexNativeActivityTraceController(
           serverName: payload.serverName || existing.payload.serverName,
           args:
             payload.args !== undefined ? payload.args : existing.payload.args,
+          codeBlock: payload.codeBlock || existing.payload.codeBlock,
         },
         createdAt: Date.now(),
       };
@@ -3085,7 +4340,209 @@ function createCodexNativeActivityTraceController(
     return true;
   };
 
-  const noteSkillActivated = (skillId: string): void => {
+  const addGeneratedImage = (image: GeneratedChatImage | null): boolean => {
+    const normalized = normalizeGeneratedChatImages(image ? [image] : []);
+    const next = normalized[0];
+    if (!next) return false;
+    const existing = normalizeGeneratedChatImages(
+      assistantMessage.generatedImages,
+    );
+    const index = existing.findIndex((entry) => entry.id === next.id);
+    if (index >= 0) {
+      existing[index] = { ...existing[index], ...next };
+    } else {
+      existing.push(next);
+    }
+    assistantMessage.generatedImages = existing.length ? existing : undefined;
+    return true;
+  };
+
+  const appendStructuredOperationStatus = (
+    event: CodexNativeTraceItemEvent,
+    phase: "started" | "completed",
+  ): boolean => {
+    const itemType = normalizeCodexNativeItemTypeKey(event.type);
+    const itemId =
+      sanitizeText(event.id || "").trim() ||
+      `codex-${itemType || "item"}-${phase}-${seq + 1}`;
+    const status = getCodexNativeStatus(event);
+    const failed =
+      Boolean(event.error) ||
+      /failed|error|cancelled|denied|rejected/i.test(
+        sanitizeText(status || event.summary || event.details || ""),
+      ) ||
+      event.success === false;
+
+    const readWebSearchArgs = (): {
+      args?: Record<string, string>;
+      actionType: string;
+    } | null => {
+      const action = event.action || readCodexNativeRawField(event, ["action"]);
+      const record =
+        action && typeof action === "object" && !Array.isArray(action)
+          ? (action as Record<string, unknown>)
+          : null;
+      const actionType = sanitizeText(String(record?.type || "")).trim();
+      const query =
+        sanitizeText(event.query || "").trim() ||
+        getCodexNativeRawString(event, ["query"], 1000) ||
+        sanitizeText(String(record?.query || "")).trim() ||
+        (Array.isArray(record?.queries)
+          ? record.queries
+              .filter((entry): entry is string => typeof entry === "string")
+              .map((entry) => sanitizeText(entry).trim())
+              .filter(Boolean)
+              .join("; ")
+          : "");
+      const url = sanitizeText(String(record?.url || "")).trim();
+      const pattern = sanitizeText(String(record?.pattern || "")).trim();
+      const args: Record<string, string> = {};
+      if (query) args.query = query;
+      if (url) args.url = url;
+      if (pattern) args.pattern = pattern;
+      return Object.keys(args).length || actionType
+        ? { args: Object.keys(args).length ? args : undefined, actionType }
+        : null;
+    };
+
+    if (isCodexNativeItemType(event, ["websearch", "websearchcall"])) {
+      const webSearch = readWebSearchArgs();
+      const actionType = normalizeCodexNativeItemTypeKey(webSearch?.actionType);
+      const verb =
+        actionType === "openpage"
+          ? phase === "completed"
+            ? "Opened web page"
+            : "Opening web page"
+          : actionType === "findinpage"
+            ? phase === "completed"
+              ? "Searched within page"
+              : "Searching within page"
+            : phase === "completed"
+              ? "Searched web"
+              : "Searching web";
+      const query =
+        sanitizeText(event.query || "").trim() ||
+        getCodexNativeRawString(event, ["query"], 1000);
+      const updated = upsertToolActivity({
+        itemId,
+        phase,
+        toolName: "codex_web_search",
+        toolLabel: "Web search",
+        args: webSearch?.args || (query ? { query } : undefined),
+        ok: phase === "completed" ? !failed : undefined,
+        text: failed && phase === "completed" ? "Web search failed" : verb,
+      });
+      return Boolean(updated);
+    }
+
+    if (isCodexNativeItemType(event, ["imagegeneration"])) {
+      const generatedImage =
+        phase === "completed" ? getCodexNativeGeneratedImage(event) : null;
+      const changedImage = addGeneratedImage(generatedImage);
+      const savedPath =
+        generatedImage?.path ||
+        sanitizeText(event.savedPath || "").trim() ||
+        getCodexNativeRawString(event, ["savedPath", "saved_path"], 4000);
+      const updated = upsertToolActivity({
+        itemId,
+        phase,
+        toolName: "image_generation",
+        toolLabel: "Generated image",
+        args: {
+          ...(status ? { status } : {}),
+          ...(savedPath
+            ? { saved: compactCodexNativePathBasename(savedPath) }
+            : {}),
+        },
+        ok: phase === "completed" ? !failed : undefined,
+        text:
+          phase === "completed"
+            ? failed
+              ? `Generated image: ${status || "failed"}`
+              : "Generated image"
+            : "Generating image",
+      });
+      return Boolean(updated) || changedImage;
+    }
+
+    if (isCodexNativeItemType(event, ["imageview"])) {
+      const path =
+        sanitizeText(event.path || "").trim() ||
+        getCodexNativeRawString(event, ["path"], 4000);
+      const updated = upsertToolActivity({
+        itemId,
+        phase,
+        toolName: "image_view",
+        toolLabel: "Viewed image",
+        args: path ? { path } : undefined,
+        ok: phase === "completed" ? !failed : undefined,
+        text: phase === "completed" ? "Viewed image" : "Viewing image",
+      });
+      return Boolean(updated);
+    }
+
+    const command =
+      sanitizeText(event.command || "").trim() ||
+      getCodexNativeRawString(event, ["command"], 8000);
+    if (command || isCodexNativeItemType(event, ["command", "exec"])) {
+      const cwd =
+        sanitizeText(event.cwd || "").trim() ||
+        getCodexNativeRawString(event, ["cwd"], 4000);
+      const exitCode =
+        typeof event.exitCode === "number" && Number.isFinite(event.exitCode)
+          ? event.exitCode
+          : undefined;
+      const updated = upsertToolActivity({
+        itemId,
+        phase,
+        toolName: "command",
+        toolLabel: "Command",
+        args: {
+          ...(cwd ? { cwd } : {}),
+          ...(typeof exitCode === "number"
+            ? { status: `exit ${exitCode}` }
+            : {}),
+        },
+        ok: phase === "completed" ? !failed : undefined,
+        text:
+          phase === "completed"
+            ? failed || (typeof exitCode === "number" && exitCode !== 0)
+              ? "Command failed"
+              : "Ran command"
+            : "Running command",
+        codeBlock: command || undefined,
+      });
+      return Boolean(updated);
+    }
+
+    if (
+      event.changes !== undefined ||
+      isCodexNativeItemType(event, ["filechange", "filechanges", "patch"])
+    ) {
+      const updated = upsertToolActivity({
+        itemId,
+        phase,
+        toolName: "file_changes",
+        toolLabel: "File changes",
+        args: event.changes,
+        ok: phase === "completed" ? !failed : undefined,
+        text:
+          phase === "completed"
+            ? failed
+              ? "File changes failed"
+              : "Updated files"
+            : "Updating files",
+      });
+      return Boolean(updated);
+    }
+
+    return false;
+  };
+
+  const noteSkillActivated = (
+    skillId: string,
+    options: { source?: "codex-native-slash" } = {},
+  ): void => {
     const cleanSkillId = sanitizeText(skillId || "").trim();
     if (!cleanSkillId || activatedSkillIds.has(cleanSkillId)) return;
     flushAllProgressCoalescers("event");
@@ -3095,7 +4552,10 @@ function createCodexNativeActivityTraceController(
         type: "tool_call",
         callId: `skill:${cleanSkillId}`,
         name: "Skill",
-        args: { skill: cleanSkillId },
+        args: {
+          skill: cleanSkillId,
+          ...(options.source ? { source: options.source } : {}),
+        },
       }),
     );
     sync();
@@ -3107,6 +4567,10 @@ function createCodexNativeActivityTraceController(
   ): void => {
     if (isCodexNativeAgentMessageItem(event)) return;
     flushAllProgressCoalescers("event");
+    if (appendStructuredOperationStatus(event, phase)) {
+      sync();
+      return;
+    }
     if (isCodexNativeToolItem(event)) {
       const itemId =
         sanitizeText(event.id || "").trim() || `codex-tool-${phase}-${seq + 1}`;
@@ -3274,85 +4738,18 @@ function createCodexNativeActivityTraceController(
   };
 }
 
-function applyWebChatAnswerSnapshot(
-  message: Message,
-  text: string,
-  snapshot: {
-    runState?:
-      | "submitted"
-      | "active"
-      | "settling"
-      | "done"
-      | "incomplete"
-      | "error"
-      | null;
-    completionReason?: "settled" | "forced_cancel" | "timeout" | "error" | null;
-    remoteChatUrl?: string | null;
-    remoteChatId?: string | null;
-  },
-): void {
-  message.text = sanitizeText(text || "");
-  message.timestamp = Date.now();
-  // [webchat] Capture chat URL from streaming snapshots so it's available for refresh
-  if (snapshot.remoteChatUrl) message.webchatChatUrl = snapshot.remoteChatUrl;
-  if (snapshot.remoteChatId) message.webchatChatId = snapshot.remoteChatId;
-  if (
-    snapshot.runState === "done" ||
-    snapshot.runState === "incomplete" ||
-    snapshot.runState === "error"
-  ) {
-    message.webchatRunState = snapshot.runState;
-    message.webchatCompletionReason = snapshot.completionReason || null;
-  } else {
-    message.webchatRunState = undefined;
-    message.webchatCompletionReason = null;
-  }
-}
+type CodexNativeActivityTraceController = ReturnType<
+  typeof createCodexNativeActivityTraceController
+>;
 
-function applyWebChatThinkingSnapshot(
-  message: Message,
-  text: string,
-  snapshot: {
-    runState?:
-      | "submitted"
-      | "active"
-      | "settling"
-      | "done"
-      | "incomplete"
-      | "error"
-      | null;
-    completionReason?: "settled" | "forced_cancel" | "timeout" | "error" | null;
-  },
+function noteExplicitCodexNativeSkillInvocations(
+  trace: CodexNativeActivityTraceController | null,
+  skillIds?: string[],
 ): void {
-  const sanitized = sanitizeText(text || "");
-  message.reasoningDetails = sanitized || undefined;
-  message.reasoningOpen = sanitized ? isReasoningExpandedByDefault() : false;
-  if (
-    snapshot.runState === "done" ||
-    snapshot.runState === "incomplete" ||
-    snapshot.runState === "error"
-  ) {
-    message.webchatRunState = snapshot.runState;
-    message.webchatCompletionReason = snapshot.completionReason || null;
+  if (!trace?.noteSkillActivated || !skillIds?.length) return;
+  for (const skillId of skillIds) {
+    trace.noteSkillActivated(skillId, { source: "codex-native-slash" });
   }
-}
-
-function getWebChatRunStateLabel(message: Message): string | null {
-  if (message.webchatRunState === "incomplete") {
-    switch (message.webchatCompletionReason) {
-      case "forced_cancel":
-        return "Partial only — chat stayed busy and needed a forced stop";
-      case "timeout":
-        return "Partial only — final answer was not verified before timeout";
-      case "error":
-      default:
-        return "Partial only — final answer not verified";
-    }
-  }
-  if (message.webchatRunState === "error") {
-    return "Web sync ended with an error";
-  }
-  return null;
 }
 
 function reconstructRetryPayload(userMessage: Message): {
@@ -3362,6 +4759,7 @@ function reconstructRetryPayload(userMessage: Message): {
   paperContexts: PaperContextRef[];
   fullTextPaperContexts: PaperContextRef[];
   selectedCollectionContexts: CollectionContextRef[];
+  selectedTagContexts: TagContextRef[];
 } {
   const selectedTexts = getMessageSelectedTexts(userMessage);
   const selectedTextSources = normalizeSelectedTextSources(
@@ -3410,6 +4808,9 @@ function reconstructRetryPayload(userMessage: Message): {
   const selectedCollectionContexts = normalizeCollectionContexts(
     userMessage.selectedCollectionContexts,
   );
+  const selectedTagContexts = normalizeTagContexts(
+    userMessage.selectedTagContexts,
+  );
   return {
     question,
     screenshotImages,
@@ -3417,6 +4818,7 @@ function reconstructRetryPayload(userMessage: Message): {
     paperContexts,
     fullTextPaperContexts,
     selectedCollectionContexts,
+    selectedTagContexts,
   };
 }
 
@@ -3673,7 +5075,6 @@ async function resolveRetryModelInputs(params: {
     apiBase: params.effectiveRequestConfig.apiBase,
   }).pdf;
   if (
-    params.effectiveRequestConfig.providerProtocol !== "web_sync" &&
     pdfSupport !== "native" &&
     (visibleAttachments.some(isPdfChatAttachment) ||
       (modelAttachmentsOverride || []).some(isPdfChatAttachment))
@@ -3737,11 +5138,13 @@ async function resolveRetryModelInputs(params: {
     if (!apiBase || !apiKey) {
       throw new Error("PDF upload requires a configured provider API key.");
     }
-    const [{ detectPdfUploadProvider, uploadPdfForProvider }, { readAttachmentBytes }] =
-      await Promise.all([
-        import("../../utils/pdfUploadPreprocessor"),
-        import("./attachmentStorage"),
-      ]);
+    const [
+      { detectPdfUploadProvider, uploadPdfForProvider },
+      { readAttachmentBytes },
+    ] = await Promise.all([
+      import("../../utils/pdfUploadPreprocessor"),
+      import("./attachmentStorage"),
+    ]);
     const provider = detectPdfUploadProvider(apiBase);
     for (const attachment of pdfPaperAttachments) {
       const storedPath = (attachment.storedPath || "").trim();
@@ -3803,6 +5206,7 @@ function normalizeEditablePaperContexts(
 function derivePdfModePaperKeys(
   attachments: ChatAttachment[] | undefined,
   item: Zotero.Item,
+  contextSource?: ResolvedContextSource | null,
 ): Set<string> {
   const keys = new Set<string>();
   if (!Array.isArray(attachments)) return keys;
@@ -3812,7 +5216,10 @@ function derivePdfModePaperKeys(
     if (!m) continue;
     const contextItemId = Number(m[1]);
     if (!Number.isFinite(contextItemId) || contextItemId <= 0) continue;
-    const autoLoaded = resolveAutoLoadedPaperContextForItem(item);
+    const autoLoaded = resolveAutoLoadedPaperContextForItem(
+      item,
+      contextSource,
+    );
     if (autoLoaded && autoLoaded.contextItemId === contextItemId) {
       keys.add(`${autoLoaded.itemId}:${autoLoaded.contextItemId}`);
     }
@@ -3823,7 +5230,15 @@ function derivePdfModePaperKeys(
 function normalizeEditableFullTextPaperContexts(
   fullTextPaperContexts?: PaperContextRef[],
 ): PaperContextRef[] {
-  return normalizePaperContexts(fullTextPaperContexts);
+  return limitFullTextPaperContexts(
+    normalizePaperContexts(fullTextPaperContexts),
+  );
+}
+
+function limitFullTextPaperContexts(
+  paperContexts: PaperContextRef[],
+): PaperContextRef[] {
+  return paperContexts.slice(0, MAX_FULL_TEXT_PAPER_CONTEXTS);
 }
 
 function includeAutoLoadedPaperContext(
@@ -3831,6 +5246,7 @@ function includeAutoLoadedPaperContext(
   paperContexts?: PaperContextRef[],
   fullTextPaperContexts?: PaperContextRef[],
   excludePaperKeys?: Set<string>,
+  contextSource?: ResolvedContextSource | null,
 ): {
   paperContexts: PaperContextRef[];
   fullTextPaperContexts: PaperContextRef[];
@@ -3844,15 +5260,20 @@ function includeAutoLoadedPaperContext(
       paperContexts: normalizedPaperContexts,
       fullTextPaperContexts:
         fullTextPaperContexts === undefined
-          ? normalizedPaperContexts
-          : normalizedFullTextPaperContexts,
+          ? limitFullTextPaperContexts(normalizedPaperContexts)
+          : limitFullTextPaperContexts(normalizedFullTextPaperContexts),
     };
   }
-  const autoLoadedPaperContext = resolveAutoLoadedPaperContextForItem(item);
+  const autoLoadedPaperContext = resolveAutoLoadedPaperContextForItem(
+    item,
+    contextSource,
+  );
   if (!autoLoadedPaperContext) {
     return {
       paperContexts: normalizedPaperContexts,
-      fullTextPaperContexts: normalizedFullTextPaperContexts,
+      fullTextPaperContexts: limitFullTextPaperContexts(
+        normalizedFullTextPaperContexts,
+      ),
     };
   }
   // Always include auto-loaded paper in paperContexts (for display in chat history).
@@ -3865,15 +5286,20 @@ function includeAutoLoadedPaperContext(
       ...normalizedPaperContexts,
     ]),
     fullTextPaperContexts: isExcludedFromTextPipeline
-      ? normalizedFullTextPaperContexts
+      ? limitFullTextPaperContexts(normalizedFullTextPaperContexts)
       : fullTextPaperContexts === undefined
-        ? normalizePaperContexts([
-            autoLoadedPaperContext,
-            ...normalizedFullTextPaperContexts,
-          ])
-        : normalizedFullTextPaperContexts,
+        ? limitFullTextPaperContexts(
+            normalizePaperContexts([
+              autoLoadedPaperContext,
+              ...normalizedFullTextPaperContexts,
+            ]),
+          )
+        : limitFullTextPaperContexts(normalizedFullTextPaperContexts),
   };
 }
+
+export const includeAutoLoadedPaperContextForTests =
+  includeAutoLoadedPaperContext;
 
 function syncComposeContextForInlineEdit(
   body: Element,
@@ -3951,6 +5377,14 @@ function syncComposeContextForInlineEdit(
   } else {
     selectedCollectionContextCache.delete(item.id);
   }
+  const selectedTagContexts = normalizeTagContexts(
+    userMessage.selectedTagContexts,
+  );
+  if (selectedTagContexts.length) {
+    selectedTagContextCache.set(item.id, selectedTagContexts);
+  } else {
+    selectedTagContextCache.delete(item.id);
+  }
   // Clear existing mode overrides for this item, then set full-next for each full-text paper
   const modePrefix = `${item.id}:`;
   for (const key of Array.from(paperContextModeOverrides.keys())) {
@@ -3972,6 +5406,7 @@ export async function editLatestUserMessageAndRetry(
   const {
     body,
     item,
+    contextSource,
     displayQuestion,
     selectedTexts,
     selectedTextSources,
@@ -3981,6 +5416,7 @@ export async function editLatestUserMessageAndRetry(
     paperContexts,
     fullTextPaperContexts,
     selectedCollectionContexts,
+    selectedTagContexts,
     attachments,
     modelAttachments,
     pdfUploadSystemMessages,
@@ -3996,6 +5432,7 @@ export async function editLatestUserMessageAndRetry(
     reasoning,
     advanced,
   } = opts;
+  const normalizedAuthMode = normalizeChatAuthMode(authMode);
   await ensureConversationLoaded(item);
   const conversationKey = getConversationKey(item);
   const history = chatHistory.get(conversationKey) || [];
@@ -4007,7 +5444,7 @@ export async function editLatestUserMessageAndRetry(
     model,
     apiBase,
     apiKey,
-    authMode,
+    authMode: normalizedAuthMode,
     providerProtocol,
     modelEntryId,
     modelProviderLabel,
@@ -4020,6 +5457,11 @@ export async function editLatestUserMessageAndRetry(
     providerProtocol: retryRequestConfig.providerProtocol,
     modelProviderLabel: retryRequestConfig.modelProviderLabel,
   });
+  const retryStorageSystem =
+    resolveConversationStorageSystemForItem({
+      item,
+      conversationSystem: retryConversationSystem,
+    }) || retryConversationSystem;
   const retryRuntimeMode: ChatRuntimeMode =
     retryConversationSystem === "codex"
       ? "chat"
@@ -4068,7 +5510,13 @@ export async function editLatestUserMessageAndRetry(
   const selectedCollectionContextsForMessage = normalizeCollectionContexts(
     selectedCollectionContexts,
   );
-  const pdfExcludeKeys = derivePdfModePaperKeys(attachments, item);
+  const selectedTagContextsForMessage =
+    normalizeTagContexts(selectedTagContexts);
+  const pdfExcludeKeys = derivePdfModePaperKeys(
+    attachments,
+    item,
+    contextSource,
+  );
   let {
     paperContexts: paperContextsForMessage,
     fullTextPaperContexts: fullTextPaperContextsForMessage,
@@ -4077,22 +5525,8 @@ export async function editLatestUserMessageAndRetry(
     normalizedPaperContexts,
     normalizedFullTextPaperContexts,
     pdfExcludeKeys.size > 0 ? pdfExcludeKeys : undefined,
+    contextSource,
   );
-  const editRetryCodexNativeMcpLightContext = shouldUseCodexNativeLightContext({
-    isCodexNativeTurn:
-      retryConversationSystem === "codex" &&
-      retryRequestConfig.authMode === "codex_app_server",
-  });
-  if (editRetryCodexNativeMcpLightContext) {
-    const [enrichedPaperContexts, enrichedFullTextPaperContexts] =
-      await Promise.all([
-        enrichPaperContextsWithMineruCache(paperContextsForMessage),
-        enrichPaperContextsWithMineruCache(fullTextPaperContextsForMessage),
-      ]);
-    paperContextsForMessage = enrichedPaperContexts || paperContextsForMessage;
-    fullTextPaperContextsForMessage =
-      enrichedFullTextPaperContexts || fullTextPaperContextsForMessage;
-  }
   const attachmentsForMessage = normalizeEditableAttachments(attachments);
   const updatedTimestamp = Date.now();
   const nextDisplayQuestion = sanitizeText(displayQuestion || "");
@@ -4141,14 +5575,17 @@ export async function editLatestUserMessageAndRetry(
     selectedCollectionContextsForMessage.length
       ? selectedCollectionContextsForMessage
       : undefined;
+  retryPair.userMessage.selectedTagContexts =
+    selectedTagContextsForMessage.length
+      ? selectedTagContextsForMessage
+      : undefined;
   retryPair.userMessage.paperContextsExpanded = false;
   retryPair.userMessage.attachments = attachmentsForMessage.length
     ? attachmentsForMessage
     : undefined;
   if (modelAttachments !== undefined) {
-    retryPair.userMessage.modelAttachments = normalizeEditableAttachments(
-      modelAttachments,
-    );
+    retryPair.userMessage.modelAttachments =
+      normalizeEditableAttachments(modelAttachments);
   } else {
     retryPair.userMessage.modelAttachments = undefined;
   }
@@ -4160,32 +5597,41 @@ export async function editLatestUserMessageAndRetry(
   retryPair.userMessage.attachmentActiveIndex = undefined;
 
   try {
-    await updateStoredLatestUserMessageByConversation(conversationKey, {
-      text: retryPair.userMessage.text,
-      timestamp: retryPair.userMessage.timestamp,
-      runMode: retryPair.userMessage.runMode,
-      agentRunId: retryPair.userMessage.agentRunId,
-      selectedText: retryPair.userMessage.selectedText,
-      selectedTexts: retryPair.userMessage.selectedTexts,
-      selectedTextSources: retryPair.userMessage.selectedTextSources,
-      selectedTextPaperContexts:
-        retryPair.userMessage.selectedTextPaperContexts,
-      screenshotImages: retryPair.userMessage.screenshotImages,
-      paperContexts: retryPair.userMessage.paperContexts,
-      fullTextPaperContexts: retryPair.userMessage.fullTextPaperContexts,
-      citationPaperContexts: retryPair.userMessage.citationPaperContexts,
-      selectedCollectionContexts:
-        retryPair.userMessage.selectedCollectionContexts,
-      attachments: retryPair.userMessage.attachments,
-      modelAttachments: retryPair.userMessage.modelAttachments,
-      modelName: retryPair.userMessage.modelName,
-      modelEntryId: retryPair.userMessage.modelEntryId,
-      modelProviderLabel: retryPair.userMessage.modelProviderLabel,
-    });
+    await updateStoredLatestUserMessageByConversation(
+      conversationKey,
+      {
+        text: retryPair.userMessage.text,
+        timestamp: retryPair.userMessage.timestamp,
+        runMode: retryPair.userMessage.runMode,
+        agentRunId: retryPair.userMessage.agentRunId,
+        selectedText: retryPair.userMessage.selectedText,
+        selectedTexts: retryPair.userMessage.selectedTexts,
+        selectedTextSources: retryPair.userMessage.selectedTextSources,
+        selectedTextPaperContexts:
+          retryPair.userMessage.selectedTextPaperContexts,
+        selectedTextNoteContexts:
+          retryPair.userMessage.selectedTextNoteContexts,
+        forcedSkillIds: retryPair.userMessage.forcedSkillIds,
+        screenshotImages: retryPair.userMessage.screenshotImages,
+        paperContexts: retryPair.userMessage.paperContexts,
+        fullTextPaperContexts: retryPair.userMessage.fullTextPaperContexts,
+        citationPaperContexts: retryPair.userMessage.citationPaperContexts,
+        selectedCollectionContexts:
+          retryPair.userMessage.selectedCollectionContexts,
+        selectedTagContexts: retryPair.userMessage.selectedTagContexts,
+        attachments: retryPair.userMessage.attachments,
+        modelAttachments: retryPair.userMessage.modelAttachments,
+        modelName: retryPair.userMessage.modelName,
+        modelEntryId: retryPair.userMessage.modelEntryId,
+        modelProviderLabel: retryPair.userMessage.modelProviderLabel,
+      },
+      retryStorageSystem,
+    );
 
     const storedMessages = await loadStoredConversationByKey(
       conversationKey,
       PERSISTED_HISTORY_LIMIT,
+      retryStorageSystem,
     );
     const attachmentHashes =
       collectAttachmentHashesFromStoredMessages(storedMessages);
@@ -4206,7 +5652,7 @@ export async function editLatestUserMessageAndRetry(
       model,
       apiBase,
       apiKey,
-      authMode,
+      normalizeChatAuthMode(authMode),
       providerProtocol,
       modelEntryId,
       modelProviderLabel,
@@ -4221,7 +5667,7 @@ export async function editLatestUserMessageAndRetry(
       model,
       apiBase,
       apiKey,
-      authMode,
+      normalizeChatAuthMode(authMode),
       providerProtocol,
       modelEntryId,
       modelProviderLabel,
@@ -4244,8 +5690,7 @@ export async function retryLatestAssistantResponse(
     | "api_key"
     | "codex_auth"
     | "codex_app_server"
-    | "copilot_auth"
-    | "webchat",
+    | "copilot_auth",
   providerProtocol?: ProviderProtocol,
   modelEntryId?: string,
   modelProviderLabel?: string,
@@ -4266,7 +5711,7 @@ export async function retryLatestAssistantResponse(
   }
 
   const thisRequestId = nextRequestId();
-  setPendingRequestId(conversationKey, thisRequestId);
+  setPendingRequestIdAndSync(conversationKey, thisRequestId, body, item);
   setRequestUIBusy(body, ui, conversationKey, "Preparing retry...");
   const assistantMessage = retryPair.assistantMessage;
   const assistantSnapshot = takeAssistantSnapshot(assistantMessage);
@@ -4276,6 +5721,7 @@ export async function retryLatestAssistantResponse(
   assistantMessage.reasoningOpen = isReasoningExpandedByDefault();
   assistantMessage.agentRunId = undefined;
   assistantMessage.pendingAgentTraceEvents = undefined;
+  assistantMessage.generatedImages = undefined;
   assistantMessage.streaming = true;
   assistantMessage.quoteCitations = buildSelectedTextQuoteCitations(
     retryPair.userMessage.selectedTexts,
@@ -4300,6 +5746,11 @@ export async function retryLatestAssistantResponse(
     providerProtocol: effectiveRequestConfig.providerProtocol,
     modelProviderLabel: effectiveRequestConfig.modelProviderLabel,
   });
+  const effectiveStorageSystem =
+    resolveConversationStorageSystemForItem({
+      item,
+      conversationSystem: effectiveConversationSystem,
+    }) || effectiveConversationSystem;
   const isCodexNativeTurn =
     effectiveConversationSystem === "codex" &&
     effectiveRequestConfig.authMode === "codex_app_server";
@@ -4328,22 +5779,14 @@ export async function retryLatestAssistantResponse(
     paperContexts,
     fullTextPaperContexts,
     selectedCollectionContexts,
+    selectedTagContexts,
   } = reconstructRetryPayload(retryPair.userMessage);
   let retryPaperContexts = paperContexts;
   let retryFullTextPaperContexts = fullTextPaperContexts;
-  if (shouldUseCodexNativeLightContext({ isCodexNativeTurn })) {
-    const [enrichedPaperContexts, enrichedFullTextPaperContexts] =
-      await Promise.all([
-        enrichPaperContextsWithMineruCache(retryPaperContexts),
-        enrichPaperContextsWithMineruCache(retryFullTextPaperContexts),
-      ]);
-    retryPaperContexts = enrichedPaperContexts || retryPaperContexts;
-    retryFullTextPaperContexts =
-      enrichedFullTextPaperContexts || retryFullTextPaperContexts;
-  }
   if (!question.trim()) {
     setStatusSafely("Nothing to retry for latest turn", "error");
     restoreRequestUIIdle(body, conversationKey, thisRequestId);
+    clearPendingRequestIdAndSync(conversationKey, body, item);
     return;
   }
 
@@ -4365,21 +5808,26 @@ export async function retryLatestAssistantResponse(
     finalizeCancelledAssistantMessage(assistantMessage);
     refreshChatSafely();
     const latestContextSnapshot = contextUsageSnapshots.get(conversationKey);
-    await updateStoredLatestAssistantMessageByConversation(conversationKey, {
-      text: assistantMessage.text,
-      timestamp: assistantMessage.timestamp,
-      runMode: assistantMessage.runMode,
-      agentRunId: assistantMessage.agentRunId,
-      modelName: assistantMessage.modelName,
-      modelEntryId: assistantMessage.modelEntryId,
-      modelProviderLabel: assistantMessage.modelProviderLabel,
-      reasoningSummary: assistantMessage.reasoningSummary,
-      reasoningDetails: assistantMessage.reasoningDetails,
-      compactMarker: assistantMessage.compactMarker,
-      contextTokens: latestContextSnapshot?.contextTokens,
-      contextWindow: latestContextSnapshot?.contextWindow,
-      quoteCitations: assistantMessage.quoteCitations,
-    });
+    await updateStoredLatestAssistantMessageByConversation(
+      conversationKey,
+      {
+        text: assistantMessage.text,
+        timestamp: assistantMessage.timestamp,
+        runMode: assistantMessage.runMode,
+        agentRunId: assistantMessage.agentRunId,
+        modelName: assistantMessage.modelName,
+        modelEntryId: assistantMessage.modelEntryId,
+        modelProviderLabel: assistantMessage.modelProviderLabel,
+        reasoningSummary: assistantMessage.reasoningSummary,
+        reasoningDetails: assistantMessage.reasoningDetails,
+        compactMarker: assistantMessage.compactMarker,
+        contextTokens: latestContextSnapshot?.contextTokens,
+        contextWindow: latestContextSnapshot?.contextWindow,
+        quoteCitations: assistantMessage.quoteCitations,
+        generatedImages: assistantMessage.generatedImages,
+      },
+      effectiveStorageSystem,
+    );
     setStatusSafely("Cancelled", "ready");
   };
   if (
@@ -4392,6 +5840,7 @@ export async function retryLatestAssistantResponse(
     if (blockedAttachments.length) {
       restoreOriginalAssistant();
       restoreRequestUIIdle(body, conversationKey, thisRequestId);
+      clearPendingRequestIdAndSync(conversationKey, body, item);
       setStatusSafely(
         buildCodexAppServerNativeAttachmentBlockMessage(blockedAttachments),
         "error",
@@ -4437,6 +5886,7 @@ export async function retryLatestAssistantResponse(
   } catch (err) {
     restoreOriginalAssistant();
     restoreRequestUIIdle(body, conversationKey, thisRequestId);
+    clearPendingRequestIdAndSync(conversationKey, body, item);
     const message =
       err instanceof Error && err.message.trim()
         ? err.message
@@ -4466,6 +5916,7 @@ export async function retryLatestAssistantResponse(
           paperContexts: retryPaperContexts,
           fullTextPaperContexts: retryFullTextPaperContexts,
           selectedCollectionContexts,
+          selectedTagContexts,
           recentPaperContexts,
           setStatusSafely,
         })
@@ -4507,28 +5958,32 @@ export async function retryLatestAssistantResponse(
       selectedCollectionContexts.length
         ? selectedCollectionContexts
         : undefined;
-    await updateStoredLatestUserMessageByConversation(conversationKey, {
-      text: retryPair.userMessage.text,
-      timestamp: retryPair.userMessage.timestamp,
-      runMode: retryPair.userMessage.runMode,
-      agentRunId: retryPair.userMessage.agentRunId,
-      selectedText: retryPair.userMessage.selectedText,
-      selectedTexts: retryPair.userMessage.selectedTexts,
-      selectedTextSources: retryPair.userMessage.selectedTextSources,
-      selectedTextPaperContexts:
-        retryPair.userMessage.selectedTextPaperContexts,
-      screenshotImages: retryPair.userMessage.screenshotImages,
-      paperContexts: retryPair.userMessage.paperContexts,
-      fullTextPaperContexts: retryPair.userMessage.fullTextPaperContexts,
-      citationPaperContexts: retryPair.userMessage.citationPaperContexts,
-      selectedCollectionContexts:
-        retryPair.userMessage.selectedCollectionContexts,
-      attachments: retryPair.userMessage.attachments,
-      modelAttachments: retryPair.userMessage.modelAttachments,
-      modelName: retryPair.userMessage.modelName,
-      modelEntryId: retryPair.userMessage.modelEntryId,
-      modelProviderLabel: retryPair.userMessage.modelProviderLabel,
-    });
+    await updateStoredLatestUserMessageByConversation(
+      conversationKey,
+      {
+        text: retryPair.userMessage.text,
+        timestamp: retryPair.userMessage.timestamp,
+        runMode: retryPair.userMessage.runMode,
+        agentRunId: retryPair.userMessage.agentRunId,
+        selectedText: retryPair.userMessage.selectedText,
+        selectedTexts: retryPair.userMessage.selectedTexts,
+        selectedTextSources: retryPair.userMessage.selectedTextSources,
+        selectedTextPaperContexts:
+          retryPair.userMessage.selectedTextPaperContexts,
+        screenshotImages: retryPair.userMessage.screenshotImages,
+        paperContexts: retryPair.userMessage.paperContexts,
+        fullTextPaperContexts: retryPair.userMessage.fullTextPaperContexts,
+        citationPaperContexts: retryPair.userMessage.citationPaperContexts,
+        selectedCollectionContexts:
+          retryPair.userMessage.selectedCollectionContexts,
+        attachments: retryPair.userMessage.attachments,
+        modelAttachments: retryPair.userMessage.modelAttachments,
+        modelName: retryPair.userMessage.modelName,
+        modelEntryId: retryPair.userMessage.modelEntryId,
+        modelProviderLabel: retryPair.userMessage.modelProviderLabel,
+      },
+      effectiveStorageSystem,
+    );
     if (getCancelledRequestId(conversationKey) >= thisRequestId) {
       getAbortController(conversationKey)?.abort();
       await finalizeCancelledAssistant();
@@ -4539,19 +5994,20 @@ export async function retryLatestAssistantResponse(
     const codexActivityTrace = isCodexNativeTurn
       ? createCodexNativeActivityTraceController(assistantMessage, queueRefresh)
       : null;
+    noteExplicitCodexNativeSkillInvocations(
+      codexActivityTrace,
+      retryPair.userMessage.forcedSkillIds,
+    );
     if (getCancelledRequestId(conversationKey) >= thisRequestId) {
       getAbortController(conversationKey)?.abort();
       await finalizeCancelledAssistant();
       return;
     }
 
-    // Text-only models (e.g. DeepSeek) reject image_url content — drop all images.
+    // Text-only models reject image_url content, so drop all images.
     const allImages = isTextOnlyModel(effectiveRequestConfig.model || "")
       ? []
-      : [
-          ...(retryScreenshotImages || []),
-          ...(contextPlan.mineruImages || []),
-        ];
+      : [...(retryScreenshotImages || []), ...(contextPlan.contextImages || [])];
     const requestParams = {
       prompt: question,
       context: combinedContext,
@@ -4652,13 +6108,11 @@ export async function retryLatestAssistantResponse(
     const answer = isCodexNativeTurn
       ? (
           await runCodexAppServerNativeTurn({
-            scope: await enrichCodexNativeConversationScopeWithMineruCache(
-              resolveCodexNativeConversationScope({
-                item,
-                conversationKey,
-                title: question,
-              }),
-            ),
+            scope: resolveCodexNativeConversationScope({
+              item,
+              conversationKey,
+              title: question,
+            }),
             model: effectiveRequestConfig.model,
             messages: finalPrepared.messages,
             reasoning: effectiveRequestConfig.reasoning,
@@ -4667,13 +6121,16 @@ export async function retryLatestAssistantResponse(
               effectiveRequestConfig.apiBase,
             ),
             skillContext: buildCodexNativeSkillContext({
+              forcedSkillIds: retryPair.userMessage.forcedSkillIds,
               selectedTexts: retryPair.userMessage.selectedTexts,
               selectedTextSources: retryPair.userMessage.selectedTextSources,
               selectedTextPaperContexts:
                 retryPair.userMessage.selectedTextPaperContexts,
               paperContexts: contextPlan.paperContexts,
               fullTextPaperContexts: contextPlan.fullTextPaperContexts,
+              pinnedPaperContexts: retryPair.userMessage.pinnedPaperContexts,
               selectedCollectionContexts,
+              selectedTagContexts,
               screenshots: allImages,
               attachments,
             }),
@@ -4801,10 +6258,19 @@ export async function retryLatestAssistantResponse(
     }
 
     flushResponseStream("final");
+    const hasGeneratedOutput = normalizeGeneratedChatImages(
+      assistantMessage.generatedImages,
+    ).length;
     assistantMessage.text =
       sanitizeText(answer) ||
       responseStreamCoalescer?.getFullText() ||
-      "No response.";
+      (hasGeneratedOutput ? "" : "No response.");
+    await finalizeAssistantMessageQuoteCitations(assistantMessage, {
+      pairedUserMessage: retryPair.userMessage,
+      paperContexts: contextPlan.paperContexts,
+      fullTextPaperContexts: contextPlan.fullTextPaperContexts,
+      citationPaperContexts: contextPlan.citationPaperContexts,
+    });
     codexActivityTrace?.finish(assistantMessage.text);
     assistantMessage.timestamp = Date.now();
     assistantMessage.modelName = effectiveRequestConfig.model;
@@ -4814,9 +6280,7 @@ export async function retryLatestAssistantResponse(
     assistantMessage.reasoningSummary = streamedReasoningSummary;
     assistantMessage.reasoningDetails = streamedReasoningDetails;
     assistantMessage.reasoningOpen = isReasoningExpandedByDefault();
-    assistantMessage.compactMarker = /^\/compact(?:\s|$)/i.test(
-      question.trim(),
-    );
+    assistantMessage.compactMarker = isCompactCommandText(question);
     if (assistantMessage.compactMarker && !assistantMessage.text.trim()) {
       assistantMessage.text = "Conversation compacted";
     }
@@ -4824,21 +6288,26 @@ export async function retryLatestAssistantResponse(
     refreshChatSafely();
 
     const latestContextSnapshot = contextUsageSnapshots.get(conversationKey);
-    await updateStoredLatestAssistantMessageByConversation(conversationKey, {
-      text: assistantMessage.text,
-      timestamp: assistantMessage.timestamp,
-      runMode: assistantMessage.runMode,
-      agentRunId: assistantMessage.agentRunId,
-      modelName: assistantMessage.modelName,
-      modelEntryId: assistantMessage.modelEntryId,
-      modelProviderLabel: assistantMessage.modelProviderLabel,
-      reasoningSummary: assistantMessage.reasoningSummary,
-      reasoningDetails: assistantMessage.reasoningDetails,
-      compactMarker: assistantMessage.compactMarker,
-      contextTokens: latestContextSnapshot?.contextTokens,
-      contextWindow: latestContextSnapshot?.contextWindow,
-      quoteCitations: assistantMessage.quoteCitations,
-    });
+    await updateStoredLatestAssistantMessageByConversation(
+      conversationKey,
+      {
+        text: assistantMessage.text,
+        timestamp: assistantMessage.timestamp,
+        runMode: assistantMessage.runMode,
+        agentRunId: assistantMessage.agentRunId,
+        modelName: assistantMessage.modelName,
+        modelEntryId: assistantMessage.modelEntryId,
+        modelProviderLabel: assistantMessage.modelProviderLabel,
+        reasoningSummary: assistantMessage.reasoningSummary,
+        reasoningDetails: assistantMessage.reasoningDetails,
+        compactMarker: assistantMessage.compactMarker,
+        contextTokens: latestContextSnapshot?.contextTokens,
+        contextWindow: latestContextSnapshot?.contextWindow,
+        quoteCitations: assistantMessage.quoteCitations,
+        generatedImages: assistantMessage.generatedImages,
+      },
+      effectiveStorageSystem,
+    );
 
     setStatusSafely("Ready", "ready");
   } catch (err) {
@@ -4864,14 +6333,11 @@ export async function retryLatestAssistantResponse(
   } finally {
     restoreRequestUIIdle(body, conversationKey, thisRequestId);
     setAbortController(conversationKey, null);
-    setPendingRequestId(conversationKey, 0);
-    if (effectiveRequestConfig.providerProtocol !== "web_sync") {
-      scheduleQueuedInputDrain(body, {
-        conversationSystem:
-          resolveConversationSystemForItem(item) || "upstream",
-        conversationKey,
-      });
-    }
+    clearPendingRequestIdAndSync(conversationKey, body, item);
+    scheduleQueuedInputDrain(body, {
+      conversationSystem: resolveConversationSystemForItem(item) || "upstream",
+      conversationKey,
+    });
   }
 }
 
@@ -4883,6 +6349,7 @@ export async function retryLatestAssistantResponse(
 export async function editUserTurnAndRetry(opts: {
   body: Element;
   item: Zotero.Item;
+  contextSource?: ResolvedContextSource | null;
   userTimestamp: number;
   assistantTimestamp: number;
   newText: string;
@@ -4894,6 +6361,7 @@ export async function editUserTurnAndRetry(opts: {
   paperContexts?: PaperContextRef[];
   fullTextPaperContexts?: PaperContextRef[];
   selectedCollectionContexts?: CollectionContextRef[];
+  selectedTagContexts?: TagContextRef[];
   attachments?: ChatAttachment[];
   modelAttachments?: ChatAttachment[];
   pdfUploadSystemMessages?: string[];
@@ -4905,8 +6373,7 @@ export async function editUserTurnAndRetry(opts: {
     | "api_key"
     | "codex_auth"
     | "codex_app_server"
-    | "copilot_auth"
-    | "webchat";
+    | "copilot_auth";
   providerProtocol?: ProviderProtocol;
   modelEntryId?: string;
   modelProviderLabel?: string;
@@ -4916,6 +6383,7 @@ export async function editUserTurnAndRetry(opts: {
   const {
     body,
     item,
+    contextSource,
     userTimestamp,
     assistantTimestamp,
     newText,
@@ -4927,6 +6395,7 @@ export async function editUserTurnAndRetry(opts: {
     paperContexts,
     fullTextPaperContexts,
     selectedCollectionContexts,
+    selectedTagContexts,
     attachments,
     modelAttachments,
     pdfUploadSystemMessages,
@@ -4982,6 +6451,11 @@ export async function editUserTurnAndRetry(opts: {
     providerProtocol: retryRequestConfig.providerProtocol,
     modelProviderLabel: retryRequestConfig.modelProviderLabel,
   });
+  const retryStorageSystem =
+    resolveConversationStorageSystemForItem({
+      item,
+      conversationSystem: retryConversationSystem,
+    }) || retryConversationSystem;
   const retryRuntimeMode: ChatRuntimeMode =
     retryConversationSystem === "codex"
       ? "chat"
@@ -5007,21 +6481,19 @@ export async function editUserTurnAndRetry(opts: {
   // Delete persisted subsequent turns
   for (const p of subsequentPairs) {
     try {
-      if (isClaudeConversationKey(conversationKey)) {
-        await deleteClaudeConversationTurnMessages(
-          conversationKey,
-          p.userTs,
-          p.assistantTs,
-        );
-      } else if (isCodexConversationKey(conversationKey)) {
-        await deleteCodexTurnMessages(conversationKey, p.userTs, p.assistantTs);
-      } else {
-        await deleteStoredTurnMessages(
-          conversationKey,
-          p.userTs,
-          p.assistantTs,
-        );
+      const storageSystem = resolveConversationStorageSystem({
+        conversationKey,
+        conversationSystem: retryStorageSystem,
+      });
+      if (!storageSystem) {
+        continue;
       }
+      await conversationRepository.deleteTurnMessages({
+        system: storageSystem,
+        conversationKey,
+        userTimestamp: p.userTs,
+        assistantTimestamp: p.assistantTs,
+      });
     } catch (err) {
       ztoolkit.log("LLM: Failed to delete subsequent stored turn", err);
     }
@@ -5062,7 +6534,13 @@ export async function editUserTurnAndRetry(opts: {
   const selectedCollectionContextsForMessage = normalizeCollectionContexts(
     selectedCollectionContexts,
   );
-  const pdfExcludeKeysEdit = derivePdfModePaperKeys(attachments, item);
+  const selectedTagContextsForMessage =
+    normalizeTagContexts(selectedTagContexts);
+  const pdfExcludeKeysEdit = derivePdfModePaperKeys(
+    attachments,
+    item,
+    contextSource,
+  );
   let {
     paperContexts: paperContextsForMessage,
     fullTextPaperContexts: fullTextPaperContextsForMessage,
@@ -5071,6 +6549,7 @@ export async function editUserTurnAndRetry(opts: {
     normalizedPaperContexts,
     normalizedFullTextPaperContexts,
     pdfExcludeKeysEdit.size > 0 ? pdfExcludeKeysEdit : undefined,
+    contextSource,
   );
   const attachmentsForMessage = normalizeEditableAttachments(attachments);
   userMsg.selectedText = selectedTextForMessage || undefined;
@@ -5109,6 +6588,9 @@ export async function editUserTurnAndRetry(opts: {
     selectedCollectionContextsForMessage.length
       ? selectedCollectionContextsForMessage
       : undefined;
+  userMsg.selectedTagContexts = selectedTagContextsForMessage.length
+    ? selectedTagContextsForMessage
+    : undefined;
   userMsg.paperContextsExpanded = false;
   userMsg.attachments = attachmentsForMessage.length
     ? attachmentsForMessage
@@ -5126,26 +6608,33 @@ export async function editUserTurnAndRetry(opts: {
 
   // Persist the updated user message
   try {
-    await updateStoredLatestUserMessageByConversation(conversationKey, {
-      text: userMsg.text,
-      timestamp: userMsg.timestamp,
-      runMode: userMsg.runMode,
-      agentRunId: userMsg.agentRunId,
-      selectedText: userMsg.selectedText,
-      selectedTexts: userMsg.selectedTexts,
-      selectedTextSources: userMsg.selectedTextSources,
-      selectedTextPaperContexts: userMsg.selectedTextPaperContexts,
-      screenshotImages: userMsg.screenshotImages,
-      paperContexts: userMsg.paperContexts,
-      fullTextPaperContexts: userMsg.fullTextPaperContexts,
-      citationPaperContexts: getMessageCitationPaperContexts(userMsg),
-      selectedCollectionContexts: userMsg.selectedCollectionContexts,
-      attachments: userMsg.attachments,
-      modelAttachments: userMsg.modelAttachments,
-      modelName: userMsg.modelName,
-      modelEntryId: userMsg.modelEntryId,
-      modelProviderLabel: userMsg.modelProviderLabel,
-    });
+    await updateStoredLatestUserMessageByConversation(
+      conversationKey,
+      {
+        text: userMsg.text,
+        timestamp: userMsg.timestamp,
+        runMode: userMsg.runMode,
+        agentRunId: userMsg.agentRunId,
+        selectedText: userMsg.selectedText,
+        selectedTexts: userMsg.selectedTexts,
+        selectedTextSources: userMsg.selectedTextSources,
+        selectedTextPaperContexts: userMsg.selectedTextPaperContexts,
+        selectedTextNoteContexts: userMsg.selectedTextNoteContexts,
+        forcedSkillIds: userMsg.forcedSkillIds,
+        screenshotImages: userMsg.screenshotImages,
+        paperContexts: userMsg.paperContexts,
+        fullTextPaperContexts: userMsg.fullTextPaperContexts,
+        citationPaperContexts: getMessageCitationPaperContexts(userMsg),
+        selectedCollectionContexts: userMsg.selectedCollectionContexts,
+        selectedTagContexts: userMsg.selectedTagContexts,
+        attachments: userMsg.attachments,
+        modelAttachments: userMsg.modelAttachments,
+        modelName: userMsg.modelName,
+        modelEntryId: userMsg.modelEntryId,
+        modelProviderLabel: userMsg.modelProviderLabel,
+      },
+      retryStorageSystem,
+    );
   } catch (err) {
     ztoolkit.log("LLM: Failed to persist edited user message", err);
   }
@@ -5197,6 +6686,7 @@ export type BuildAgentRuntimeRequestParams = {
   paperContexts: PaperContextRef[];
   fullTextPaperContexts: PaperContextRef[];
   selectedCollectionContexts?: CollectionContextRef[];
+  selectedTagContexts?: TagContextRef[];
   attachments: ChatAttachment[] | undefined;
   screenshots: string[] | undefined;
   forcedSkillIds?: string[];
@@ -5233,44 +6723,243 @@ function buildActiveNoteRuntimeContext(
   };
 }
 
-async function enrichPaperContextsWithMineruCache(
-  papers: PaperContextRef[] | undefined,
-): Promise<PaperContextRef[] | undefined> {
-  if (!papers?.length) return papers;
-  const enriched: PaperContextRef[] = [];
-  for (const paper of papers) {
-    let mineruCacheDir: string | undefined;
-    try {
-      mineruCacheDir = await ensureMineruCacheDirForAttachment(
-        Zotero.Items.get(paper.contextItemId),
-      );
-    } catch {
-      /* ignore */
-    }
-    enriched.push(mineruCacheDir ? { ...paper, mineruCacheDir } : paper);
-  }
-  return enriched;
+function normalizeAttachmentResourceText(value: unknown): string {
+  return typeof value === "string" ? sanitizeText(value).trim() : "";
 }
 
-async function enrichCodexNativeConversationScopeWithMineruCache(
-  scope: CodexNativeConversationScope,
-): Promise<CodexNativeConversationScope> {
-  if (!scope.paperContext) return scope;
-  const enriched = await enrichPaperContextsWithMineruCache([
-    scope.paperContext,
+function getAttachmentFilename(item: Zotero.Item | null | undefined): string {
+  return normalizeAttachmentResourceText(
+    (item as unknown as { attachmentFilename?: unknown })?.attachmentFilename,
+  );
+}
+
+function getAttachmentContentType(
+  item: Zotero.Item | null | undefined,
+): string {
+  return normalizeAttachmentResourceText(
+    (item as unknown as { attachmentContentType?: unknown })
+      ?.attachmentContentType,
+  ).toLowerCase();
+}
+
+function getAttachmentDisplayTitle(item: Zotero.Item): string {
+  return (
+    normalizeAttachmentResourceText(item.getField?.("title")) ||
+    getAttachmentFilename(item) ||
+    `Attachment ${item.id}`
+  );
+}
+
+function getAttachmentResourceType(input: {
+  contentType: string;
+  filename: string;
+}): AgentAttachmentResource["attachmentType"] {
+  return (
+    resolveContextAttachmentSupportFromMetadata(input)?.attachmentType ||
+    "unsupported"
+  );
+}
+
+function getAttachmentReadableVia(
+  attachmentType: AgentAttachmentResource["attachmentType"],
+): AgentAttachmentResource["readableVia"] {
+  if (attachmentType === "pdf") return "paper_read";
+  if (
+    attachmentType === "markdown" ||
+    attachmentType === "html" ||
+    attachmentType === "txt" ||
+    attachmentType === "docx"
+  ) {
+    return "read_attachment";
+  }
+  return "unsupported";
+}
+
+function getParentTitle(item: Zotero.Item): string {
+  return (
+    normalizeAttachmentResourceText(item.getField?.("title")) ||
+    normalizeAttachmentResourceText(item.getDisplayTitle?.()) ||
+    `Item ${item.id}`
+  );
+}
+
+function buildAttachmentResourceForChild(params: {
+  parentItem: Zotero.Item;
+  attachmentItem: Zotero.Item;
+  primaryContextItemIds: Set<number>;
+}): AgentAttachmentResource | null {
+  if (!params.parentItem.isRegularItem?.()) return null;
+  if (!params.attachmentItem.isAttachment?.()) return null;
+  const contextItemId = Number(params.attachmentItem.id);
+  const parentItemId = Number(params.parentItem.id);
+  if (!Number.isFinite(contextItemId) || !Number.isFinite(parentItemId)) {
+    return null;
+  }
+  const filename = getAttachmentFilename(params.attachmentItem);
+  const contentType =
+    getAttachmentContentType(params.attachmentItem) ||
+    "application/octet-stream";
+  const attachmentType = getAttachmentResourceType({ contentType, filename });
+  const readableVia = getAttachmentReadableVia(attachmentType);
+  const contentSourceMode =
+    attachmentType === "pdf" ||
+    attachmentType === "markdown" ||
+    attachmentType === "html" ||
+    attachmentType === "txt" ||
+    attachmentType === "docx"
+      ? attachmentType
+      : undefined;
+  return {
+    lifecycleState: "available",
+    parentItemId: Math.floor(parentItemId),
+    parentTitle: getParentTitle(params.parentItem),
+    contextItemId: Math.floor(contextItemId),
+    title: getAttachmentDisplayTitle(params.attachmentItem),
+    contentType,
+    attachmentType,
+    readableVia,
+    contentSourceMode,
+    isPrimary: params.primaryContextItemIds.has(Math.floor(contextItemId)),
+  };
+}
+
+function collectAttachmentResourcesForParent(params: {
+  parentItem: Zotero.Item | null | undefined;
+  primaryContextItemIds: Set<number>;
+}): AgentAttachmentResource[] {
+  const parentItem = params.parentItem;
+  if (!parentItem?.isRegularItem?.()) return [];
+  const attachmentIds = parentItem.getAttachments?.() || [];
+  const resources: AgentAttachmentResource[] = [];
+  for (const attachmentId of attachmentIds) {
+    const attachmentItem = Zotero.Items.get(attachmentId) || null;
+    const resource = attachmentItem
+      ? buildAttachmentResourceForChild({
+          parentItem,
+          attachmentItem,
+          primaryContextItemIds: params.primaryContextItemIds,
+        })
+      : null;
+    if (resource) resources.push(resource);
+  }
+  return resources;
+}
+
+function collectUniqueParentItemsForPapers(
+  papers: PaperContextRef[],
+): Zotero.Item[] {
+  const out: Zotero.Item[] = [];
+  const seen = new Set<number>();
+  for (const paper of papers) {
+    const itemId = Number(paper.itemId);
+    if (!Number.isFinite(itemId) || itemId <= 0) continue;
+    const normalized = Math.floor(itemId);
+    if (seen.has(normalized)) continue;
+    const item = Zotero.Items.get(normalized) || null;
+    if (!item?.isRegularItem?.()) continue;
+    seen.add(normalized);
+    out.push(item);
+  }
+  return out;
+}
+
+function incrementAttachmentCount(
+  counts: AgentAttachmentResourceSummary["attachmentCounts"],
+  attachmentType: AgentAttachmentResource["attachmentType"],
+): void {
+  counts[attachmentType] = (counts[attachmentType] || 0) + 1;
+}
+
+function buildCollectionAttachmentResourceSummary(
+  collectionContext: CollectionContextRef,
+): AgentAttachmentResourceSummary | null {
+  const collection = Zotero.Collections.get(collectionContext.collectionId);
+  if (!collection) return null;
+  const parentItemIds = new Set<number>();
+  const rawChildIds = collection.getChildItems?.(true, false) || [];
+  for (const rawId of rawChildIds) {
+    const itemId = Number(rawId);
+    if (!Number.isFinite(itemId) || itemId <= 0) continue;
+    const item = Zotero.Items.get(Math.floor(itemId)) || null;
+    if (!item?.isRegularItem?.()) continue;
+    parentItemIds.add(Math.floor(itemId));
+  }
+  const attachmentCounts: AgentAttachmentResourceSummary["attachmentCounts"] =
+    {};
+  for (const parentItemId of parentItemIds) {
+    const parentItem = Zotero.Items.get(parentItemId) || null;
+    if (!parentItem?.isRegularItem?.()) continue;
+    for (const attachmentId of parentItem.getAttachments?.() || []) {
+      const attachmentItem = Zotero.Items.get(attachmentId) || null;
+      if (!attachmentItem?.isAttachment?.()) continue;
+      const contentType =
+        getAttachmentContentType(attachmentItem) || "application/octet-stream";
+      const filename = getAttachmentFilename(attachmentItem);
+      incrementAttachmentCount(
+        attachmentCounts,
+        getAttachmentResourceType({ contentType, filename }),
+      );
+    }
+  }
+  return {
+    scope: "selected-collection",
+    collectionId: collectionContext.collectionId,
+    libraryID: collectionContext.libraryID,
+    collectionName:
+      normalizeAttachmentResourceText(collectionContext.name) ||
+      normalizeAttachmentResourceText(collection.name) ||
+      `Collection ${collectionContext.collectionId}`,
+    parentItemCount: parentItemIds.size,
+    attachmentCounts,
+  };
+}
+
+function buildAgentAttachmentResourcePool(params: {
+  paperContexts?: PaperContextRef[];
+  fullTextPaperContexts?: PaperContextRef[];
+  selectedCollectionContexts?: CollectionContextRef[];
+}): {
+  resources?: AgentAttachmentResource[];
+  summaries?: AgentAttachmentResourceSummary[];
+} {
+  const papers = normalizePaperContexts([
+    ...(params.paperContexts || []),
+    ...(params.fullTextPaperContexts || []),
   ]);
-  const paperContext = enriched?.[0];
-  if (!paperContext || paperContext === scope.paperContext) return scope;
-  return { ...scope, paperContext };
+  const primaryContextItemIds = new Set(
+    papers
+      .map((paper) => Number(paper.contextItemId))
+      .filter((id) => Number.isFinite(id) && id > 0)
+      .map((id) => Math.floor(id)),
+  );
+  const resources = collectUniqueParentItemsForPapers(papers).flatMap(
+    (parentItem) =>
+      collectAttachmentResourcesForParent({
+        parentItem,
+        primaryContextItemIds,
+      }),
+  );
+  const summaries = normalizeCollectionContexts(
+    params.selectedCollectionContexts,
+  )
+    .map(buildCollectionAttachmentResourceSummary)
+    .filter((summary): summary is AgentAttachmentResourceSummary =>
+      Boolean(summary),
+    );
+  return {
+    resources: resources.length ? resources : undefined,
+    summaries: summaries.length ? summaries : undefined,
+  };
 }
 
 async function buildAgentRuntimeRequest(
   params: BuildAgentRuntimeRequestParams,
 ): Promise<AgentRuntimeRequest> {
-  const [enrichedPaperContexts, enrichedFullTextPapers] = await Promise.all([
-    enrichPaperContextsWithMineruCache(params.paperContexts),
-    enrichPaperContextsWithMineruCache(params.fullTextPaperContexts),
-  ]);
+  const attachmentResourcePool = buildAgentAttachmentResourcePool({
+    paperContexts: params.paperContexts,
+    fullTextPaperContexts: params.fullTextPaperContexts,
+    selectedCollectionContexts: params.selectedCollectionContexts,
+  });
   return {
     conversationKey: params.conversationKey,
     mode: "agent",
@@ -5280,11 +6969,14 @@ async function buildAgentRuntimeRequest(
     selectedTexts: params.selectedTexts,
     selectedTextSources: params.selectedTextSources,
     selectedTextPaperContexts: params.selectedTextPaperContexts,
-    selectedPaperContexts: enrichedPaperContexts,
-    fullTextPaperContexts: enrichedFullTextPapers,
+    selectedPaperContexts: params.paperContexts,
+    fullTextPaperContexts: params.fullTextPaperContexts,
     selectedCollectionContexts: normalizeCollectionContexts(
       params.selectedCollectionContexts,
     ),
+    selectedTagContexts: normalizeTagContexts(params.selectedTagContexts),
+    availableAttachmentResources: attachmentResourcePool.resources,
+    attachmentResourceSummaries: attachmentResourcePool.summaries,
     attachments: params.attachments,
     screenshots: params.screenshots,
     forcedSkillIds: params.forcedSkillIds,
@@ -5318,12 +7010,13 @@ async function buildAgentRuntimeRequest(
       claudeAutoCompactEligible:
         params.effectiveRequestConfig.modelProviderLabel === "Claude Code" &&
         isClaudeAutoCompactEnabled() &&
-        !/^\/compact(?:\s|$)/i.test(params.userText.trim()),
+        !isCompactCommandText(params.userText),
       claudeAutoCompactThresholdPercent:
         params.effectiveRequestConfig.modelProviderLabel === "Claude Code"
           ? getClaudeAutoCompactThresholdPercent()
           : undefined,
       claudeHistoryLength: params.history.length,
+      notesDirectoryConfig: getNotesDirectoryConfig() || undefined,
     },
   };
 }
@@ -5346,7 +7039,8 @@ function buildAgentEngineDeps(
       setAbortController(ck, ctrl),
     getAbortControllerCtor,
     nextRequestId,
-    setPendingRequestId,
+    setPendingRequestId: (ck: number, id: number) =>
+      setPendingRequestIdAndSync(ck, id),
     getPanelRequestUI,
     setRequestUIBusy,
     restoreRequestUIIdle,
@@ -5381,12 +7075,87 @@ function buildAgentEngineDeps(
     waitForUiStep,
     finalizeCancelledAssistantMessage,
     sanitizeText,
+    finalizeAssistantQuoteCitations: async (
+      assistantMessage,
+      pairedUserMessage,
+    ) => {
+      await finalizeAssistantMessageQuoteCitations(assistantMessage, {
+        pairedUserMessage,
+      });
+    },
     appendReasoningPart,
-    persistConversationMessage,
-    updateStoredLatestUserMessage:
-      updateStoredLatestUserMessageByConversation as AgentEngineDeps["updateStoredLatestUserMessage"],
-    updateStoredLatestAssistantMessage:
-      updateStoredLatestAssistantMessageByConversation as AgentEngineDeps["updateStoredLatestAssistantMessage"],
+    persistConversationMessage: async (conversationKey, message) => {
+      const system = getEffectiveConversationSystem();
+      const storageSystem = currentItem
+        ? resolveConversationStorageSystemForItem({
+            item: currentItem,
+            conversationSystem: system,
+          })
+        : system;
+      if (
+        currentItem &&
+        !(await validateConversationScopeForItem({
+          item: currentItem,
+          conversationKey,
+          conversationSystem: system,
+        }))
+      ) {
+        return;
+      }
+      await persistConversationMessage(conversationKey, message, storageSystem);
+    },
+    updateStoredLatestUserMessage: async (conversationKey, data) => {
+      const system = getEffectiveConversationSystem();
+      const storageSystem = currentItem
+        ? resolveConversationStorageSystemForItem({
+            item: currentItem,
+            conversationSystem: system,
+          })
+        : system;
+      if (
+        currentItem &&
+        !(await validateConversationScopeForItem({
+          item: currentItem,
+          conversationKey,
+          conversationSystem: system,
+        }))
+      ) {
+        return;
+      }
+      await updateStoredLatestUserMessageByConversation(
+        conversationKey,
+        data as Parameters<
+          typeof updateStoredLatestUserMessageByConversation
+        >[1],
+        storageSystem,
+      );
+    },
+    updateStoredLatestAssistantMessage: async (conversationKey, data) => {
+      const system = getEffectiveConversationSystem();
+      const storageSystem = currentItem
+        ? resolveConversationStorageSystemForItem({
+            item: currentItem,
+            conversationSystem: system,
+          })
+        : system;
+      if (
+        currentItem &&
+        !(await validateConversationScopeForItem({
+          item: currentItem,
+          conversationKey,
+          conversationSystem: system,
+        }))
+      ) {
+        return;
+      }
+      await updateStoredLatestAssistantMessageByConversation(
+        conversationKey,
+        data as Parameters<
+          typeof updateStoredLatestAssistantMessageByConversation
+        >[1],
+        storageSystem,
+      );
+    },
     sendChatFallback: sendQuestion,
     getAgentRuntime: () =>
       getEffectiveConversationSystem() === "claude_code"
@@ -5415,8 +7184,7 @@ async function retryLatestAgentResponse(
     | "api_key"
     | "codex_auth"
     | "codex_app_server"
-    | "copilot_auth"
-    | "webchat",
+    | "copilot_auth",
   providerProtocol?: ProviderProtocol,
   modelEntryId?: string,
   modelProviderLabel?: string,
@@ -5430,6 +7198,7 @@ async function retryLatestAgentResponse(
     providerProtocol,
     modelProviderLabel,
   });
+  await initAgentSubsystem();
   await retryAgentTurn(
     body,
     item,
@@ -5450,6 +7219,7 @@ async function retryLatestAgentResponse(
 async function sendAgentQuestion(opts: {
   body: Element;
   item: Zotero.Item;
+  contextSource?: ResolvedContextSource | null;
   question: string;
   images?: string[];
   model?: string;
@@ -5459,8 +7229,7 @@ async function sendAgentQuestion(opts: {
     | "api_key"
     | "codex_auth"
     | "codex_app_server"
-    | "copilot_auth"
-    | "webchat";
+    | "copilot_auth";
   providerProtocol?: ProviderProtocol;
   modelEntryId?: string;
   modelProviderLabel?: string;
@@ -5474,6 +7243,7 @@ async function sendAgentQuestion(opts: {
   paperContexts?: PaperContextRef[];
   fullTextPaperContexts?: PaperContextRef[];
   selectedCollectionContexts?: CollectionContextRef[];
+  selectedTagContexts?: TagContextRef[];
   attachments?: ChatAttachment[];
   modelAttachments?: ChatAttachment[];
   pdfModePaperKeys?: Set<string>;
@@ -5481,6 +7251,27 @@ async function sendAgentQuestion(opts: {
   pdfUploadSystemMessages?: string[];
   conversationSystem?: ConversationSystem;
 }): Promise<void> {
+  const conversationKey = getConversationKey(opts.item);
+  const safeConversationScope = await validateConversationScopeForItem({
+    item: opts.item,
+    conversationKey,
+    conversationSystem: opts.conversationSystem,
+  });
+  if (!safeConversationScope) {
+    const ui = getPanelRequestUI(opts.body);
+    const helpers = createPanelUpdateHelpers(
+      opts.body,
+      opts.item,
+      conversationKey,
+      ui,
+    );
+    helpers.setStatusSafely(
+      "Conversation identity mismatch; open a new chat.",
+      "error",
+    );
+    return;
+  }
+  await initAgentSubsystem();
   await sendAgentTurn(
     opts,
     buildAgentEngineDeps(opts.item, opts.conversationSystem),
@@ -5493,6 +7284,7 @@ export async function sendQuestion(
   const {
     body,
     item,
+    contextSource,
     question,
     images,
     model,
@@ -5508,6 +7300,7 @@ export async function sendQuestion(
     paperContexts,
     fullTextPaperContexts,
     selectedCollectionContexts,
+    selectedTagContexts,
     attachments,
     modelAttachments,
     runtimeMode = "chat",
@@ -5517,10 +7310,15 @@ export async function sendQuestion(
   } = opts;
   const effectiveConversationSystem = resolveEffectiveConversationSystem({
     item,
-    authMode: opts.authMode,
+    authMode: normalizeChatAuthMode(opts.authMode),
     providerProtocol: opts.providerProtocol,
     modelProviderLabel: opts.modelProviderLabel,
   });
+  const effectiveStorageSystem =
+    resolveConversationStorageSystemForItem({
+      item,
+      conversationSystem: effectiveConversationSystem,
+    }) || effectiveConversationSystem;
   const effectiveRuntimeMode: ChatRuntimeMode =
     effectiveConversationSystem === "claude_code"
       ? "agent"
@@ -5531,12 +7329,13 @@ export async function sendQuestion(
     await sendAgentQuestion({
       body,
       item,
+      contextSource: opts.contextSource,
       question,
       images,
       model,
       apiBase,
       apiKey,
-      authMode: opts.authMode,
+      authMode: normalizeChatAuthMode(opts.authMode),
       providerProtocol: opts.providerProtocol,
       modelEntryId: opts.modelEntryId,
       modelProviderLabel: opts.modelProviderLabel,
@@ -5550,6 +7349,7 @@ export async function sendQuestion(
       paperContexts,
       fullTextPaperContexts,
       selectedCollectionContexts,
+      selectedTagContexts,
       attachments,
       modelAttachments,
       pdfModePaperKeys,
@@ -5560,18 +7360,10 @@ export async function sendQuestion(
     return;
   }
   const ui = getPanelRequestUI(body);
-  const panelRoot = body.querySelector("#llm-main") as HTMLElement | null;
-  if (
-    panelRoot &&
-    (opts.providerProtocol === "web_sync" || opts.authMode === "webchat")
-  ) {
-    panelRoot.dataset.webchatMode = "true";
-  }
-
   // Track this request
   const thisRequestId = nextRequestId();
   const initialConversationKey = getConversationKey(item);
-  setPendingRequestId(initialConversationKey, thisRequestId);
+  setPendingRequestIdAndSync(initialConversationKey, thisRequestId, body, item);
 
   // Show cancel, hide send
   setRequestUIBusy(body, ui, initialConversationKey, "Preparing request...");
@@ -5627,6 +7419,27 @@ export async function sendQuestion(
   optimisticHelpers.refreshChatSafely();
 
   const conversationKey = getConversationKey(item);
+  if (conversationKey !== initialConversationKey) {
+    clearPendingRequestIdAndSync(initialConversationKey, body, item);
+    setPendingRequestIdAndSync(conversationKey, thisRequestId, body, item);
+  }
+  const safeConversationScope = await validateConversationScopeForItem({
+    item,
+    conversationKey,
+    conversationSystem: effectiveConversationSystem,
+  });
+  if (!safeConversationScope) {
+    removeMessageReference(provisionalHistory, optimisticUserMessage);
+    removeMessageReference(provisionalHistory, optimisticAssistantMessage);
+    optimisticHelpers.refreshChatSafely();
+    optimisticHelpers.setStatusSafely(
+      "Conversation identity mismatch; open a new chat.",
+      "error",
+    );
+    restoreRequestUIIdle(body, conversationKey, thisRequestId);
+    clearPendingRequestIdAndSync(conversationKey, body, item);
+    return;
+  }
 
   // Add user message with attached selected text / screenshots metadata
   if (!chatHistory.has(conversationKey)) {
@@ -5648,16 +7461,156 @@ export async function sendQuestion(
     model,
     apiBase,
     apiKey,
-    authMode: opts.authMode,
+    authMode: normalizeChatAuthMode(opts.authMode),
     providerProtocol: opts.providerProtocol,
     modelEntryId: opts.modelEntryId,
     modelProviderLabel: opts.modelProviderLabel,
     reasoning,
     advanced,
   });
+  const shouldPersistTurn = true;
   const isCodexNativeTurn =
     effectiveConversationSystem === "codex" &&
     effectiveRequestConfig.authMode === "codex_app_server";
+  const isCodexNativeCompactCommand =
+    isCodexNativeTurn && isCompactCommandText(question);
+  if (isCodexNativeCompactCommand) {
+    removeMessageReference(provisionalHistory, optimisticUserMessage);
+    removeMessageReference(provisionalHistory, optimisticAssistantMessage);
+    if (history !== provisionalHistory) {
+      removeMessageReference(history, optimisticUserMessage);
+      removeMessageReference(history, optimisticAssistantMessage);
+    }
+
+    const compactMessage = optimisticAssistantMessage;
+    compactMessage.role = "assistant";
+    compactMessage.text = "Compacting context...";
+    compactMessage.timestamp = Date.now();
+    compactMessage.runMode = "agent";
+    compactMessage.agentRunId = agentRunId || undefined;
+    compactMessage.modelName = effectiveRequestConfig.model;
+    compactMessage.modelEntryId = effectiveRequestConfig.modelEntryId;
+    compactMessage.modelProviderLabel =
+      effectiveRequestConfig.modelProviderLabel;
+    compactMessage.streaming = true;
+    compactMessage.compactMarker = true;
+    compactMessage.waitingAnimationStartedAt = Date.now();
+    compactMessage.reasoningSummary = undefined;
+    compactMessage.reasoningDetails = undefined;
+    compactMessage.reasoningOpen = false;
+    compactMessage.quoteCitations = undefined;
+    history.push(compactMessage);
+    if (history.length > PERSISTED_HISTORY_LIMIT) {
+      history.splice(0, history.length - PERSISTED_HISTORY_LIMIT);
+    }
+
+    const { refreshChatSafely, setStatusSafely } = createPanelUpdateHelpers(
+      body,
+      item,
+      conversationKey,
+      ui,
+    );
+    setStatusSafely("Compacting Codex context...", "sending");
+    refreshChatSafely();
+
+    const removeCompactMessage = () => {
+      removeMessageReference(history, compactMessage);
+      refreshChatSafely();
+    };
+    const persistCompactError = async (errMsg: string) => {
+      compactMessage.text = `Error: ${errMsg}`;
+      compactMessage.streaming = false;
+      compactMessage.compactMarker = false;
+      compactMessage.timestamp = Date.now();
+      refreshChatSafely();
+      await persistConversationMessage(
+        conversationKey,
+        {
+          role: "assistant",
+          text: compactMessage.text,
+          timestamp: compactMessage.timestamp,
+          runMode: compactMessage.runMode,
+          agentRunId: compactMessage.agentRunId,
+          modelName: compactMessage.modelName,
+          modelEntryId: compactMessage.modelEntryId,
+          modelProviderLabel: compactMessage.modelProviderLabel,
+        },
+        effectiveStorageSystem,
+      );
+    };
+
+    const AbortControllerCtor = getAbortControllerCtor();
+    setAbortController(
+      conversationKey,
+      AbortControllerCtor ? new AbortControllerCtor() : null,
+    );
+    try {
+      await compactCodexAppServerConversation({
+        conversationKey,
+        codexPath: getEffectiveCodexAppServerBinaryPath(
+          effectiveRequestConfig.apiBase,
+        ),
+        signal: getAbortController(conversationKey)?.signal,
+      });
+      if (
+        getCancelledRequestId(conversationKey) >= thisRequestId ||
+        Boolean(getAbortController(conversationKey)?.signal.aborted)
+      ) {
+        removeCompactMessage();
+        setStatusSafely("Cancelled", "ready");
+        return;
+      }
+
+      compactMessage.text = "Context compacted";
+      compactMessage.streaming = false;
+      compactMessage.timestamp = Date.now();
+      refreshChatSafely();
+      await persistConversationMessage(
+        conversationKey,
+        {
+          role: "assistant",
+          text: compactMessage.text,
+          timestamp: compactMessage.timestamp,
+          runMode: compactMessage.runMode,
+          agentRunId: compactMessage.agentRunId,
+          modelName: compactMessage.modelName,
+          modelEntryId: compactMessage.modelEntryId,
+          modelProviderLabel: compactMessage.modelProviderLabel,
+          compactMarker: true,
+        },
+        effectiveStorageSystem,
+      );
+      setStatusSafely("Ready", "ready");
+    } catch (err) {
+      const isCancelled =
+        getCancelledRequestId(conversationKey) >= thisRequestId ||
+        Boolean(getAbortController(conversationKey)?.signal.aborted) ||
+        (err as { name?: string }).name === "AbortError";
+      if (isCancelled) {
+        removeCompactMessage();
+        setStatusSafely("Cancelled", "ready");
+        return;
+      }
+      const errMsg = (err as Error).message || "Error";
+      if (errMsg === NO_CODEX_APP_SERVER_THREAD_TO_COMPACT_MESSAGE) {
+        removeCompactMessage();
+        setStatusSafely(errMsg, "error");
+        return;
+      }
+      await persistCompactError(errMsg);
+      setStatusSafely(`Error: ${errMsg.slice(0, 40)}`, "error");
+    } finally {
+      restoreRequestUIIdle(body, conversationKey, thisRequestId);
+      setAbortController(conversationKey, null);
+      clearPendingRequestIdAndSync(conversationKey, body, item);
+      scheduleQueuedInputDrain(body, {
+        conversationSystem:
+          resolveConversationSystemForItem(item) || "upstream",
+        conversationKey,
+      });
+    }
+    return;
+  }
   const requestFileAttachments = normalizeModelFileAttachments(
     modelAttachments ?? attachments,
     {
@@ -5688,6 +7641,8 @@ export async function sendQuestion(
   const selectedCollectionContextsForMessage = normalizeCollectionContexts(
     selectedCollectionContexts,
   );
+  const selectedTagContextsForMessage =
+    normalizeTagContexts(selectedTagContexts);
   let {
     paperContexts: paperContextsForMessage,
     fullTextPaperContexts: fullTextPaperContextsForMessage,
@@ -5698,17 +7653,8 @@ export async function sendQuestion(
     pdfModePaperKeys && pdfModePaperKeys.size > 0
       ? pdfModePaperKeys
       : undefined,
+    contextSource,
   );
-  if (shouldUseCodexNativeLightContext({ isCodexNativeTurn })) {
-    const [enrichedPaperContexts, enrichedFullTextPaperContexts] =
-      await Promise.all([
-        enrichPaperContextsWithMineruCache(paperContextsForMessage),
-        enrichPaperContextsWithMineruCache(fullTextPaperContextsForMessage),
-      ]);
-    paperContextsForMessage = enrichedPaperContexts || paperContextsForMessage;
-    fullTextPaperContextsForMessage =
-      enrichedFullTextPaperContexts || fullTextPaperContextsForMessage;
-  }
   const citationPaperContextsForMessage = mergeCitationPaperContexts(
     selectedTextPaperContextsForMessage,
     paperContextsForMessage,
@@ -5760,6 +7706,12 @@ export async function sendQuestion(
     selectedCollectionContexts: selectedCollectionContextsForMessage.length
       ? selectedCollectionContextsForMessage
       : undefined,
+    selectedTagContexts: selectedTagContextsForMessage.length
+      ? selectedTagContextsForMessage
+      : undefined,
+    forcedSkillIds: opts.forcedSkillIds?.length
+      ? opts.forcedSkillIds.slice()
+      : undefined,
     paperContextsExpanded: false,
     screenshotImages: screenshotImagesForMessage.length
       ? screenshotImagesForMessage
@@ -5779,27 +7731,36 @@ export async function sendQuestion(
   } else {
     history.push(userMessage);
   }
-  void persistConversationMessage(conversationKey, {
-    role: "user",
-    text: userMessage.text,
-    timestamp: userMessage.timestamp,
-    runMode: userMessage.runMode,
-    agentRunId: userMessage.agentRunId,
-    selectedText: userMessage.selectedText,
-    selectedTexts: userMessage.selectedTexts,
-    selectedTextSources: userMessage.selectedTextSources,
-    selectedTextPaperContexts: userMessage.selectedTextPaperContexts,
-    paperContexts: userMessage.paperContexts,
-    fullTextPaperContexts: userMessage.fullTextPaperContexts,
-    citationPaperContexts: userMessage.citationPaperContexts,
-    selectedCollectionContexts: userMessage.selectedCollectionContexts,
-    screenshotImages: userMessage.screenshotImages,
-    attachments: userMessage.attachments,
-    modelAttachments: userMessage.modelAttachments,
-    modelName: userMessage.modelName,
-    modelEntryId: userMessage.modelEntryId,
-    modelProviderLabel: userMessage.modelProviderLabel,
-  });
+  if (shouldPersistTurn) {
+    void persistConversationMessage(
+      conversationKey,
+      {
+        role: "user",
+        text: userMessage.text,
+        timestamp: userMessage.timestamp,
+        runMode: userMessage.runMode,
+        agentRunId: userMessage.agentRunId,
+        selectedText: userMessage.selectedText,
+        selectedTexts: userMessage.selectedTexts,
+        selectedTextSources: userMessage.selectedTextSources,
+        selectedTextPaperContexts: userMessage.selectedTextPaperContexts,
+        selectedTextNoteContexts: userMessage.selectedTextNoteContexts,
+        forcedSkillIds: userMessage.forcedSkillIds,
+        paperContexts: userMessage.paperContexts,
+        fullTextPaperContexts: userMessage.fullTextPaperContexts,
+        citationPaperContexts: userMessage.citationPaperContexts,
+        selectedCollectionContexts: userMessage.selectedCollectionContexts,
+        selectedTagContexts: userMessage.selectedTagContexts,
+        screenshotImages: userMessage.screenshotImages,
+        attachments: userMessage.attachments,
+        modelAttachments: userMessage.modelAttachments,
+        modelName: userMessage.modelName,
+        modelEntryId: userMessage.modelEntryId,
+        modelProviderLabel: userMessage.modelProviderLabel,
+      },
+      effectiveStorageSystem,
+    );
+  }
 
   const assistantMessage: Message = {
     ...optimisticAssistantMessage,
@@ -5836,23 +7797,30 @@ export async function sendQuestion(
   const persistAssistantOnce = async () => {
     if (assistantPersisted) return;
     assistantPersisted = true;
-    await persistConversationMessage(conversationKey, {
-      role: "assistant",
-      text: assistantMessage.text,
-      timestamp: assistantMessage.timestamp,
-      runMode: assistantMessage.runMode,
-      agentRunId: assistantMessage.agentRunId,
-      modelName: assistantMessage.modelName,
-      modelEntryId: assistantMessage.modelEntryId,
-      modelProviderLabel: assistantMessage.modelProviderLabel,
-      reasoningSummary: assistantMessage.reasoningSummary,
-      reasoningDetails: assistantMessage.reasoningDetails,
-      webchatRunState: assistantMessage.webchatRunState,
-      webchatCompletionReason: assistantMessage.webchatCompletionReason,
-      webchatChatUrl: assistantMessage.webchatChatUrl,
-      webchatChatId: assistantMessage.webchatChatId,
-      quoteCitations: assistantMessage.quoteCitations,
-    });
+    if (!shouldPersistTurn) return;
+    await persistConversationMessage(
+      conversationKey,
+      {
+        role: "assistant",
+        text: assistantMessage.text,
+        timestamp: assistantMessage.timestamp,
+        runMode: assistantMessage.runMode,
+        agentRunId: assistantMessage.agentRunId,
+        modelName: assistantMessage.modelName,
+        modelEntryId: assistantMessage.modelEntryId,
+        modelProviderLabel: assistantMessage.modelProviderLabel,
+        reasoningSummary: assistantMessage.reasoningSummary,
+        reasoningDetails: assistantMessage.reasoningDetails,
+        webchatRunState: assistantMessage.webchatRunState,
+        webchatCompletionReason: assistantMessage.webchatCompletionReason,
+        webchatChatUrl: assistantMessage.webchatChatUrl,
+        webchatChatId: assistantMessage.webchatChatId,
+        quoteCitations: assistantMessage.quoteCitations,
+        generatedImages: assistantMessage.generatedImages,
+        compactMarker: assistantMessage.compactMarker,
+      },
+      effectiveStorageSystem,
+    );
   };
   let responseStreamCoalescer: BlockStreamCoalescer | null = null;
   const flushResponseStream = (reason: BlockStreamFlushReason) => {
@@ -5865,127 +7833,6 @@ export async function sendQuestion(
     await persistAssistantOnce();
     setStatusSafely("Cancelled", "ready");
   };
-
-  // [webchat] Dedicated pipeline — bypass context assembly, send raw PDF + question
-  if (effectiveRequestConfig.providerProtocol === "web_sync") {
-    const webChatQueueRefresh = createQueuedRefresh(refreshChatSafely);
-    try {
-      // Determine webchat target from the model name (e.g., "chatgpt.com" → "chatgpt", "chat.deepseek.com" → "deepseek")
-      const { getWebChatTargetByModelName } =
-        await import("../../webchat/types");
-      const webchatTargetEntry = getWebChatTargetByModelName(
-        effectiveRequestConfig.model || "",
-      );
-      const webchatTarget = webchatTargetEntry?.id || "chatgpt";
-      const webchatLabel = webchatTargetEntry?.label || "ChatGPT";
-      setStatusSafely(`Sending to ${webchatLabel}…`, "sending");
-      const { sendWebChatQuestion } = await import("../../webchat/pipeline");
-
-      // Note: `question` already includes selected text context via
-      // buildQuestionWithSelectedTextContexts() — no need to prepend again.
-
-      // [webchat] Mode switching disabled — users control thinking mode on chatgpt.com
-      const chatgptMode: string | undefined = undefined;
-
-      // [webchat] Send PDF only when the caller explicitly requests it via chip state.
-      // Always use dynamic port for the embedded relay server
-      const { getRelayBaseUrl } = await import("../../webchat/relayServer");
-      const answer = await sendWebChatQuestion({
-        item,
-        question,
-        host: getRelayBaseUrl(),
-        sendPdf: opts.webchatSendPdf === true,
-        forceNewChat: opts.webchatForceNewChat === true,
-        images:
-          screenshotImagesForMessage.length > 0
-            ? screenshotImagesForMessage
-            : undefined,
-        chatgptMode,
-        target: webchatTarget,
-        signal: getAbortController(conversationKey)?.signal,
-        onAnswerSnapshot: (text, snapshot) => {
-          applyWebChatAnswerSnapshot(assistantMessage, text, snapshot);
-          webChatQueueRefresh();
-        },
-        onThinkingSnapshot: (text, snapshot) => {
-          applyWebChatThinkingSnapshot(assistantMessage, text, snapshot);
-          webChatQueueRefresh();
-        },
-      });
-
-      if (
-        getCancelledRequestId(conversationKey) >= thisRequestId ||
-        Boolean(getAbortController(conversationKey)?.signal.aborted)
-      ) {
-        await markCancelled();
-        return;
-      }
-
-      assistantMessage.text =
-        sanitizeText(answer.text) || assistantMessage.text || "No response.";
-      assistantMessage.reasoningDetails =
-        sanitizeText(answer.thinking || "") ||
-        assistantMessage.reasoningDetails;
-      assistantMessage.reasoningOpen = assistantMessage.reasoningDetails
-        ? isReasoningExpandedByDefault()
-        : false;
-      assistantMessage.webchatRunState =
-        answer.runState === "incomplete" || answer.runState === "error"
-          ? answer.runState
-          : "done";
-      assistantMessage.webchatCompletionReason =
-        answer.completionReason ||
-        (answer.runState === "done" ? "settled" : null);
-      // [webchat] Persist the ChatGPT conversation URL so refresh can navigate back
-      if (answer.remoteChatUrl)
-        assistantMessage.webchatChatUrl = answer.remoteChatUrl;
-      if (answer.remoteChatId)
-        assistantMessage.webchatChatId = answer.remoteChatId;
-      assistantMessage.streaming = false;
-
-      refreshChatSafely();
-      await persistAssistantOnce();
-      restoreRequestUIIdle(body, conversationKey, thisRequestId);
-      setStatusSafely(
-        answer.runState === "incomplete"
-          ? "Captured partial response — final answer not verified"
-          : "Ready",
-        answer.runState === "incomplete" ? "error" : "ready",
-      );
-    } catch (err) {
-      const isCancelled =
-        getCancelledRequestId(conversationKey) >= thisRequestId ||
-        Boolean(getAbortController(conversationKey)?.signal.aborted) ||
-        (err as { name?: string }).name === "AbortError";
-      if (isCancelled) {
-        await markCancelled();
-        restoreRequestUIIdle(body, conversationKey, thisRequestId);
-        return;
-      }
-      const errMsg = (err as Error).message || "Error";
-      const hasSnapshot = Boolean(
-        sanitizeText(assistantMessage.text || "") ||
-        sanitizeText(assistantMessage.reasoningDetails || ""),
-      );
-      if (hasSnapshot) {
-        assistantMessage.webchatRunState = "incomplete";
-        assistantMessage.webchatCompletionReason = "error";
-      } else {
-        assistantMessage.text = `Error: ${errMsg}`;
-        assistantMessage.webchatRunState = "error";
-        assistantMessage.webchatCompletionReason = "error";
-      }
-      assistantMessage.streaming = false;
-      refreshChatSafely();
-      await persistAssistantOnce();
-      restoreRequestUIIdle(body, conversationKey, thisRequestId);
-      setStatusSafely(errMsg, "error");
-    } finally {
-      setAbortController(conversationKey, null);
-      setPendingRequestId(conversationKey, 0);
-    }
-    return;
-  }
 
   try {
     const rawLLMHistory = buildLLMHistoryMessages(historyForLLM);
@@ -6007,11 +7854,13 @@ export async function sendQuestion(
           paperContexts: paperContextsForMessage,
           fullTextPaperContexts: fullTextPaperContextsForMessage,
           selectedCollectionContexts: selectedCollectionContextsForMessage,
+          selectedTagContexts: selectedTagContextsForMessage,
           recentPaperContexts,
           setStatusSafely,
         })
       : await buildContextPlanForRequest({
           item,
+          contextSource,
           question,
           images,
           selectedTextSources: selectedTextSourcesForMessage,
@@ -6041,26 +7890,31 @@ export async function sendQuestion(
       userMessage.selectedTextPaperContexts,
       contextPlan.citationPaperContexts,
     );
-    await updateStoredLatestUserMessageByConversation(conversationKey, {
-      text: userMessage.text,
-      timestamp: userMessage.timestamp,
-      runMode: userMessage.runMode,
-      agentRunId: userMessage.agentRunId,
-      selectedText: userMessage.selectedText,
-      selectedTexts: userMessage.selectedTexts,
-      selectedTextSources: userMessage.selectedTextSources,
-      selectedTextPaperContexts: userMessage.selectedTextPaperContexts,
-      screenshotImages: userMessage.screenshotImages,
-      paperContexts: userMessage.paperContexts,
-      fullTextPaperContexts: userMessage.fullTextPaperContexts,
-      citationPaperContexts: userMessage.citationPaperContexts,
-      selectedCollectionContexts: userMessage.selectedCollectionContexts,
-      attachments: userMessage.attachments,
-      modelAttachments: userMessage.modelAttachments,
-      modelName: userMessage.modelName,
-      modelEntryId: userMessage.modelEntryId,
-      modelProviderLabel: userMessage.modelProviderLabel,
-    });
+    await updateStoredLatestUserMessageByConversation(
+      conversationKey,
+      {
+        text: userMessage.text,
+        timestamp: userMessage.timestamp,
+        runMode: userMessage.runMode,
+        agentRunId: userMessage.agentRunId,
+        selectedText: userMessage.selectedText,
+        selectedTexts: userMessage.selectedTexts,
+        selectedTextSources: userMessage.selectedTextSources,
+        selectedTextPaperContexts: userMessage.selectedTextPaperContexts,
+        screenshotImages: userMessage.screenshotImages,
+        paperContexts: userMessage.paperContexts,
+        fullTextPaperContexts: userMessage.fullTextPaperContexts,
+        citationPaperContexts: userMessage.citationPaperContexts,
+        selectedCollectionContexts: userMessage.selectedCollectionContexts,
+        selectedTagContexts: userMessage.selectedTagContexts,
+        attachments: userMessage.attachments,
+        modelAttachments: userMessage.modelAttachments,
+        modelName: userMessage.modelName,
+        modelEntryId: userMessage.modelEntryId,
+        modelProviderLabel: userMessage.modelProviderLabel,
+      },
+      effectiveStorageSystem,
+    );
 
     if (getCancelledRequestId(conversationKey) >= thisRequestId) {
       getAbortController(conversationKey)?.abort();
@@ -6072,6 +7926,10 @@ export async function sendQuestion(
     const codexActivityTrace = isCodexNativeTurn
       ? createCodexNativeActivityTraceController(assistantMessage, queueRefresh)
       : null;
+    noteExplicitCodexNativeSkillInvocations(
+      codexActivityTrace,
+      opts.forcedSkillIds,
+    );
     responseStreamCoalescer = createBlockStreamCoalescer({
       onBlock: (chunk) => {
         assistantMessage.text += chunk;
@@ -6085,10 +7943,10 @@ export async function sendQuestion(
       return;
     }
 
-    // Text-only models (e.g. DeepSeek) reject image_url content — drop all images.
+    // Text-only models reject image_url content, so drop all images.
     const allSendImages = isTextOnlyModel(effectiveRequestConfig.model || "")
       ? []
-      : [...(images || []), ...(contextPlan.mineruImages || [])];
+      : [...(images || []), ...(contextPlan.contextImages || [])];
     const requestParams = {
       prompt: question,
       context: combinedContext,
@@ -6181,13 +8039,12 @@ export async function sendQuestion(
     const answer = isCodexNativeTurn
       ? (
           await runCodexAppServerNativeTurn({
-            scope: await enrichCodexNativeConversationScopeWithMineruCache(
-              resolveCodexNativeConversationScope({
-                item,
-                conversationKey,
-                title: shownQuestion,
-              }),
-            ),
+            scope: resolveCodexNativeConversationScope({
+              item,
+              contextSource,
+              conversationKey,
+              title: shownQuestion,
+            }),
             model: effectiveRequestConfig.model,
             messages: finalPrepared.messages,
             reasoning: effectiveRequestConfig.reasoning,
@@ -6202,7 +8059,9 @@ export async function sendQuestion(
               selectedTextPaperContexts: selectedTextPaperContextsForMessage,
               paperContexts: contextPlan.paperContexts,
               fullTextPaperContexts: contextPlan.fullTextPaperContexts,
+              pinnedPaperContexts: userMessage.pinnedPaperContexts,
               selectedCollectionContexts: selectedCollectionContextsForMessage,
+              selectedTagContexts: selectedTagContextsForMessage,
               screenshots: allSendImages,
               attachments,
             }),
@@ -6330,16 +8189,25 @@ export async function sendQuestion(
     }
 
     flushResponseStream("final");
+    const hasGeneratedOutput = normalizeGeneratedChatImages(
+      assistantMessage.generatedImages,
+    ).length;
     assistantMessage.text =
-      sanitizeText(answer) || assistantMessage.text || "No response.";
+      sanitizeText(answer) ||
+      assistantMessage.text ||
+      (hasGeneratedOutput ? "" : "No response.");
+    await finalizeAssistantMessageQuoteCitations(assistantMessage, {
+      pairedUserMessage: userMessage,
+      paperContexts: contextPlan.paperContexts,
+      fullTextPaperContexts: contextPlan.fullTextPaperContexts,
+      citationPaperContexts: contextPlan.citationPaperContexts,
+    });
     codexActivityTrace?.finish(assistantMessage.text);
     assistantMessage.runMode = isCodexNativeTurn
       ? "agent"
       : effectiveRuntimeMode;
     assistantMessage.agentRunId = agentRunId || assistantMessage.agentRunId;
-    assistantMessage.compactMarker = /^\/compact(?:\s|$)/i.test(
-      question.trim(),
-    );
+    assistantMessage.compactMarker = isCompactCommandText(question);
     if (assistantMessage.compactMarker && !assistantMessage.text.trim()) {
       assistantMessage.text = "Conversation compacted";
     }
@@ -6400,7 +8268,7 @@ export async function sendQuestion(
   } finally {
     restoreRequestUIIdle(body, conversationKey, thisRequestId);
     setAbortController(conversationKey, null);
-    setPendingRequestId(conversationKey, 0);
+    clearPendingRequestIdAndSync(conversationKey, body, item);
     scheduleQueuedInputDrain(body, {
       conversationSystem: resolveConversationSystemForItem(item) || "upstream",
       conversationKey,
@@ -6540,16 +8408,87 @@ function buildInlineEditWidget(
   return widgetRoot;
 }
 
+export function renderCompactMarkerInto(
+  bubble: HTMLElement,
+  text: string,
+  doc: Document,
+  pending: boolean,
+): void {
+  bubble.textContent = "";
+  bubble.classList.add("llm-compact-marker");
+  bubble.classList.toggle("llm-compact-marker-pending", pending);
+
+  const leftRule = doc.createElement("span") as HTMLSpanElement;
+  leftRule.className = "llm-compact-marker-rule";
+  const icon = doc.createElement("span") as HTMLSpanElement;
+  icon.className = "llm-compact-marker-icon";
+  icon.setAttribute("aria-hidden", "true");
+  const label = doc.createElement("span") as HTMLSpanElement;
+  label.className = "llm-compact-marker-label";
+  label.textContent =
+    text || (pending ? "Compacting context..." : "Context compacted");
+  const rightRule = doc.createElement("span") as HTMLSpanElement;
+  rightRule.className = "llm-compact-marker-rule";
+
+  bubble.append(leftRule, icon, label, rightRule);
+}
+
+export function renderForkSourceMarkerInto(
+  bubble: HTMLElement,
+  body: Element,
+  doc: Document,
+  link: ConversationForkLink,
+): void {
+  bubble.textContent = "";
+  bubble.classList.add("llm-fork-source-marker");
+
+  const leftRule = doc.createElement("span") as HTMLSpanElement;
+  leftRule.className = "llm-fork-source-marker-rule";
+  const button = doc.createElement("button") as HTMLButtonElement;
+  button.type = "button";
+  button.className = "llm-fork-source-marker-button";
+  button.title = t("Open original conversation");
+  const icon = doc.createElement("span") as HTMLSpanElement;
+  icon.className = "llm-fork-source-marker-icon";
+  icon.setAttribute("aria-hidden", "true");
+  const label = doc.createElement("span") as HTMLSpanElement;
+  label.className = "llm-fork-source-marker-label";
+  label.textContent = t("Forked from conversation");
+  const rightRule = doc.createElement("span") as HTMLSpanElement;
+  rightRule.className = "llm-fork-source-marker-rule";
+
+  button.append(icon, label);
+  button.addEventListener("click", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const runner = getForkSourceNavigationRunner(body);
+    if (!runner) return;
+    button.disabled = true;
+    try {
+      await runner(link);
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  bubble.append(leftRule, button, rightRule);
+}
+
 export function refreshChat(body: Element, item?: Zotero.Item | null) {
   const chatBox = body.querySelector("#llm-chat-box") as HTMLDivElement | null;
   if (!chatBox) return;
   const doc = body.ownerDocument!;
   setPromptMenuTarget(null);
+  const paperContextDisplayCache: PaperContextDisplayCache = new Map();
+  const resolvePaperContextForCardDisplay = (
+    paperContext: PaperContextRef,
+  ): PaperContextRef =>
+    resolvePaperContextDisplayRef(paperContext, paperContextDisplayCache);
 
   if (!item) {
     chatBox.innerHTML = `
       <div class="llm-welcome">
-        <div class="llm-welcome-icon">📄</div>
+        <div class="llm-welcome-icon llm-context-svg-icon llm-context-icon-paper" aria-hidden="true"></div>
         <div class="llm-welcome-text">Select an item or open a PDF to start.</div>
       </div>
     `;
@@ -6574,11 +8513,13 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
   };
   const hasExistingRenderedContent = chatBox.childElementCount > 0;
   const cachedSnapshot = chatScrollSnapshots.get(conversationKey);
-  const baselineSnapshot =
-    !hasExistingRenderedContent && cachedSnapshot
+  const baselineSnapshot = hasActiveFollowBottomCatchupRequest(conversationKey)
+    ? buildFollowBottomScrollSnapshot(chatBox)
+    : !hasExistingRenderedContent && cachedSnapshot
       ? cachedSnapshot
       : buildChatScrollSnapshot(chatBox);
   const history = chatHistory.get(conversationKey) || [];
+  const forkLink = conversationForkLinks.get(conversationKey) || null;
   if (tokenUsageEl) {
     const snapshot = contextUsageSnapshots.get(conversationKey);
     const liveSnapshot =
@@ -6594,34 +8535,19 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
   }
 
   if (history.length === 0) {
-    // [webchat] Show webchat-specific welcome instead of generic instructions
-    const effectiveRequestConfig = resolveEffectiveRequestConfig({ item });
-    if (effectiveRequestConfig.providerProtocol === "web_sync") {
-      const { getWebChatTargetByModelName } =
-        require("../../webchat/types") as typeof import("../../webchat/types");
-      const targetEntry = getWebChatTargetByModelName(
-        effectiveRequestConfig.model || "",
-      );
-      chatBox.innerHTML = getWebChatWelcomeHtml(
-        targetEntry?.label,
-        targetEntry?.modelName,
-      );
+    const isStandalone =
+      panelRoot?.dataset?.standalone === "true" ||
+      (body as HTMLElement).dataset?.standalone === "true";
+    const isNoteEditing = !!resolveActiveNoteSession(item);
+    if (isNoteEditing) {
+      chatBox.innerHTML = getNoteEditingStartPageHtml();
+      if (panelRoot) panelRoot.dataset.startPageActive = "true";
+    } else if (isStandalone && isGlobalConversation) {
+      chatBox.innerHTML = getStandaloneLibraryChatStartPageHtml();
       if (panelRoot) panelRoot.dataset.startPageActive = "true";
     } else {
-      const isStandalone =
-        panelRoot?.dataset?.standalone === "true" ||
-        (body as HTMLElement).dataset?.standalone === "true";
-      const isNoteEditing = !!resolveActiveNoteSession(item);
-      if (isNoteEditing) {
-        chatBox.innerHTML = getNoteEditingStartPageHtml();
-        if (panelRoot) panelRoot.dataset.startPageActive = "true";
-      } else if (isStandalone && isGlobalConversation) {
-        chatBox.innerHTML = getStandaloneLibraryChatStartPageHtml();
-        if (panelRoot) panelRoot.dataset.startPageActive = "true";
-      } else {
-        chatBox.innerHTML = getPaperChatStartPageHtml();
-        if (panelRoot) panelRoot.dataset.startPageActive = "true";
-      }
+      chatBox.innerHTML = getPaperChatStartPageHtml();
+      if (panelRoot) panelRoot.dataset.startPageActive = "true";
     }
     return;
   }
@@ -6668,6 +8594,9 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
     let hasUserContext = false;
     const wrapper = doc.createElement("div") as HTMLDivElement;
     wrapper.className = `llm-message-wrapper ${isUser ? "user" : "assistant"}`;
+    if (!isUser && msg.compactMarker) {
+      wrapper.classList.add("llm-compact-marker-wrapper");
+    }
 
     const bubble = doc.createElement("div") as HTMLDivElement;
     bubble.className = `llm-bubble ${isUser ? "user" : "assistant"}`;
@@ -6687,6 +8616,7 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
       let screenshotExpanded: HTMLDivElement | null = null;
       let papersExpanded: HTMLDivElement | null = null;
       let collectionsExpanded: HTMLDivElement | null = null;
+      let tagsExpanded: HTMLDivElement | null = null;
       let filesExpanded: HTMLDivElement | null = null;
       const selectedTexts = getMessageSelectedTexts(msg);
       const selectedTextSources = normalizeSelectedTextSources(
@@ -6703,18 +8633,22 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
       const selectedCollectionContexts = normalizeCollectionContexts(
         msg.selectedCollectionContexts,
       );
+      const selectedTagContexts = normalizeTagContexts(msg.selectedTagContexts);
       hasUserContext =
         hasScreenshotContext ||
         hasSelectedTextContext ||
-        selectedCollectionContexts.length > 0;
+        selectedCollectionContexts.length > 0 ||
+        selectedTagContexts.length > 0;
       if (hasScreenshotContext) {
         const screenshotBar = doc.createElement("button") as HTMLButtonElement;
         screenshotBar.type = "button";
         screenshotBar.className = "llm-user-screenshots-bar";
 
-        const screenshotIcon = doc.createElement("span") as HTMLSpanElement;
-        screenshotIcon.className = "llm-user-screenshots-icon";
-        screenshotIcon.textContent = "🖼";
+        const screenshotIcon = createContextIcon(
+          doc,
+          "image",
+          "llm-user-screenshots-icon",
+        );
 
         const screenshotLabel = doc.createElement("span") as HTMLSpanElement;
         screenshotLabel.className = "llm-user-screenshots-label";
@@ -6840,9 +8774,11 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         collectionsBar.className =
           "llm-user-papers-bar llm-user-collections-bar";
 
-        const collectionsIcon = doc.createElement("span") as HTMLSpanElement;
-        collectionsIcon.className = "llm-user-papers-icon";
-        collectionsIcon.textContent = "🗂️";
+        const collectionsIcon = createContextIcon(
+          doc,
+          "collection",
+          "llm-user-papers-icon",
+        );
 
         const collectionsLabel = doc.createElement("span") as HTMLSpanElement;
         collectionsLabel.className = "llm-user-papers-label";
@@ -6924,38 +8860,103 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         hasContextBadge = true;
       }
 
+      if (selectedTagContexts.length) {
+        const tagsBar = doc.createElement("button") as HTMLButtonElement;
+        tagsBar.type = "button";
+        tagsBar.className = "llm-user-papers-bar llm-user-tags-bar";
+
+        const tagsIcon = createContextIcon(doc, "tag", "llm-user-papers-icon");
+        const tagsLabel = doc.createElement("span") as HTMLSpanElement;
+        tagsLabel.className = "llm-user-papers-label";
+        tagsLabel.textContent =
+          selectedTagContexts.length === 1 ? "Tag" : "Tags";
+        tagsLabel.title = selectedTagContexts
+          .map((entry) => entry.name)
+          .join("\n");
+        tagsBar.append(tagsIcon, tagsLabel);
+
+        const tagsExpandedEl = doc.createElement("div") as HTMLDivElement;
+        tagsExpandedEl.className =
+          "llm-user-papers-expanded llm-user-tags-expanded";
+        tagsExpanded = tagsExpandedEl;
+        const tagsList = doc.createElement("div") as HTMLDivElement;
+        tagsList.className = "llm-user-papers-list llm-user-tags-list";
+        for (const tagContext of selectedTagContexts) {
+          const tagItem = doc.createElement("div") as HTMLDivElement;
+          tagItem.className = "llm-user-papers-item llm-user-tags-item";
+
+          const tagTitle = doc.createElement("span") as HTMLSpanElement;
+          tagTitle.className = "llm-user-papers-item-title";
+          tagTitle.textContent = tagContext.name;
+          tagTitle.title = tagContext.name;
+
+          const tagMeta = doc.createElement("span") as HTMLSpanElement;
+          tagMeta.className = "llm-user-papers-item-meta";
+          tagMeta.textContent = tagContext.scope
+            ? `tagScope=${tagContext.scope}`
+            : "tag";
+          tagMeta.title = tagMeta.textContent;
+
+          tagItem.append(tagTitle, tagMeta);
+          tagsList.appendChild(tagItem);
+        }
+        tagsExpandedEl.appendChild(tagsList);
+
+        const applyTagsState = () => {
+          const expanded = Boolean(msg.tagContextsExpanded);
+          tagsBar.classList.toggle("expanded", expanded);
+          tagsBar.setAttribute("aria-expanded", expanded ? "true" : "false");
+          tagsExpandedEl.hidden = !expanded;
+          tagsExpandedEl.style.display = expanded ? "block" : "none";
+          tagsBar.title = expanded ? "Collapse tags" : "Expand tags";
+        };
+        const toggleTagsExpanded = () => {
+          msg.tagContextsExpanded = !msg.tagContextsExpanded;
+          applyTagsState();
+        };
+        applyTagsState();
+        tagsBar.addEventListener("mousedown", (e: Event) => {
+          const mouse = e as MouseEvent;
+          if (mouse.button !== 0) return;
+          e.preventDefault();
+          e.stopPropagation();
+          toggleTagsExpanded();
+        });
+        tagsBar.addEventListener("click", (e: Event) => {
+          e.preventDefault();
+          e.stopPropagation();
+        });
+        tagsBar.addEventListener("keydown", (e: KeyboardEvent) => {
+          if (e.key !== "Enter" && e.key !== " ") return;
+          e.preventDefault();
+          e.stopPropagation();
+          toggleTagsExpanded();
+        });
+
+        contextBadgesRow.appendChild(tagsBar);
+        hasContextBadge = true;
+      }
+
       const paperContexts = normalizePaperContexts(msg.paperContexts);
-      // Determine which papers were sent in PDF mode (have pdf-paper-* attachments)
-      const pdfPaperContextItemIds = new Set(
-        (Array.isArray(msg.attachments) ? msg.attachments : [])
-          .filter(
-            (a) => typeof a?.id === "string" && a.id.startsWith("pdf-paper-"),
-          )
-          .map((a) => {
-            const m = a.id.match(/^pdf-paper-(\d+)-/);
-            return m ? Number(m[1]) : 0;
-          })
-          .filter((id) => id > 0),
-      );
-      const fullTextPaperKeys = new Set(
-        normalizePaperContexts(msg.fullTextPaperContexts).map(
-          (p) => `${p.itemId}:${p.contextItemId}`,
-        ),
-      );
       hasUserContext = hasUserContext || paperContexts.length > 0;
       if (paperContexts.length) {
+        const displayPaperContexts = paperContexts.map(
+          resolvePaperContextForCardDisplay,
+        );
         const papersBar = doc.createElement("button") as HTMLButtonElement;
         papersBar.type = "button";
         papersBar.className = "llm-user-papers-bar";
 
-        const papersIcon = doc.createElement("span") as HTMLSpanElement;
-        papersIcon.className = "llm-user-papers-icon";
-        papersIcon.textContent = "📚";
+        const papersIcon = createContextIcon(
+          doc,
+          "paper",
+          "llm-user-papers-icon",
+        );
 
         const papersLabel = doc.createElement("span") as HTMLSpanElement;
         papersLabel.className = "llm-user-papers-label";
         papersLabel.textContent = formatPaperCountLabel(paperContexts.length);
-        papersLabel.title = paperContexts
+        papersLabel.title = displayPaperContexts
           .map((entry) => entry.title)
           .join("\n");
         papersBar.append(papersIcon, papersLabel);
@@ -6965,7 +8966,7 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         papersExpanded = papersExpandedEl;
         const papersList = doc.createElement("div") as HTMLDivElement;
         papersList.className = "llm-user-papers-list";
-        for (const paperContext of paperContexts) {
+        for (const paperContext of displayPaperContexts) {
           const paperItem = doc.createElement("div") as HTMLDivElement;
           paperItem.className = "llm-user-papers-item";
 
@@ -6983,18 +8984,15 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
           paperMeta.textContent = metaParts.join(" · ") || "Supplemental paper";
           paperMeta.title = paperMeta.textContent;
 
-          // Content source mode badge
-          const isPdf = pdfPaperContextItemIds.has(paperContext.contextItemId);
-          const isFullText = fullTextPaperKeys.has(
-            `${paperContext.itemId}:${paperContext.contextItemId}`,
-          );
-          if (isPdf || isFullText) {
-            const badge = doc.createElement("span") as HTMLSpanElement;
-            badge.className = `llm-user-papers-item-badge llm-user-papers-item-badge-${isPdf ? "pdf" : "text"}`;
-            badge.textContent = isPdf ? "PDF" : "Text";
-            paperItem.append(paperTitle, paperMeta, badge);
-          } else {
-            paperItem.append(paperTitle, paperMeta);
+          const attachmentTitle = paperContext.attachmentTitle || "";
+          const paperAttachment = doc.createElement("span") as HTMLSpanElement;
+          paperAttachment.className = "llm-user-papers-item-attachment";
+          paperAttachment.textContent = attachmentTitle;
+          paperAttachment.title = attachmentTitle;
+
+          paperItem.append(paperTitle, paperMeta);
+          if (attachmentTitle) {
+            paperItem.appendChild(paperAttachment);
           }
           papersList.appendChild(paperItem);
         }
@@ -7055,9 +9053,7 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         filesBar.type = "button";
         filesBar.className = "llm-user-files-bar";
 
-        const filesIcon = doc.createElement("span") as HTMLSpanElement;
-        filesIcon.className = "llm-user-files-icon";
-        filesIcon.textContent = "📎";
+        const filesIcon = createContextIcon(doc, "file", "llm-user-files-icon");
 
         const filesLabel = doc.createElement("span") as HTMLSpanElement;
         filesLabel.className = "llm-user-files-label";
@@ -7093,10 +9089,11 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
               e.preventDefault();
               e.stopPropagation();
             });
-            fileItem.addEventListener("keydown", (e: KeyboardEvent) => {
-              if (e.key !== "Enter" && e.key !== " ") return;
-              e.preventDefault();
-              e.stopPropagation();
+            fileItem.addEventListener("keydown", (event: Event) => {
+              const keyEvent = event as KeyboardEvent;
+              if (keyEvent.key !== "Enter" && keyEvent.key !== " ") return;
+              keyEvent.preventDefault();
+              keyEvent.stopPropagation();
               openStoredAttachmentFromMessage(attachment);
             });
           }
@@ -7168,6 +9165,9 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
       if (collectionsExpanded) {
         wrapper.appendChild(collectionsExpanded);
       }
+      if (tagsExpanded) {
+        wrapper.appendChild(tagsExpanded);
+      }
       if (papersExpanded) {
         wrapper.appendChild(papersExpanded);
       }
@@ -7207,9 +9207,11 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
           selectedBar.className = "llm-user-selected-text";
           selectedBar.dataset.contextSource = selectedSource;
 
-          const selectedIcon = doc.createElement("span") as HTMLSpanElement;
-          selectedIcon.className = "llm-user-selected-text-icon";
-          selectedIcon.textContent = getSelectedTextSourceIcon(selectedSource);
+          const selectedIcon = createSelectedTextSourceIcon(
+            doc,
+            selectedSource,
+            "llm-user-selected-text-icon",
+          );
 
           const selectedContent = doc.createElement("span") as HTMLSpanElement;
           selectedContent.className = "llm-user-selected-text-content";
@@ -7332,9 +9334,25 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
           const promptMenuDeleteBtn = promptMenu?.querySelector(
             "#llm-prompt-menu-delete",
           ) as HTMLButtonElement | null;
+          const promptMenuForkBtn = promptMenu?.querySelector(
+            "#llm-prompt-menu-fork",
+          ) as HTMLButtonElement | null;
           if (!promptMenu) return;
+          const canForkPromptTurn =
+            canDeletePromptTurn &&
+            canShowForkActionForAssistantTurn(
+              body,
+              item,
+              conversationKey,
+              assistantPairMsg?.timestamp,
+              assistantPairMsg,
+            );
           if (promptMenuDeleteBtn) {
             promptMenuDeleteBtn.disabled = !canDeletePromptTurn;
+          }
+          if (promptMenuForkBtn) {
+            promptMenuForkBtn.disabled = !canForkPromptTurn;
+            promptMenuForkBtn.style.display = canForkPromptTurn ? "" : "none";
           }
           if (!canDeletePromptTurn) return;
           if (responseMenu) responseMenu.style.display = "none";
@@ -7358,7 +9376,9 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
       }
     } else {
       const hasModelName = Boolean(msg.modelName?.trim());
-      const hasAnswerText = Boolean(msg.text);
+      const generatedImages = normalizeGeneratedChatImages(msg.generatedImages);
+      const hasGeneratedImages = generatedImages.length > 0;
+      const hasAnswerText = Boolean(msg.text) || Boolean(msg.compactMarker);
       const previousUserMessage =
         index > 0 && history[index - 1]?.role === "user"
           ? history[index - 1]
@@ -7377,7 +9397,7 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         : msg.pendingAgentTraceEvents || [];
       let agentUsesInterleavedText = false;
       const agentTraceEl =
-        msg.runMode === "agent"
+        msg.runMode === "agent" && !msg.compactMarker
           ? renderAgentTrace({
               doc,
               message: msg,
@@ -7395,30 +9415,32 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
             })
           : null;
       if (hasAnswerText && !agentUsesInterleavedText) {
-        const safeText = sanitizeText(msg.text);
+        const safeText = buildAssistantDisplayMarkdownForRender(msg);
         if (msg.streaming) bubble.classList.add("streaming");
         if (msg.compactMarker) {
-          bubble.textContent = safeText || "Conversation compacted";
-          bubble.classList.add("llm-compact-marker");
+          renderCompactMarkerInto(
+            bubble,
+            safeText ||
+              (msg.streaming ? "Compacting context..." : "Context compacted"),
+            doc,
+            Boolean(msg.streaming),
+          );
         } else
           try {
-            // Build image resolver for MinerU figures (if applicable)
-            const contextSource = resolveContextSourceItem(item);
-            const ctxItem = contextSource.contextItem;
-            const pdfCtx = ctxItem ? pdfTextCache.get(ctxItem.id) : null;
-            const resolveImage =
-              pdfCtx?.sourceType === "mineru" && ctxItem
-                ? buildImageResolver(ctxItem.id)
-                : undefined;
-            bubble.innerHTML = renderAssistantMarkdownHtmlForChat(safeText, {
-              resolveImage,
+            renderRenderedMarkdownInto(bubble, safeText, doc, {
+              onAsyncContentRendered: () => {
+                stabilizeFollowBottomAfterAsyncChatContent(
+                  body,
+                  conversationKey,
+                  chatBox,
+                );
+              },
             });
-            attachRenderedCopyButtons(bubble, doc);
           } catch (err) {
             ztoolkit.log("LLM render error:", err);
             bubble.textContent = safeText;
           }
-        if (!msg.streaming) {
+        if (!msg.streaming && !msg.compactMarker) {
           try {
             const pairedUserMessage =
               history[index - 1]?.role === "user" ? history[index - 1] : null;
@@ -7455,7 +9477,7 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
 
       const bubbleHeaderNodes: HTMLElement[] = [];
 
-      if (hasModelName) {
+      if (hasModelName && !msg.compactMarker) {
         const modelHeader = doc.createElement("div") as HTMLDivElement;
         modelHeader.className = "llm-model-header";
 
@@ -7529,12 +9551,15 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
           label.textContent = "Summary";
           const text = doc.createElement("div") as HTMLDivElement;
           text.className = "llm-agent-reasoning-text";
+          const reasoningSummaryText = buildAssistantDisplayMarkdownForRender({
+            text: msg.reasoningSummary || "",
+            quoteCitations: msg.quoteCitations,
+          });
           try {
-            text.innerHTML = renderMarkdown(msg.reasoningSummary || "");
-            attachRenderedCopyButtons(text, doc);
+            renderRenderedMarkdownInto(text, reasoningSummaryText, doc);
           } catch (err) {
             ztoolkit.log("LLM reasoning render error:", err);
-            text.textContent = msg.reasoningSummary || "";
+            text.textContent = reasoningSummaryText;
           }
           summaryBlock.append(label, text);
           bodyWrap.appendChild(summaryBlock);
@@ -7548,12 +9573,15 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
           label.textContent = "Details";
           const text = doc.createElement("div") as HTMLDivElement;
           text.className = "llm-agent-reasoning-text";
+          const reasoningDetailsText = buildAssistantDisplayMarkdownForRender({
+            text: msg.reasoningDetails || "",
+            quoteCitations: msg.quoteCitations,
+          });
           try {
-            text.innerHTML = renderMarkdown(msg.reasoningDetails || "");
-            attachRenderedCopyButtons(text, doc);
+            renderRenderedMarkdownInto(text, reasoningDetailsText, doc);
           } catch (err) {
             ztoolkit.log("LLM reasoning render error:", err);
-            text.textContent = msg.reasoningDetails || "";
+            text.textContent = reasoningDetailsText;
           }
           detailsBlock.append(label, text);
           bodyWrap.appendChild(detailsBlock);
@@ -7569,6 +9597,24 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
 
       for (let i = bubbleHeaderNodes.length - 1; i >= 0; i -= 1) {
         bubble.insertBefore(bubbleHeaderNodes[i], bubble.firstChild);
+      }
+
+      if (hasGeneratedImages) {
+        renderAssistantGeneratedImagesInto(bubble, generatedImages, doc, {
+          onImageLoaded: () => {
+            stabilizeFollowBottomAfterAsyncChatContent(
+              body,
+              conversationKey,
+              chatBox,
+            );
+          },
+          onImageActionStatus: (message, level) => {
+            const status = body.querySelector(
+              "#llm-status",
+            ) as HTMLElement | null;
+            if (status) setStatus(status, message, level);
+          },
+        });
       }
 
       if (
@@ -7612,7 +9658,11 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         }
       }
 
-      if (!hasAnswerText && !(msg.streaming && isClaudeStreamingConversation)) {
+      if (
+        !hasAnswerText &&
+        !hasGeneratedImages &&
+        !(msg.streaming && isClaudeStreamingConversation)
+      ) {
         const typing = doc.createElement("div") as HTMLDivElement;
         typing.className = "llm-typing";
         typing.innerHTML =
@@ -7620,15 +9670,17 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         bubble.appendChild(typing);
       }
 
-      attachAssistantResponseContextMenu({
-        body,
-        doc,
-        bubble,
-        item,
-        message: msg,
-        pairedUserMessage: previousUserMessage,
-        conversationKey,
-      });
+      if (!msg.compactMarker) {
+        attachAssistantResponseContextMenu({
+          body,
+          doc,
+          bubble,
+          item,
+          message: msg,
+          pairedUserMessage: previousUserMessage,
+          conversationKey,
+        });
+      }
     }
 
     const meta = doc.createElement("div") as HTMLDivElement;
@@ -7638,84 +9690,117 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
     time.className = "llm-message-time";
     time.textContent = formatTime(msg.timestamp);
     meta.appendChild(time);
-    if (
-      !isUser &&
-      index === latestAssistantIndex &&
-      !msg.streaming &&
-      msg.text.trim() &&
-      msg.runMode !== "agent" &&
-      renderProviderProtocol !== "web_sync" // [webchat] no retry in webchat mode
-    ) {
-      const retryBtn = doc.createElement("button") as HTMLButtonElement;
-      retryBtn.type = "button";
-      retryBtn.className = "llm-retry-latest";
-      retryBtn.textContent = "↻";
-      retryBtn.title = "Retry response with another model";
-      retryBtn.setAttribute("aria-label", "Retry latest response");
-      meta.appendChild(retryBtn);
-    }
+    if (!isUser && !msg.compactMarker) {
+      const pairedUserForActions =
+        index > 0 && history[index - 1]?.role === "user"
+          ? history[index - 1]
+          : null;
+      const actionContent = resolveAssistantResponseMenuContent(msg);
+      const actionConversationKey = conversationKey;
+      const actionUserTimestamp =
+        pairedUserForActions?.role === "user"
+          ? Math.floor(pairedUserForActions.timestamp)
+          : 0;
+      const actionAssistantTimestamp = Math.floor(msg.timestamp);
+      const actionResponseTarget = buildAssistantResponseActionTarget({
+        item,
+        message: msg,
+        pairedUserMessage: pairedUserForActions,
+        conversationKey: actionConversationKey,
+      });
+      const actionDeleteTarget = buildAssistantResponseDeleteTarget({
+        item,
+        message: msg,
+        pairedUserMessage: pairedUserForActions,
+        conversationKey: actionConversationKey,
+        contentTarget: actionResponseTarget,
+      });
+      const actions = doc.createElement("div") as HTMLDivElement;
+      actions.className = "llm-message-actions";
 
-    // [webchat] Collect status row data — rendered after meta, below the timestamp
-    let webchatStatusRow: HTMLDivElement | null = null;
-    if (!isUser) {
-      const webchatStateLabel = getWebChatRunStateLabel(msg);
-      if (webchatStateLabel) {
-        webchatStatusRow = doc.createElement("div") as HTMLDivElement;
-        webchatStatusRow.className = "llm-message-webchat-status-row";
-
-        const status = doc.createElement("span") as HTMLSpanElement;
-        status.className = "llm-message-webchat-status";
-        status.textContent = webchatStateLabel;
-        webchatStatusRow.appendChild(status);
-
-        // [webchat] Refresh icon — re-scrape current ChatGPT conversation
-        const refreshBtn = doc.createElement("button") as HTMLButtonElement;
-        refreshBtn.className = "llm-message-webchat-refresh";
-        refreshBtn.textContent = "\u21BB";
-        refreshBtn.title = "Re-fetch this conversation from webchat";
-        refreshBtn.addEventListener("click", async () => {
-          refreshBtn.disabled = true;
-          try {
-            const { refreshCurrentConversation } =
-              await import("../../webchat/client");
-            const { getRelayBaseUrl } =
-              await import("../../webchat/relayServer");
-            const scraped = await refreshCurrentConversation(
-              getRelayBaseUrl(),
-              msg.webchatChatUrl || null,
-              msg.webchatChatId || null,
-            );
-            if (scraped.length > 0) {
-              const refreshed: Message[] = scraped.map((m) => ({
-                role: (m.kind === "user" ? "user" : "assistant") as
-                  | "user"
-                  | "assistant",
-                text: m.text || "",
-                timestamp: Date.now(),
-                modelName:
-                  m.kind === "bot" ? msg.modelName || "chatgpt.com" : undefined,
-                modelProviderLabel: m.kind === "bot" ? "WebChat" : undefined,
-                reasoningDetails: m.thinking || undefined,
-              }));
-              chatHistory.set(conversationKey, refreshed);
-              refreshChat(body, item);
-            } else {
-              refreshBtn.title =
-                "No messages found — chat site may be on a different page";
-              setTimeout(() => {
-                refreshBtn.title = "Re-fetch this conversation from webchat";
-                refreshBtn.disabled = false;
-              }, 2000);
-            }
-          } catch {
-            refreshBtn.title = "Refresh failed";
-            setTimeout(() => {
-              refreshBtn.title = "Re-fetch this conversation from webchat";
-              refreshBtn.disabled = false;
-            }, 2000);
-          }
+      if (
+        index === latestAssistantIndex &&
+        !msg.streaming &&
+        msg.text.trim() &&
+        msg.runMode !== "agent"
+      ) {
+        appendMessageMetaActionButton({
+          body,
+          doc,
+          actions,
+          className: "llm-message-action-retry llm-retry-latest",
+          title: "Retry response with another model",
         });
-        webchatStatusRow.appendChild(refreshBtn);
+      }
+
+      if (actionContent && actionUserTimestamp > 0) {
+        appendMessageMetaActionButton({
+          body,
+          doc,
+          actions,
+          className: "llm-message-action-copy",
+          title: "Copy response",
+          responseAction: "copy",
+          responseTarget: actionResponseTarget,
+          conversationKey: actionConversationKey,
+          userTimestamp: actionUserTimestamp,
+          assistantTimestamp: actionAssistantTimestamp,
+        });
+        appendMessageMetaActionButton({
+          body,
+          doc,
+          actions,
+          className: "llm-message-action-note",
+          title: "Save as note",
+          responseAction: "note",
+          responseTarget: actionResponseTarget,
+          conversationKey: actionConversationKey,
+          userTimestamp: actionUserTimestamp,
+          assistantTimestamp: actionAssistantTimestamp,
+        });
+      }
+
+      const canShowForkAction =
+        actionUserTimestamp > 0 &&
+        !msg.streaming &&
+        canShowForkActionForAssistantTurn(
+          body,
+          item,
+          conversationKey,
+          actionAssistantTimestamp,
+          msg,
+        );
+      if (canShowForkAction) {
+        appendMessageMetaActionButton({
+          body,
+          doc,
+          actions,
+          className: "llm-message-action-fork",
+          title: "Fork this turn",
+          responseAction: "fork",
+          responseTarget: actionDeleteTarget,
+          conversationKey: actionConversationKey,
+          userTimestamp: actionUserTimestamp,
+          assistantTimestamp: actionAssistantTimestamp,
+        });
+      }
+      if (actionUserTimestamp > 0 && !msg.streaming) {
+        appendMessageMetaActionButton({
+          body,
+          doc,
+          actions,
+          className: "llm-message-action-delete",
+          title: "Delete this turn",
+          responseAction: "delete",
+          responseTarget: actionDeleteTarget,
+          conversationKey: actionConversationKey,
+          userTimestamp: actionUserTimestamp,
+          assistantTimestamp: actionAssistantTimestamp,
+        });
+      }
+
+      if (actions.childElementCount > 0) {
+        meta.appendChild(actions);
       }
     }
 
@@ -7725,8 +9810,21 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
       wrapper.appendChild(bubble);
     }
     wrapper.appendChild(meta);
-    if (webchatStatusRow) wrapper.appendChild(webchatStatusRow);
     chatBox.appendChild(wrapper);
+    if (
+      forkLink &&
+      !isUser &&
+      Number(msg.timestamp) === forkLink.targetAnchorAssistantTimestamp
+    ) {
+      const markerWrapper = doc.createElement("div") as HTMLDivElement;
+      markerWrapper.className =
+        "llm-message-wrapper llm-fork-source-marker-wrapper";
+      const markerBubble = doc.createElement("div") as HTMLDivElement;
+      markerBubble.className = "llm-bubble";
+      renderForkSourceMarkerInto(markerBubble, body, doc, forkLink);
+      markerWrapper.appendChild(markerBubble);
+      chatBox.appendChild(markerWrapper);
+    }
     if (isUser && hasUserContext) {
       wrapper.classList.add("llm-user-context-aligned");
     }
@@ -7775,6 +9873,15 @@ export function refreshConversationPanels(
   const conversationKey = getConversationKey(primaryItem);
   const refreshedPanels = new Set<Element>();
   const refreshOne = (body: Element, item: Zotero.Item) => {
+    const panelRoot = body.querySelector("#llm-main") as HTMLElement | null;
+    const displayedKey = Number(panelRoot?.dataset.itemId || 0);
+    if (
+      Number.isFinite(displayedKey) &&
+      displayedKey > 0 &&
+      displayedKey !== conversationKey
+    ) {
+      return;
+    }
     const chatBox = body.querySelector(
       "#llm-chat-box",
     ) as HTMLDivElement | null;

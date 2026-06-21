@@ -10,16 +10,20 @@ import type {
   QuoteCitation,
   OtherContextRef,
   CollectionContextRef,
+  TagContextRef,
   ChatRuntimeMode,
   PaperContextSendMode,
   PaperContentSourceMode,
+  GeneratedChatImage,
 } from "./types";
 import { TTLMap } from "./contexts/ttlMap";
+import type { ConversationForkLink } from "../../shared/conversationForkLinks";
 // =============================================================================
 // Module State
 // =============================================================================
 
 export const chatHistory = new Map<number, Message[]>();
+export const conversationForkLinks = new Map<number, ConversationForkLink>();
 export const loadedConversationKeys = new Set<number>();
 export const loadingConversationTasks = new Map<number, Promise<void>>();
 export const selectedModelCache = new Map<number, string>();
@@ -45,7 +49,10 @@ export const shortcutRenderItemState = new WeakMap<
 export const activeContextPanels = new Map<Element, () => Zotero.Item | null>();
 /** Raw Zotero item (from onRender) per body — used to recover the original
  *  paper item when clearing a global lock. */
-export const activeContextPanelRawItems = new Map<Element, Zotero.Item | null>();
+export const activeContextPanelRawItems = new Map<
+  Element,
+  Zotero.Item | null
+>();
 export const activeContextPanelStateSync = new Map<Element, () => void>();
 export const shortcutEscapeListenerAttached = new WeakSet<Document>();
 export let readerContextPanelRegistered = false;
@@ -65,6 +72,11 @@ const pendingRequestIds = new Map<number, number>();
 const cancelledRequestIds = new Map<number, number>();
 const abortControllers = new Map<number, AbortController | null>();
 
+function normalizeConversationKey(value: unknown): number {
+  const key = Math.floor(Number(value || 0));
+  return Number.isFinite(key) && key > 0 ? key : 0;
+}
+
 export function getPendingRequestId(conversationKey: number): number {
   return pendingRequestIds.get(conversationKey) || 0;
 }
@@ -79,14 +91,22 @@ export function setPendingRequestId(conversationKey: number, id: number): void {
 export function getCancelledRequestId(conversationKey: number): number {
   return cancelledRequestIds.get(conversationKey) ?? -1;
 }
-export function setCancelledRequestId(conversationKey: number, value: number): void {
+export function setCancelledRequestId(
+  conversationKey: number,
+  value: number,
+): void {
   cancelledRequestIds.set(conversationKey, value);
 }
 
-export function getAbortController(conversationKey: number): AbortController | null {
+export function getAbortController(
+  conversationKey: number,
+): AbortController | null {
   return abortControllers.get(conversationKey) ?? null;
 }
-export function setAbortController(conversationKey: number, value: AbortController | null): void {
+export function setAbortController(
+  conversationKey: number,
+  value: AbortController | null,
+): void {
   if (value === null) {
     abortControllers.delete(conversationKey);
   } else {
@@ -110,28 +130,115 @@ export let panelFontScalePercent = 120; // FONT_SCALE_DEFAULT_PERCENT — overwr
 export function setPanelFontScalePercent(value: number) {
   panelFontScalePercent = value;
   // Lazy-import to avoid circular dependency (prefHelpers imports from state).
-  import("./prefHelpers").then((m) => m.setFontScalePref(value)).catch(() => {});
+  import("./prefHelpers")
+    .then((m) => m.setFontScalePref(value))
+    .catch(() => {});
+}
+export let messageLineSpacingPercent = 150; // MESSAGE_LINE_SPACING_DEFAULT_PERCENT
+export function setMessageLineSpacingPercent(value: number) {
+  messageLineSpacingPercent = value;
+  import("./prefHelpers")
+    .then((m) => m.setMessageLineSpacingPref(value))
+    .catch(() => {});
+}
+export let messageParagraphSpacingPx = 8; // MESSAGE_PARAGRAPH_SPACING_DEFAULT_PX
+export function setMessageParagraphSpacingPx(value: number) {
+  messageParagraphSpacingPx = value;
+  import("./prefHelpers")
+    .then((m) => m.setMessageParagraphSpacingPref(value))
+    .catch(() => {});
+}
+export let messageWordSpacingPx = 0; // MESSAGE_WORD_SPACING_DEFAULT_PX
+export function setMessageWordSpacingPx(value: number) {
+  messageWordSpacingPx = value;
+  import("./prefHelpers")
+    .then((m) => m.setMessageWordSpacingPref(value))
+    .catch(() => {});
+}
+export let messageFontFamily = "";
+export function setMessageFontFamily(value: string) {
+  messageFontFamily = value;
+  import("./prefHelpers")
+    .then((m) => m.setMessageFontFamilyPref(value))
+    .catch(() => {});
 }
 /** Call once at plugin startup to restore the persisted font scale. */
 export function initFontScale(): void {
   // Lazy-import to avoid circular dependency.
-  import("./prefHelpers").then((m) => {
-    panelFontScalePercent = m.getFontScalePref();
-  }).catch(() => {});
+  import("./prefHelpers")
+    .then((m) => {
+      panelFontScalePercent = m.getFontScalePref();
+      messageLineSpacingPercent = m.getMessageLineSpacingPref();
+      messageParagraphSpacingPx = m.getMessageParagraphSpacingPref();
+      messageWordSpacingPx = m.getMessageWordSpacingPref();
+      messageFontFamily = m.getMessageFontFamilyPref();
+    })
+    .catch(() => {});
 }
 
-export let responseMenuTarget: {
+export type ResponseActionTarget = {
   item: Zotero.Item;
   contentText: string;
+  queryText?: string;
   modelName: string;
   conversationKey?: number;
   userTimestamp?: number;
   assistantTimestamp?: number;
   paperContexts?: PaperContextRef[];
   quoteCitations?: QuoteCitation[];
-} | null = null;
+  generatedImages?: GeneratedChatImage[];
+};
+
+export type ResponseActionKind = "copy" | "note" | "fork" | "delete";
+export type ResponseActionRunner = (
+  action: ResponseActionKind,
+  target: ResponseActionTarget | null,
+) => Promise<void>;
+
+export let responseMenuTarget: ResponseActionTarget | null = null;
 export function setResponseMenuTarget(value: typeof responseMenuTarget) {
   responseMenuTarget = value;
+}
+
+const responseActionRunners = new WeakMap<Element, ResponseActionRunner>();
+export function setResponseActionRunner(
+  body: Element,
+  value: ResponseActionRunner | null,
+): void {
+  if (value) {
+    responseActionRunners.set(body, value);
+  } else {
+    responseActionRunners.delete(body);
+  }
+}
+export function getResponseActionRunner(
+  body: Element,
+): ResponseActionRunner | null {
+  return responseActionRunners.get(body) || null;
+}
+
+export type ForkSourceNavigationRunner = (
+  link: ConversationForkLink,
+) => Promise<void>;
+
+const forkSourceNavigationRunners = new WeakMap<
+  Element,
+  ForkSourceNavigationRunner
+>();
+export function setForkSourceNavigationRunner(
+  body: Element,
+  value: ForkSourceNavigationRunner | null,
+): void {
+  if (value) {
+    forkSourceNavigationRunners.set(body, value);
+  } else {
+    forkSourceNavigationRunners.delete(body);
+  }
+}
+export function getForkSourceNavigationRunner(
+  body: Element,
+): ForkSourceNavigationRunner | null {
+  return forkSourceNavigationRunners.get(body) || null;
 }
 
 export let promptMenuTarget: {
@@ -147,24 +254,46 @@ export function setPromptMenuTarget(value: typeof promptMenuTarget) {
 
 // Screenshot selection state (per item) — capped to prevent memory growth
 // from accumulated base64 image data (24-hour TTL, max 30 items).
-export const selectedImageCache = new TTLMap<number, string[]>(24 * 60 * 60 * 1000, 30);
+export const selectedImageCache = new TTLMap<number, string[]>(
+  24 * 60 * 60 * 1000,
+  30,
+);
 export const selectedFileAttachmentCache = new Map<number, ChatAttachment[]>();
 export const selectedFilePreviewExpandedCache = new Map<number, boolean>();
 export const selectedPaperContextCache = new Map<number, PaperContextRef[]>();
-export const selectedOtherRefContextCache = new Map<number, OtherContextRef[]>();
-export const selectedCollectionContextCache = new Map<number, CollectionContextRef[]>();
+export const selectedOtherRefContextCache = new Map<
+  number,
+  OtherContextRef[]
+>();
+export const selectedCollectionContextCache = new Map<
+  number,
+  CollectionContextRef[]
+>();
+export const selectedTagContextCache = new Map<number, TagContextRef[]>();
 // Flat override maps: key = "ownerItemId:paperItemId:contextItemId"
-export const paperContextModeOverrides = new Map<string, PaperContextSendMode>();
-export const paperContentSourceOverrides = new Map<string, PaperContentSourceMode>();
+export const paperContextModeOverrides = new Map<
+  string,
+  PaperContextSendMode
+>();
+export const paperContentSourceOverrides = new Map<
+  string,
+  PaperContentSourceMode
+>();
 // Stores the contextItemId of the currently expanded (sticky) paper chip, or false/undefined if none
-export const selectedPaperPreviewExpandedCache = new Map<number, number | false>();
+export const selectedPaperPreviewExpandedCache = new Map<
+  number,
+  number | false
+>();
 export const activeGlobalConversationByLibrary = new Map<number, number>();
 export const activeConversationModeByLibrary = new Map<
   number,
   "paper" | "global"
 >();
 // Draft text per conversation — capped to prevent unbounded growth (24h TTL, max 100).
-export const draftInputCache = new TTLMap<number, string>(24 * 60 * 60 * 1000, 100);
+export const draftInputCache = new TTLMap<number, string>(
+  24 * 60 * 60 * 1000,
+  100,
+);
 export const selectedTextCache = new Map<number, SelectedTextContext[]>();
 export const selectedTextPreviewExpandedCache = new Map<number, number>();
 export const selectedNotePreviewExpandedCache = new Map<number, boolean>();
@@ -175,7 +304,10 @@ export const pinnedImageKeys = new Map<number, Set<string>>();
 export const pinnedFileKeys = new Map<number, Set<string>>();
 export const pinnedPaperKeys = new Map<number, Set<string>>();
 // Recent reader text selections — capped (5-min TTL, max 50).
-export const recentReaderSelectionCache = new TTLMap<number, string>(5 * 60 * 1000, 50);
+export const recentReaderSelectionCache = new TTLMap<number, string>(
+  5 * 60 * 1000,
+  50,
+);
 
 export const activePaperConversationByPaper = new Map<string, number>();
 
@@ -242,7 +374,9 @@ export function setInlineEditSavedDraft(text: string): void {
 export function clearAllState(): void {
   // Disconnect any ResizeObservers stored on panel bodies before clearing.
   for (const [panelBody] of activeContextPanels) {
-    const obs = (panelBody as any).__llmResizeObservers as ResizeObserver[] | undefined;
+    const obs = (panelBody as any).__llmResizeObservers as
+      | ResizeObserver[]
+      | undefined;
     if (obs) {
       for (const o of obs) o.disconnect();
       delete (panelBody as any).__llmResizeObservers;
@@ -250,6 +384,7 @@ export function clearAllState(): void {
   }
 
   chatHistory.clear();
+  conversationForkLinks.clear();
   loadedConversationKeys.clear();
   loadingConversationTasks.clear();
   selectedModelCache.clear();

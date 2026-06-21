@@ -3,13 +3,12 @@
  * Enables the agent to read data files, write scripts, export results, etc.
  */
 import type { AgentToolContext, AgentToolDefinition } from "../../types";
-import type { PaperContextRef } from "../../../shared/types";
-import {
-  formatPaperCitationLabel,
-  formatPaperSourceLabel,
-} from "../../../modules/contextPanel/paperAttribution";
 import { ok, fail, validateObject } from "../shared";
-import { getLocalParentPath } from "../../../utils/localPath";
+import { getLocalParentPath, joinLocalPath } from "../../../utils/localPath";
+import {
+  getLocalPathBasename,
+  parseNotesDirectoryWritePolicy,
+} from "../../../utils/notesDirectoryConfig";
 import { pushUndoEntry } from "../../store/undoStore";
 
 type FileIOInput = {
@@ -22,8 +21,150 @@ type FileIOInput = {
   allowOverwrite?: boolean;
 };
 
-function normalizePathForPrefix(value: string): string {
-  return value.replace(/\\/g, "/").replace(/\/+$/g, "");
+type ResolvedWriteInput = {
+  input: FileIOInput;
+  requestedFilePath?: string;
+};
+
+type FileIOAction = FileIOInput["action"];
+
+const FILE_IO_ACTION_FIELDS = ["action", "mode", "operation", "op"] as const;
+const FILE_IO_PATH_FIELDS = [
+  "filePath",
+  "path",
+  "file_path",
+  "filepath",
+] as const;
+const FILE_IO_CONTENT_FIELDS = [
+  "content",
+  "text",
+  "contents",
+  "data",
+] as const;
+
+const FILE_IO_READ_ACTIONS = new Set([
+  "read",
+  "open",
+  "load",
+  "view",
+  "open_file",
+  "view_file",
+  "read_file",
+  "load_file",
+  "读取",
+  "读",
+  "打开",
+  "查看",
+]);
+
+const FILE_IO_WRITE_ACTIONS = new Set([
+  "write",
+  "create",
+  "save",
+  "overwrite",
+  "write_file",
+  "create_file",
+  "save_file",
+  "save_to_file",
+  "save_as",
+  "write_to_file",
+  "create_new_file",
+  "create_or_overwrite",
+  "保存",
+  "写",
+  "写入",
+  "寫入",
+  "创建",
+  "建立",
+  "新建",
+]);
+
+const FILE_IO_CONTENTLESS_READ_ACTIONS = new Set(["access", "inspect"]);
+
+function normalizeFileIOActionToken(value: string): string {
+  let normalized = value.trim();
+  const first = normalized[0];
+  const last = normalized[normalized.length - 1];
+  if (
+    normalized.length >= 2 &&
+    ((first === "'" && last === "'") ||
+      (first === '"' && last === '"') ||
+      (first === "`" && last === "`"))
+  ) {
+    normalized = normalized.slice(1, -1).trim();
+  }
+  return normalized
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[\s-]+/g, "_")
+    .replace(/_+/g, "_")
+    .toLowerCase();
+}
+
+function normalizeFileIOAction(
+  value: unknown,
+  options: { hasContent?: boolean } = {},
+): FileIOAction | null {
+  if (typeof value !== "string") return null;
+  const normalized = normalizeFileIOActionToken(value);
+  if (FILE_IO_READ_ACTIONS.has(normalized)) return "read";
+  if (
+    !options.hasContent &&
+    FILE_IO_CONTENTLESS_READ_ACTIONS.has(normalized)
+  ) {
+    return "read";
+  }
+  if (FILE_IO_WRITE_ACTIONS.has(normalized)) return "write";
+  return null;
+}
+
+function readFirstStringField(
+  args: Record<string, unknown>,
+  fields: readonly string[],
+): string | null {
+  for (const field of fields) {
+    const value = args[field];
+    if (typeof value === "string") return value;
+  }
+  return null;
+}
+
+function normalizeFileIOActionFromArgs(
+  args: Record<string, unknown>,
+  options: { filePath?: string | null; hasContent?: boolean } = {},
+): FileIOAction | null {
+  for (const field of FILE_IO_ACTION_FIELDS) {
+    const value = args[field];
+    if (typeof value !== "string" || !value.trim()) continue;
+    return normalizeFileIOAction(value, { hasContent: options.hasContent });
+  }
+  return null;
+}
+
+function getFileNameFromPath(value: string): string {
+  return value.split(/[\\/]/).pop() || value;
+}
+
+export function summarizeFileIOCall(args: unknown): string | null {
+  const a =
+    args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+  const filePath = readFirstStringField(a, FILE_IO_PATH_FIELDS) || "";
+  const hasContent = readFirstStringField(a, FILE_IO_CONTENT_FIELDS) !== null;
+  const action = normalizeFileIOActionFromArgs(a, {
+    filePath,
+    hasContent,
+  });
+  const fileName = getFileNameFromPath(filePath || "file");
+
+  if (action === "read") {
+    if (/\.(png|jpg|jpeg|gif|webp|svg)$/i.test(fileName)) {
+      return "Reading image";
+    }
+    return `Reading ${fileName}`;
+  }
+  if (action === "write") {
+    return `Writing ${fileName}`;
+  }
+  return `Accessing ${fileName}`;
 }
 
 async function fileExists(filePath: string): Promise<boolean | null> {
@@ -60,63 +201,58 @@ async function removeFileIfExists(filePath: string): Promise<void> {
   throw new Error("File removal is not available in this Zotero environment");
 }
 
-function collectRequestPaperContexts(
-  request: AgentToolContext["request"],
-): PaperContextRef[] {
-  const out: PaperContextRef[] = [];
-  const seen = new Set<string>();
-  const push = (entry: PaperContextRef | undefined) => {
-    if (
-      !entry ||
-      !Number.isFinite(entry.itemId) ||
-      !Number.isFinite(entry.contextItemId)
-    )
+async function ensureDirectoryExists(directoryPath: string): Promise<void> {
+  const IOUtils = (globalThis as any).IOUtils;
+  let ioUtilsError: unknown = null;
+  if (IOUtils?.makeDirectory) {
+    try {
+      await IOUtils.makeDirectory(directoryPath, {
+        createAncestors: true,
+        ignoreExisting: true,
+      });
       return;
-    const key = `${entry.itemId}:${entry.contextItemId}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    out.push(entry);
-  };
-  for (const entry of request.selectedTextPaperContexts || []) push(entry);
-  for (const entry of request.selectedPaperContexts || []) push(entry);
-  for (const entry of request.fullTextPaperContexts || []) push(entry);
-  for (const entry of request.pinnedPaperContexts || []) push(entry);
-  return out;
-}
-
-function buildCodexMineruPaperSourceMetadata(
-  filePath: string,
-  request: AgentToolContext["request"],
-): {
-  paperContext: PaperContextRef;
-  citationLabel: string;
-  sourceLabel: string;
-  citationInstruction: string;
-} | null {
-  if (request.authMode !== "codex_app_server") return null;
-  const normalizedFilePath = normalizePathForPrefix(filePath);
-  for (const paperContext of collectRequestPaperContexts(request)) {
-    const cacheDir =
-      typeof paperContext.mineruCacheDir === "string"
-        ? normalizePathForPrefix(paperContext.mineruCacheDir)
-        : "";
-    if (!cacheDir) continue;
-    if (
-      normalizedFilePath === cacheDir ||
-      normalizedFilePath.startsWith(`${cacheDir}/`)
-    ) {
-      const sourceLabel = formatPaperSourceLabel(paperContext);
-      return {
-        paperContext,
-        citationLabel: formatPaperCitationLabel(paperContext),
-        sourceLabel,
-        citationInstruction:
-          `This file is parsed paper text for ${paperContext.title}. ` +
-          `When using this content in the answer, include a short verbatim blockquote and put ${sourceLabel} on the next non-empty line after the blockquote, before any commentary. Never put interpretation between the quote and ${sourceLabel}. A bare parenthetical citation alone is not enough.`,
-      };
+    } catch (error) {
+      ioUtilsError = error;
     }
   }
-  return null;
+  const OSFile = (globalThis as any).OS?.File;
+  if (OSFile?.makeDir) {
+    await OSFile.makeDir(directoryPath, {
+      from: getLocalParentPath(directoryPath),
+      ignoreExisting: true,
+    });
+    return;
+  }
+  if (ioUtilsError) throw ioUtilsError;
+}
+
+function isMarkdownWritePath(filePath: string): boolean {
+  return /\.(?:md|markdown)$/i.test(filePath.trim());
+}
+
+function resolveFileNoteWriteInput(
+  input: FileIOInput,
+  context: AgentToolContext,
+): ResolvedWriteInput {
+  if (input.action !== "write" || !isMarkdownWritePath(input.filePath)) {
+    return { input };
+  }
+  const policy = parseNotesDirectoryWritePolicy(
+    context.request.metadata?.fileNoteWritePolicy,
+  );
+  if (!policy) return { input };
+  if (!policy.enforceDefaultTarget) return { input };
+  const fileName = getLocalPathBasename(input.filePath);
+  if (!fileName) return { input };
+  const resolvedPath = joinLocalPath(policy.defaultTargetPath, fileName);
+  if (resolvedPath === input.filePath) return { input };
+  return {
+    input: {
+      ...input,
+      filePath: resolvedPath,
+    },
+    requestedFilePath: input.filePath,
+  };
 }
 
 /**
@@ -155,16 +291,10 @@ async function writeFile(
   // Ensure parent directory exists
   const parent = getLocalParentPath(filePath);
   if (parent && parent !== filePath) {
-    const IOUtils = (globalThis as any).IOUtils;
-    if (IOUtils?.makeDirectory) {
-      try {
-        await IOUtils.makeDirectory(parent, {
-          createAncestors: true,
-          ignoreExisting: true,
-        });
-      } catch {
-        /* ignore */
-      }
+    try {
+      await ensureDirectoryExists(parent);
+    } catch {
+      /* ignore */
     }
   }
 
@@ -186,7 +316,7 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
     spec: {
       name: "file_io",
       description:
-        "Read or write files on the local filesystem. Reads text files (Markdown, JSON, CSV, etc.) and image files (PNG, JPG, SVG — returned as visual artifacts the model can see). Supports offset/length for partial reads of large files. Use this first for MinerU paper caches: read {mineruCacheDir}/manifest.json for section ranges or {mineruCacheDir}/full.md for parsed paper text.",
+        "Read or write files on the local filesystem. Reads text files (Markdown, JSON, CSV, etc.) and image files (PNG, JPG, SVG — returned as visual artifacts the model can see). Supports offset/length for partial reads of large files. For ordinary Zotero paper Q&A, use paper_read; use file_io for explicit filesystem work or user-provided @file paths.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -214,7 +344,7 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
           offset: {
             type: "number",
             description:
-              "For action 'read': character offset to start reading from (default: 0). Use with manifest.json charStart/charEnd to read specific paper sections.",
+              "For action 'read': character offset to start reading from (default: 0).",
           },
           length: {
             type: "number",
@@ -234,7 +364,8 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
         ),
       instruction:
         "Use file_io to read or write files on the user's filesystem. " +
-        "Do not use file_io for ordinary Zotero paper/library reading when semantic Zotero tools can answer. " +
+        "For ordinary Zotero paper summaries, methods, key points, and targeted Q&A, use paper_read. " +
+        "Use file_io for explicit filesystem tasks or user-provided @file paths. " +
         "Common uses: write a Python/R script before running it with run_command, read a CSV/JSON data file, " +
         "save analysis results to the user's Desktop, export formatted bibliographies. " +
         "Always use absolute paths.",
@@ -244,30 +375,7 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
       label: "File I/O",
       summaries: {
         onCall: ({ args }) => {
-          const a =
-            args && typeof args === "object"
-              ? (args as Record<string, unknown>)
-              : {};
-          const action = String(a.action || "access");
-          const filePath = typeof a.filePath === "string" ? a.filePath : "";
-          const fileName = filePath.split(/[\\/]/).pop() || "file";
-
-          if (action === "read") {
-            if (
-              fileName === "manifest.json" &&
-              filePath.includes("llm-for-zotero-mineru")
-            ) {
-              return "Reading paper structure";
-            }
-            if (fileName === "full.md" && typeof a.offset === "number") {
-              return "Reading paper section";
-            }
-            if (/\.(png|jpg|jpeg|gif|webp|svg)$/i.test(fileName)) {
-              return "Reading figure";
-            }
-            return `Reading ${fileName}`;
-          }
-          return `Writing ${fileName}`;
+          return summarizeFileIOCall(args) || "Accessing file";
         },
         onPending: "Waiting for confirmation on file operation",
         onApproved: "Performing file operation",
@@ -280,18 +388,7 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
           if (String(r.action || "file") === "write") {
             return `File written: ${r.filePath || ""}`;
           }
-          if (r.imageFile) return "Figure loaded";
-          const filePath = typeof r.filePath === "string" ? r.filePath : "";
-          const fileName = filePath.split(/[\\/]/).pop() || "";
-          if (
-            fileName === "manifest.json" &&
-            filePath.includes("llm-for-zotero-mineru")
-          ) {
-            return "Paper structure loaded";
-          }
-          if (fileName === "full.md" && typeof r.offset === "number") {
-            return `Section loaded (${r.bytesRead || 0} chars)`;
-          }
+          if (r.imageFile) return "Image loaded";
           return `File read: ${r.bytesRead || 0} chars`;
         },
       },
@@ -301,30 +398,23 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
       if (!validateObject<Record<string, unknown>>(args)) {
         return fail("Expected an object with action and filePath");
       }
-      const action =
-        args.action === "read" || args.action === "write"
-          ? args.action
-          : args.action === undefined &&
-              (args.mode === "read" || args.mode === "write")
-            ? args.mode
-            : null;
+      const rawFilePath = readFirstStringField(args, FILE_IO_PATH_FIELDS);
+      const rawContent = readFirstStringField(args, FILE_IO_CONTENT_FIELDS);
+      const action = normalizeFileIOActionFromArgs(args, {
+        filePath: rawFilePath,
+        hasContent: rawContent !== null,
+      });
       if (action !== "read" && action !== "write") {
         return fail(
           "action must be 'read' or 'write'. Example: file_io({ action:'read', filePath:'/absolute/path.md' })",
         );
       }
-      const rawFilePath =
-        typeof args.filePath === "string"
-          ? args.filePath
-          : typeof args.path === "string"
-            ? args.path
-            : "";
-      if (!rawFilePath.trim()) {
+      if (!rawFilePath?.trim()) {
         return fail(
           "filePath is required: an absolute path to the file. Deprecated alias path is accepted for older prompts.",
         );
       }
-      if (action === "write" && typeof args.content !== "string") {
+      if (action === "write" && rawContent === null) {
         return fail("content is required for action 'write'");
       }
       const encoding =
@@ -342,14 +432,19 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
       return ok<FileIOInput>({
         action,
         filePath: rawFilePath.trim(),
-        content: action === "write" ? String(args.content) : undefined,
+        content: action === "write" ? rawContent || "" : undefined,
         encoding,
         offset,
         length,
       });
     },
 
-    createPendingAction(input) {
+    createPendingAction(input, context) {
+      const { input: effectiveInput } = resolveFileNoteWriteInput(
+        input,
+        context,
+      );
+      input = effectiveInput;
       const fileName = input.filePath.split(/[\\/]/).pop() || input.filePath;
       if (input.action === "read") {
         return {
@@ -400,7 +495,11 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
     async shouldRequireConfirmation(input, _context) {
       // Read operations are safe — auto-approve
       if (input.action === "read") return false;
-      const exists = await fileExists(input.filePath);
+      const { input: effectiveInput } = resolveFileNoteWriteInput(
+        input,
+        _context,
+      );
+      const exists = await fileExists(effectiveInput.filePath);
       // New file writes are reversible by deleting the created file, so they
       // can run directly. Unknown existence is treated like an overwrite.
       if (exists === false) return false;
@@ -409,15 +508,18 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
       return true;
     },
 
-    applyConfirmation(input) {
-      return ok({ ...input, allowOverwrite: true });
+    applyConfirmation(input, _resolutionData, context) {
+      const { input: effectiveInput } = resolveFileNoteWriteInput(
+        input,
+        context,
+      );
+      return ok({ ...effectiveInput, allowOverwrite: true });
     },
 
     async execute(input, context) {
-      const paperSourceMetadata = buildCodexMineruPaperSourceMetadata(
-        input.filePath,
-        context.request,
-      );
+      const { input: effectiveInput, requestedFilePath } =
+        resolveFileNoteWriteInput(input, context);
+      input = effectiveInput;
       if (input.action === "read") {
         // Image files: return via artifacts so the LLM can see them visually
         const IMAGE_EXTENSIONS = new Set([
@@ -469,14 +571,12 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
               filePath: input.filePath,
               imageFile: true,
               mimeType,
-              ...(paperSourceMetadata || {}),
             },
             artifacts: [
               {
                 kind: "image" as const,
                 mimeType,
                 storedPath: input.filePath,
-                paperContext: paperSourceMetadata?.paperContext,
               },
             ],
           };
@@ -494,7 +594,6 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
               filePath: input.filePath,
               text,
               bytesRead: text.length,
-              ...(paperSourceMetadata || {}),
               ...(start > 0 ? { offset: start } : {}),
               ...(text.length < raw.length ? { totalLength: raw.length } : {}),
             },
@@ -556,6 +655,12 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
         return {
           action: "write",
           filePath: input.filePath,
+          ...(requestedFilePath
+            ? {
+                requestedFilePath,
+                correctedToNotesDirectory: true,
+              }
+            : {}),
           bytesWritten: (input.content || "").length,
         };
       } catch (error) {

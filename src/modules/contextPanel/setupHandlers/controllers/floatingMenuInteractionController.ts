@@ -1,4 +1,5 @@
 import { copyTextToClipboard, refreshConversationPanels } from "../../chat";
+import { closeShortcutMenu, isShortcutMenuVisible } from "../../shortcuts";
 import { setPromptMenuTarget, setResponseMenuTarget } from "../../state";
 import {
   MODEL_MENU_OPEN_CLASS,
@@ -22,10 +23,13 @@ type FloatingMenuInteractionControllerDeps = {
   historyNewMenu: HTMLDivElement | null;
   historyRowMenu: HTMLDivElement | null;
   promptMenu: HTMLDivElement | null;
+  shortcutMenu: HTMLDivElement | null;
   paperPicker: HTMLDivElement | null;
   getPaperChipMenu: () => HTMLDivElement | null;
+  getPaperChipMineruCacheMenu: () => HTMLDivElement | null;
   getPaperChipMenuSticky: () => boolean;
   getPaperChipMenuAnchor: () => HTMLElement | null;
+  closePaperChipMineruCacheMenu: () => void;
   closePaperChipMenu: () => void;
   getItem: () => Zotero.Item | null;
   getInlineEditTarget: () => unknown;
@@ -61,6 +65,7 @@ export function attachFloatingMenuInteractionController(
     historyNewMenu,
     historyRowMenu,
     promptMenu,
+    shortcutMenu,
     paperPicker,
   } = deps;
 
@@ -71,6 +76,7 @@ export function attachFloatingMenuInteractionController(
     slashMenu,
     historyMenu,
     historyNewMenu,
+    shortcutMenu,
   ]) {
     if (!menu) continue;
     menu.addEventListener("pointerdown", (event: Event) => {
@@ -191,8 +197,11 @@ export function attachFloatingMenuInteractionController(
     }
     const target = event.target as Node | null;
     if (target && paperChipMenu.contains(target)) return;
+    const paperChipMineruCacheMenu = deps.getPaperChipMineruCacheMenu();
+    if (target && paperChipMineruCacheMenu?.contains(target)) return;
     const paperChipMenuAnchor = deps.getPaperChipMenuAnchor();
     if (target && paperChipMenuAnchor?.contains(target)) return;
+    deps.closePaperChipMineruCacheMenu();
     deps.closePaperChipMenu();
   };
   panelDoc.addEventListener(
@@ -202,6 +211,35 @@ export function attachFloatingMenuInteractionController(
   );
   bodyWithPaperChipDismiss.__llmPaperChipDismissHandler =
     dismissPaperChipOnOutsidePointerDown;
+
+  const bodyWithShortcutMenuDismiss = body as Element & {
+    __llmShortcutMenuDismissHandler?: (event: KeyboardEvent) => void;
+  };
+  if (bodyWithShortcutMenuDismiss.__llmShortcutMenuDismissHandler) {
+    panelDoc.removeEventListener(
+      "keydown",
+      bodyWithShortcutMenuDismiss.__llmShortcutMenuDismissHandler,
+      true,
+    );
+  }
+  const dismissShortcutMenuOnEscape = (event: KeyboardEvent) => {
+    if (event.key !== "Escape") return;
+    let closed = false;
+    const shortcutMenus = Array.from(
+      panelDoc.querySelectorAll("#llm-shortcut-menu"),
+    ) as HTMLDivElement[];
+    for (const shortcutMenuEl of shortcutMenus) {
+      if (!isShortcutMenuVisible(shortcutMenuEl)) continue;
+      closeShortcutMenu(shortcutMenuEl);
+      closed = true;
+    }
+    if (!closed) return;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  panelDoc.addEventListener("keydown", dismissShortcutMenuOnEscape, true);
+  bodyWithShortcutMenuDismiss.__llmShortcutMenuDismissHandler =
+    dismissShortcutMenuOnEscape;
 
   if (chatBox) {
     chatBox.addEventListener("click", (event: Event) => {
@@ -341,6 +379,9 @@ export function attachFloatingMenuInteractionController(
       const historyRowMenus = Array.from(
         panelDoc.querySelectorAll("#llm-history-row-menu"),
       ) as HTMLDivElement[];
+      const shortcutMenus = Array.from(
+        panelDoc.querySelectorAll("#llm-shortcut-menu"),
+      ) as HTMLDivElement[];
 
       for (const modelMenuEl of modelMenus) {
         if (!isFloatingMenuOpen(modelMenuEl)) continue;
@@ -393,6 +434,13 @@ export function attachFloatingMenuInteractionController(
           deps.clearRetryMenuAnchor();
         }
       }
+
+      for (const shortcutMenuEl of shortcutMenus) {
+        if (!isShortcutMenuVisible(shortcutMenuEl)) continue;
+        if (target && shortcutMenuEl.contains(target)) continue;
+        closeShortcutMenu(shortcutMenuEl);
+      }
+
       if (mouseEvent.button !== 0) return;
 
       let responseMenuClosed = false;

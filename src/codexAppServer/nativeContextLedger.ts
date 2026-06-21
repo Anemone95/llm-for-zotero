@@ -104,7 +104,6 @@ function normalizePaperContext(
     citationKey: normalizeText(record.citationKey, 80) || undefined,
     firstCreator: normalizeText(record.firstCreator, 80) || undefined,
     year: normalizeText(record.year, 32) || undefined,
-    mineruCacheDir: normalizeText(record.mineruCacheDir, 512) || undefined,
   };
 }
 
@@ -163,19 +162,6 @@ function extractTargets(
     : [];
 }
 
-function fileNameForPath(filePath: string): string {
-  return filePath.split(/[\\/]/).pop() || filePath;
-}
-
-function isLikelyMineruReadPath(filePath: string): boolean {
-  const normalized = filePath.toLowerCase();
-  if (!normalized.includes("mineru")) return false;
-  return (
-    /\.(?:md|json)$/i.test(filePath) ||
-    /\.(?:png|jpe?g|gif|webp|svg)$/i.test(filePath)
-  );
-}
-
 function buildReadDetail(toolName: string, args: unknown): string | undefined {
   const record = normalizeRecord(args);
   if (toolName === "paper_read") {
@@ -218,50 +204,8 @@ function buildFileIoEntry(params: {
   scope: NativeContextLedgerScope;
   timestamp: number;
 }): NativeReadLedgerEntry | null {
-  const record = normalizeRecord(params.args);
-  if (record.action !== "read") return null;
-  const filePath = normalizeText(record.filePath, 1024);
-  if (!filePath || !isLikelyMineruReadPath(filePath)) return null;
-  const target = defaultScopeTarget(params.scope);
-  const offset = normalizePositiveInt(record.offset);
-  const length = normalizePositiveInt(record.length);
-  const fileName = fileNameForPath(filePath);
-  const detail =
-    offset !== undefined || length !== undefined
-      ? [
-          offset !== undefined ? `offset=${offset}` : "",
-          length ? `length=${length}` : "",
-        ]
-          .filter(Boolean)
-          .join(", ")
-      : undefined;
-  return {
-    key: [
-      "file_io",
-      filePath,
-      offset || "",
-      length || "",
-      target.itemId || "",
-      target.contextItemId || "",
-    ].join(":"),
-    toolName: "file_io",
-    label:
-      fileName === "full.md"
-        ? "Read MinerU full.md"
-        : fileName === "manifest.json"
-          ? "Read MinerU manifest"
-          : /\.(?:png|jpe?g|gif|webp|svg)$/i.test(fileName)
-            ? "Read MinerU figure/file"
-            : "Read MinerU file",
-    targetLabel: formatTargetLabel(target),
-    detail,
-    itemId: target.itemId,
-    contextItemId: target.contextItemId,
-    filePath,
-    count: 1,
-    firstSeenAt: params.timestamp,
-    lastSeenAt: params.timestamp,
-  };
+  void params;
+  return null;
 }
 
 function buildToolEntries(params: {

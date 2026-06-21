@@ -12,6 +12,7 @@ import {
   resolveCodexAppServerTurnInputWithFallback,
   resolveCodexAppServerReasoningParams,
   selectCodexLookupResult,
+  waitForCodexAppServerThreadCompacted,
   waitForCodexAppServerTurnCompletion,
 } from "../src/utils/codexAppServerProcess";
 
@@ -437,6 +438,81 @@ describe("codexAppServerProcess", function () {
       (caught as Error).message,
       /Timed out waiting for codex app-server turn completion after 10ms/,
     );
+  });
+
+  it("resolves when the matching thread compacted notification arrives", async function () {
+    const proc = createProcess();
+    const waitPromise = waitForCodexAppServerThreadCompacted({
+      proc,
+      threadId: "thread-ok",
+      timeoutMs: 50,
+    });
+
+    (
+      proc as unknown as {
+        handleMessage: (msg: Record<string, unknown>) => void;
+      }
+    ).handleMessage({
+      method: "thread/compacted",
+      params: { thread: { id: "thread-ok" } },
+    });
+
+    await waitPromise;
+  });
+
+  it("ignores compacted notifications for other thread ids", async function () {
+    const proc = createProcess();
+    let resolved = false;
+    const waitPromise = waitForCodexAppServerThreadCompacted({
+      proc,
+      threadId: "thread-target",
+      timeoutMs: 50,
+    }).then(() => {
+      resolved = true;
+    });
+    const testProc = proc as unknown as {
+      handleMessage: (msg: Record<string, unknown>) => void;
+    };
+
+    testProc.handleMessage({
+      method: "thread/compacted",
+      params: { threadId: "thread-other" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.isFalse(resolved);
+
+    testProc.handleMessage({
+      method: "thread/compacted",
+      params: { threadId: "thread-target" },
+    });
+    await waitPromise;
+    assert.isTrue(resolved);
+  });
+
+  it("times out and unregisters compacted notification listeners", async function () {
+    const proc = createProcess();
+    let caught: unknown;
+    try {
+      await waitForCodexAppServerThreadCompacted({
+        proc,
+        threadId: "thread-timeout",
+        timeoutMs: 10,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    assert.instanceOf(caught, Error);
+    assert.match(
+      (caught as Error).message,
+      /Timed out waiting for codex app-server thread compaction after 10ms/,
+    );
+    const handlers = (
+      proc as unknown as {
+        notificationHandlers: Map<string, Set<unknown>>;
+      }
+    ).notificationHandlers.get("thread/compacted");
+    assert.isTrue(!handlers || handlers.size === 0);
   });
 
   it("refreshes the turn timeout when the app-server stays active", async function () {
@@ -1034,6 +1110,197 @@ describe("codexAppServerProcess", function () {
         title: "Query library",
       },
     );
+  });
+
+  it("redacts transport context from usermessage item events", async function () {
+    const proc = createProcess();
+    const started: unknown[] = [];
+    const completed: unknown[] = [];
+    const prefixedUserMessage = [
+      "Zotero context for this turn:",
+      "Library scope: libraryID=1",
+      'Paper 1: title="Hidden Context Paper"',
+      "",
+      "User request:",
+      "What is the actual question?",
+    ].join("\n");
+
+    setTimeout(() => {
+      void (
+        proc as unknown as {
+          handleMessage: (msg: Record<string, unknown>) => void;
+        }
+      ).handleMessage({
+        method: "item/started",
+        params: {
+          turnId: "turn-user-redaction",
+          item: {
+            id: "user-1",
+            type: "usermessage",
+            text: prefixedUserMessage,
+          },
+        },
+      });
+    }, 5);
+    setTimeout(() => {
+      void (
+        proc as unknown as {
+          handleMessage: (msg: Record<string, unknown>) => void;
+        }
+      ).handleMessage({
+        method: "item/completed",
+        params: {
+          turnId: "turn-user-redaction",
+          item: {
+            id: "user-1",
+            type: "usermessage",
+            content: prefixedUserMessage,
+          },
+        },
+      });
+    }, 10);
+    setTimeout(() => {
+      void (
+        proc as unknown as {
+          handleMessage: (msg: Record<string, unknown>) => void;
+        }
+      ).handleMessage({
+        method: "turn/completed",
+        params: {
+          turnId: "turn-user-redaction",
+          status: "completed",
+        },
+      });
+    }, 15);
+
+    await waitForCodexAppServerTurnCompletion({
+      proc,
+      turnId: "turn-user-redaction",
+      onItemStarted: async (event) => {
+        started.push(event);
+      },
+      onItemCompleted: async (event) => {
+        completed.push(event);
+      },
+      timeoutMs: 50,
+    });
+
+    assert.deepInclude(started[0] as Record<string, unknown>, {
+      id: "user-1",
+      type: "usermessage",
+      details: "What is the actual question?",
+    });
+    assert.deepInclude(completed[0] as Record<string, unknown>, {
+      id: "user-1",
+      type: "usermessage",
+      details: "What is the actual question?",
+    });
+    assert.notInclude(
+      JSON.stringify([started[0], completed[0]]),
+      "Hidden Context Paper",
+    );
+  });
+
+  it("preserves image generation metadata from app-server item events", async function () {
+    const proc = createProcess();
+    const completed: unknown[] = [];
+
+    setTimeout(() => {
+      void (
+        proc as unknown as {
+          handleMessage: (msg: Record<string, unknown>) => void;
+        }
+      ).handleMessage({
+        method: "item/completed",
+        params: {
+          turnId: "turn-image-items",
+          item: {
+            id: "img-saved",
+            type: "imageGeneration",
+            status: "completed",
+            result: "opaque-result-id",
+            savedPath: "/tmp/result.png",
+            revisedPrompt: "A concise chart",
+          },
+        },
+      });
+    }, 5);
+    setTimeout(() => {
+      void (
+        proc as unknown as {
+          handleMessage: (msg: Record<string, unknown>) => void;
+        }
+      ).handleMessage({
+        method: "item/completed",
+        params: {
+          turnId: "turn-image-items",
+          item: {
+            id: "img-data-url",
+            type: "imageGeneration",
+            status: "completed",
+            result: "data:image/png;base64,abc123",
+          },
+        },
+      });
+    }, 10);
+    setTimeout(() => {
+      void (
+        proc as unknown as {
+          handleMessage: (msg: Record<string, unknown>) => void;
+        }
+      ).handleMessage({
+        method: "item/completed",
+        params: {
+          turnId: "turn-image-items",
+          item: {
+            id: "img-opaque",
+            type: "imageGeneration",
+            status: "failed",
+            result: "opaque-result-id",
+          },
+        },
+      });
+    }, 15);
+    setTimeout(() => {
+      void (
+        proc as unknown as {
+          handleMessage: (msg: Record<string, unknown>) => void;
+        }
+      ).handleMessage({
+        method: "turn/completed",
+        params: {
+          turnId: "turn-image-items",
+          status: "completed",
+        },
+      });
+    }, 20);
+
+    await waitForCodexAppServerTurnCompletion({
+      proc,
+      turnId: "turn-image-items",
+      onItemCompleted: async (event) => {
+        completed.push(event);
+      },
+      timeoutMs: 50,
+    });
+
+    assert.deepInclude(completed[0] as Record<string, unknown>, {
+      id: "img-saved",
+      type: "imagegeneration",
+      status: "completed",
+      result: "opaque-result-id",
+      savedPath: "/tmp/result.png",
+      revisedPrompt: "A concise chart",
+    });
+    assert.deepInclude(completed[1] as Record<string, unknown>, {
+      id: "img-data-url",
+      result: "data:image/png;base64,abc123",
+    });
+    assert.deepInclude(completed[2] as Record<string, unknown>, {
+      id: "img-opaque",
+      status: "failed",
+      result: "opaque-result-id",
+    });
   });
 
   it("emits token usage updates for the active turn", async function () {

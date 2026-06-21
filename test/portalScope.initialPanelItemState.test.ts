@@ -8,6 +8,7 @@ import {
   resolveActiveNoteSession,
   resolveInitialPanelItemState,
   resolveNoteConversationSystemSwitch,
+  resolvePaperChatSourceItem,
   resolvePreferredConversationSystem,
 } from "../src/modules/contextPanel/portalScope";
 import { createClaudePaperPortalItem } from "../src/claudeCode/portal";
@@ -136,6 +137,149 @@ describe("portalScope resolveInitialPanelItemState", function () {
     assert.isTrue(isPaperPortalItem(resolved.item));
     assert.equal(resolved.item?.id, 4207);
     assert.equal(resolved.item?.libraryID, 7);
+  });
+
+  it("uses the parent paper as the conversation item for a selected child attachment", function () {
+    const paperItem = {
+      id: 42,
+      libraryID: 7,
+      parentID: undefined,
+      isAttachment: () => false,
+      isRegularItem: () => true,
+    } as unknown as Zotero.Item;
+    const attachmentItem = {
+      id: 43,
+      libraryID: 7,
+      parentID: 42,
+      attachmentContentType: "application/pdf",
+      attachmentFilename: "paper.pdf",
+      isAttachment: () => true,
+      isRegularItem: () => false,
+    } as unknown as Zotero.Item;
+    itemsById.set(42, paperItem);
+
+    const resolved = resolveInitialPanelItemState(attachmentItem);
+
+    assert.equal(resolved.basePaperItem, paperItem);
+    assert.equal(resolved.item, paperItem);
+  });
+
+  it("restores the remembered paper chat session for a selected child attachment", function () {
+    const paperItem = {
+      id: 42,
+      libraryID: 7,
+      parentID: undefined,
+      isAttachment: () => false,
+      isRegularItem: () => true,
+    } as unknown as Zotero.Item;
+    const attachmentItem = {
+      id: 43,
+      libraryID: 7,
+      parentID: 42,
+      attachmentContentType: "application/pdf",
+      attachmentFilename: "paper.pdf",
+      isAttachment: () => true,
+      isRegularItem: () => false,
+    } as unknown as Zotero.Item;
+    itemsById.set(42, paperItem);
+    activePaperConversationByPaper.set("7:42", 4207);
+
+    const resolved = resolveInitialPanelItemState(attachmentItem);
+
+    assert.equal(resolved.basePaperItem, paperItem);
+    assert.isTrue(isPaperPortalItem(resolved.item));
+    assert.equal(resolved.item?.id, 4207);
+    assert.equal(resolved.item?.libraryID, 7);
+  });
+
+  it("uses top-level supported attachments as paper chat source items", function () {
+    const cases = [
+      {
+        id: 501,
+        contentType: "application/pdf",
+        filename: "standalone.pdf",
+      },
+      {
+        id: 502,
+        contentType: "text/markdown",
+        filename: "notes.md",
+      },
+      {
+        id: 503,
+        contentType: "text/html",
+        filename: "page.html",
+      },
+      {
+        id: 504,
+        contentType: "text/plain",
+        filename: "plain.txt",
+      },
+      {
+        id: 505,
+        contentType:
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename: "draft.docx",
+      },
+    ];
+
+    for (const entry of cases) {
+      const attachmentItem = {
+        id: entry.id,
+        libraryID: 7,
+        parentID: undefined,
+        attachmentContentType: entry.contentType,
+        attachmentFilename: entry.filename,
+        isAttachment: () => true,
+        isRegularItem: () => false,
+      } as unknown as Zotero.Item;
+
+      assert.equal(resolvePaperChatSourceItem(attachmentItem), attachmentItem);
+      const resolved = resolveInitialPanelItemState(attachmentItem);
+
+      assert.equal(resolved.basePaperItem, attachmentItem);
+      assert.equal(resolved.item, attachmentItem);
+    }
+  });
+
+  it("restores remembered paper chat for a top-level supported attachment", function () {
+    const attachmentItem = {
+      id: 501,
+      libraryID: 7,
+      parentID: undefined,
+      attachmentContentType: "application/pdf",
+      attachmentFilename: "standalone.pdf",
+      isAttachment: () => true,
+      isRegularItem: () => false,
+    } as unknown as Zotero.Item;
+
+    itemsById.set(501, attachmentItem);
+    activePaperConversationByPaper.set("7:501", 4501);
+
+    const resolved = resolveInitialPanelItemState(attachmentItem);
+
+    assert.equal(resolved.basePaperItem, attachmentItem);
+    assert.isTrue(isPaperPortalItem(resolved.item));
+    assert.equal(resolvePaperChatSourceItem(resolved.item), attachmentItem);
+    assert.equal(resolved.item?.id, 4501);
+    assert.equal(resolved.item?.libraryID, 7);
+  });
+
+  it("does not use unsupported top-level attachments as paper chat sources", function () {
+    const attachmentItem = {
+      id: 601,
+      libraryID: 7,
+      parentID: undefined,
+      attachmentContentType: "application/zip",
+      attachmentFilename: "archive.zip",
+      isAttachment: () => true,
+      isRegularItem: () => false,
+    } as unknown as Zotero.Item;
+
+    const resolved = resolveInitialPanelItemState(attachmentItem);
+
+    assert.isNull(resolvePaperChatSourceItem(attachmentItem));
+    assert.isNull(resolved.basePaperItem);
+    assert.equal(resolved.item, attachmentItem);
   });
 
   it("keeps explicit upstream paper mode ahead of a stale global lock", function () {
@@ -408,14 +552,18 @@ describe("portalScope resolveInitialPanelItemState", function () {
       },
       Prefs: {
         get: (key: string) => {
-          if (String(key).endsWith("enableClaudeCodeMode")) return claudeEnabled;
+          if (String(key).endsWith("enableClaudeCodeMode"))
+            return claudeEnabled;
           if (String(key).endsWith("conversationSystem")) return "claude_code";
           return originalPrefs?.get?.(key, true) ?? "";
         },
       },
     } as typeof Zotero;
 
-    const claudePortal = createClaudePaperPortalItem(paperItem, 3500005254) as Zotero.Item;
+    const claudePortal = createClaudePaperPortalItem(
+      paperItem,
+      3500005254,
+    ) as Zotero.Item;
     const resolved = resolveInitialPanelItemState(claudePortal, {
       conversationSystem: "claude_code",
     });

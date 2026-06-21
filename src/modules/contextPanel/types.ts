@@ -1,8 +1,11 @@
 import type { ReasoningLevel as LLMReasoningLevel } from "../../utils/llmClient";
+import type { ContextAttachmentSupport } from "./contextAttachmentTypes";
 import type {
   SelectedTextSource,
   ChatAttachmentCategory,
   ChatAttachment,
+  GeneratedChatImage,
+  PaperContentSourceMode,
   AdvancedModelParams,
   ActiveNoteSession,
   PaperContextRef,
@@ -10,6 +13,7 @@ import type {
   NoteContextRef,
   OtherContextRef,
   CollectionContextRef,
+  TagContextRef,
   GlobalConversationSummary,
   PaperConversationSummary,
 } from "../../shared/types";
@@ -18,6 +22,8 @@ export type {
   SelectedTextSource,
   ChatAttachmentCategory,
   ChatAttachment,
+  GeneratedChatImage,
+  PaperContentSourceMode,
   AdvancedModelParams,
   ActiveNoteSession,
   PaperContextRef,
@@ -25,6 +31,7 @@ export type {
   NoteContextRef,
   OtherContextRef,
   CollectionContextRef,
+  TagContextRef,
   GlobalConversationSummary,
   PaperConversationSummary,
 } from "../../shared/types";
@@ -59,10 +66,15 @@ export interface Message {
   quoteCitations?: QuoteCitation[];
   pinnedPaperContexts?: PaperContextRef[];
   selectedCollectionContexts?: CollectionContextRef[];
+  selectedTagContexts?: TagContextRef[];
+  /** Skill IDs explicitly selected via slash command for this turn. */
+  forcedSkillIds?: string[];
   collectionContextsExpanded?: boolean;
+  tagContextsExpanded?: boolean;
   paperContextsExpanded?: boolean;
   attachments?: ChatAttachment[];
   modelAttachments?: ChatAttachment[];
+  generatedImages?: GeneratedChatImage[];
   attachmentsExpanded?: boolean;
   attachmentActiveIndex?: number;
   screenshotExpanded?: boolean;
@@ -78,7 +90,12 @@ export interface Message {
   reasoningDetails?: string;
   reasoningOpen?: boolean;
   webchatRunState?: "done" | "incomplete" | "error";
-  webchatCompletionReason?: "settled" | "forced_cancel" | "timeout" | "error" | null;
+  webchatCompletionReason?:
+    | "settled"
+    | "forced_cancel"
+    | "timeout"
+    | "error"
+    | null;
   webchatChatUrl?: string;
   webchatChatId?: string;
   compactMarker?: boolean;
@@ -87,18 +104,14 @@ export interface Message {
 }
 
 export type ChatRuntimeMode = "chat" | "agent";
-export type PaperContextSendMode =
-  | "retrieval"
-  | "full-next"
-  | "full-sticky";
-
-export type PaperContentSourceMode = "text" | "mineru" | "pdf";
+export type PaperContextSendMode = "retrieval" | "full-next" | "full-sticky";
 
 export type ReasoningProviderKind =
   | "openai"
   | "gemini"
   | "deepseek"
   | "kimi"
+  | "mimo"
   | "qwen"
   | "grok"
   | "anthropic"
@@ -126,7 +139,39 @@ export type CustomShortcut = {
 };
 export type ResolvedContextSource = {
   contextItem: Zotero.Item | null;
+  paperContext?: PaperContextRef | null;
+  support?: ContextAttachmentSupport | null;
   statusText: string;
+  sourceKind?:
+    | "none"
+    | "note"
+    | "active-reader"
+    | "selected-child"
+    | "direct-attachment"
+    | "first-child"
+    | "best-attachment";
+  ownerItem?: Zotero.Item | null;
+  rawItem?: Zotero.Item | null;
+  ownerItemId?: number;
+  contextItemId?: number;
+  supportKind?: "pdf" | "text";
+  contentSourceMode?: PaperContentSourceMode;
+  requiresAsyncResolution?: boolean;
+  isAsyncFinal?: boolean;
+};
+
+export type ContextSourceLifecycleState = {
+  rawItem: Zotero.Item | null;
+  ownerItem: Zotero.Item | null;
+  contextItem: Zotero.Item | null;
+  rawItemId: number;
+  ownerItemId: number;
+  contextItemId: number;
+  sourceKind: NonNullable<ResolvedContextSource["sourceKind"]>;
+  supportKind?: "pdf" | "text";
+  contentSourceMode?: PaperContentSourceMode;
+  requiresAsyncResolution: boolean;
+  isAsyncFinal: boolean;
 };
 
 export type PdfContext = {
@@ -143,7 +188,13 @@ export type PdfContext = {
   embeddingPromiseKey?: string;
   /** Last embedding attempt that failed; suppresses retry storms for the same config. */
   embeddingFailureKey?: string;
-  sourceType?: "mineru" | "zotero-worker" | "zotero-fulltext-cache";
+  sourceType?:
+    | "zotero-worker"
+    | "zotero-fulltext-cache"
+    | "attachment-markdown"
+    | "attachment-html"
+    | "attachment-txt"
+    | "attachment-docx";
 };
 
 export type PdfChunkKind =
@@ -209,6 +260,8 @@ export type PaperContextCandidate = {
   embeddingScore: number;
   hybridScore: number;
   evidenceScore: number;
+  matchedQueryVariant?: string;
+  matchedQueryVariants?: string[];
 };
 
 export type MultiContextPlan = {
@@ -325,12 +378,18 @@ import type { ReasoningConfig as LLMReasoningConfig } from "../../utils/llmClien
 export type SendQuestionOptions = {
   body: Element;
   item: Zotero.Item;
+  /** Resolved panel/source context selected by compose UI. */
+  contextSource?: ResolvedContextSource | null;
   question: string;
   images?: string[];
   model?: string;
   apiBase?: string;
   apiKey?: string;
-  authMode?: "api_key" | "codex_auth" | "codex_app_server" | "copilot_auth" | "webchat";
+  authMode?:
+    | "api_key"
+    | "codex_auth"
+    | "codex_app_server"
+    | "copilot_auth";
   providerProtocol?: import("../../utils/providerProtocol").ProviderProtocol;
   modelEntryId?: string;
   modelProviderLabel?: string;
@@ -344,6 +403,7 @@ export type SendQuestionOptions = {
   paperContexts?: PaperContextRef[];
   fullTextPaperContexts?: PaperContextRef[];
   selectedCollectionContexts?: CollectionContextRef[];
+  selectedTagContexts?: TagContextRef[];
   /** Attachments shown in chat history. */
   attachments?: ChatAttachment[];
   /** Provider-resolved attachments sent to the model. Defaults to `attachments`. */
@@ -356,16 +416,14 @@ export type SendQuestionOptions = {
   forcedSkillIds?: string[];
   /** System messages injected by provider-side PDF upload (Qwen fileid://, Kimi extracted text). */
   pdfUploadSystemMessages?: string[];
-  /** [webchat] When true, attach the paper PDF to the ChatGPT query. */
-  webchatSendPdf?: boolean;
-  /** [webchat] When true, send the prompt into a fresh ChatGPT conversation. */
-  webchatForceNewChat?: boolean;
   skipAutoCompact?: boolean;
 };
 
 export type EditRetryOptions = {
   body: Element;
   item: Zotero.Item;
+  /** Resolved panel/source context selected by compose UI. */
+  contextSource?: ResolvedContextSource | null;
   displayQuestion: string;
   selectedTexts?: string[];
   selectedTextSources?: SelectedTextSource[];
@@ -375,17 +433,26 @@ export type EditRetryOptions = {
   paperContexts?: PaperContextRef[];
   fullTextPaperContexts?: PaperContextRef[];
   selectedCollectionContexts?: CollectionContextRef[];
+  selectedTagContexts?: TagContextRef[];
   /** Attachments shown in chat history. */
   attachments?: ChatAttachment[];
   /** Provider-resolved attachments sent to the retry request. Defaults to `attachments`. */
   modelAttachments?: ChatAttachment[];
   pdfUploadSystemMessages?: string[];
   targetRuntimeMode?: ChatRuntimeMode;
-  expected?: { conversationKey: number; userTimestamp: number; assistantTimestamp: number };
+  expected?: {
+    conversationKey: number;
+    userTimestamp: number;
+    assistantTimestamp: number;
+  };
   model?: string;
   apiBase?: string;
   apiKey?: string;
-  authMode?: "api_key" | "codex_auth" | "codex_app_server" | "copilot_auth" | "webchat";
+  authMode?:
+    | "api_key"
+    | "codex_auth"
+    | "codex_app_server"
+    | "copilot_auth";
   providerProtocol?: import("../../utils/providerProtocol").ProviderProtocol;
   modelEntryId?: string;
   modelProviderLabel?: string;

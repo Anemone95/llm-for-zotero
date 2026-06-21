@@ -1,8 +1,6 @@
 import type { PaperContextRef, SelectedTextSource } from "../../shared/types";
 import type { AgentRuntimeRequest } from "../types";
-import type { AgentSkill, SkillContextKind } from "./skillLoader";
-
-const ANY_CONTEXT: SkillContextKind[] = ["any"];
+import type { AgentSkill } from "./skillLoader";
 
 export type SkillRoutingRequest = Pick<
   AgentRuntimeRequest,
@@ -14,6 +12,7 @@ export type SkillRoutingRequest = Pick<
   | "fullTextPaperContexts"
   | "pinnedPaperContexts"
   | "selectedCollectionContexts"
+  | "selectedTagContexts"
 >;
 
 export type SkillRequestContext = {
@@ -31,10 +30,10 @@ export type SkillContextEligibility =
   | { eligible: false; reason: string };
 
 const CORPUS_TARGET_PATTERN =
-  /\b(?:this|the|current|selected)\s+collection\b|\bmy\s+library\b|\b(?:whole|entire)\s+library\b|\ball\s+(?:papers?|items?|articles?|studies)\b|\b(?:literature|lit)\s+review\b|\breview\s+of\s+(?:the\s+)?literature\b|\b(?:synthesi[sz]e|survey)\b.*\b(?:papers?|articles?|studies|findings?|research|literature|collection|library)\b|\b(?:these|selected)\s+(?:papers?|articles?|studies)\b/i;
+  /\b(?:this|the|current|selected)\s+(?:collection|tag)\b|\bmy\s+library\b|\b(?:whole|entire)\s+library\b|\ball\s+(?:papers?|items?|articles?|studies)\b|\b(?:literature|lit)\s+review\b|\breview\s+of\s+(?:the\s+)?literature\b|\b(?:synthesi[sz]e|survey)\b.*\b(?:papers?|articles?|studies|findings?|research|literature|collection|tag|library)\b|\b(?:these|selected)\s+(?:papers?|articles?|studies)\b/i;
 
 const LIBRARY_CORPUS_INTENT_PATTERN =
-  /\b(?:library|collection|all papers?|all items?|my papers?|whole|entire)\b|\b(?:literature|lit)\s+review\b|\breview\s+of\s+(?:the\s+)?literature\b|\b(?:synthesi[sz]e|survey)\b.*\b(?:research|papers?|articles?|studies|findings?|literature)\b/i;
+  /\b(?:library|collection|tag|all papers?|all items?|my papers?|whole|entire)\b|\b(?:literature|lit)\s+review\b|\breview\s+of\s+(?:the\s+)?literature\b|\b(?:synthesi[sz]e|survey)\b.*\b(?:research|papers?|articles?|studies|findings?|literature)\b/i;
 
 const SINGLE_PAPER_TARGET_PATTERN =
   /\b(?:this|the|current|selected)\s+(?:paper|article|study|document)\b/i;
@@ -83,6 +82,7 @@ export function resolveSkillRequestContext(
   const singlePaperTargetedByText = SINGLE_PAPER_TARGET_PATTERN.test(userText);
   const hasLibraryCorpus = Boolean(
     request.selectedCollectionContexts?.length ||
+    request.selectedTagContexts?.length ||
     LIBRARY_CORPUS_INTENT_PATTERN.test(userText),
   );
   const hasNoteContext = Boolean(
@@ -101,73 +101,16 @@ export function resolveSkillRequestContext(
   };
 }
 
-function contextMatches(
-  context: SkillContextKind,
-  resolved: SkillRequestContext,
-): boolean {
-  switch (context) {
-    case "any":
-      return true;
-    case "single-paper":
-      if (!resolved.hasSinglePaper) return false;
-      return !(
-        resolved.corpusTargetedByText && !resolved.singlePaperTargetedByText
-      );
-    case "paper-set":
-      return resolved.hasPaperSet;
-    case "library-corpus":
-      return resolved.hasLibraryCorpus;
-    case "note":
-      return resolved.hasNoteContext;
-  }
-}
-
-function reasonForContexts(
-  contexts: ReadonlyArray<SkillContextKind>,
-  resolved: SkillRequestContext,
-): string {
-  if (
-    contexts.includes("single-paper") &&
-    resolved.hasSinglePaper &&
-    resolved.corpusTargetedByText &&
-    !resolved.singlePaperTargetedByText
-  ) {
-    return "Targets collection/library context";
-  }
-  if (contexts.length === 1) {
-    switch (contexts[0]) {
-      case "single-paper":
-        return "Requires one paper";
-      case "paper-set":
-        return "Requires multiple papers";
-      case "library-corpus":
-        return "Requires collection/library context";
-      case "note":
-        return "Requires note context";
-      case "any":
-        return "";
-    }
-  }
-  return "Requires matching context";
-}
-
 export function getSkillContextEligibility(
-  skill: AgentSkill,
-  request: SkillRoutingRequest,
+  _skill: AgentSkill,
+  _request: SkillRoutingRequest,
 ): SkillContextEligibility {
-  const contexts: SkillContextKind[] = skill.contexts?.length
-    ? skill.contexts
-    : ANY_CONTEXT;
-  const resolved = resolveSkillRequestContext(request);
-  if (contexts.some((context) => contextMatches(context, resolved))) {
-    return { eligible: true };
-  }
-  return { eligible: false, reason: reasonForContexts(contexts, resolved) };
+  return { eligible: true };
 }
 
 export function isSkillContextEligible(
-  skill: AgentSkill,
-  request: SkillRoutingRequest,
+  _skill: AgentSkill,
+  _request: SkillRoutingRequest,
 ): boolean {
-  return getSkillContextEligibility(skill, request).eligible;
+  return true;
 }

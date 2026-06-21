@@ -8,7 +8,9 @@ import {
 } from "./store/transcriptStore";
 import type {
   AgentInheritedApproval,
+  AgentContentInputCapabilities,
   AgentModelCapabilities,
+  AgentModelContentPart,
   AgentConfirmationResolution,
   AgentEvent,
   AgentModelMessage,
@@ -26,44 +28,53 @@ import type {
   AgentAdapterToolCallResult,
   AgentAdapterToolContentItem,
 } from "./model/adapter";
+import { resolveCapabilitiesContentInputs } from "./model/contentCapabilities";
 import { resolveAgentLimits } from "./model/limits";
 import { classifyRequest } from "./model/requestClassifier";
 import {
   buildAgentInitialMessages,
   normalizeHistoryMessages,
 } from "./model/messageBuilder";
+import { classifyWriteNoteDestination } from "./writeNoteDestination";
 import { detectSkillIntent } from "./model/skillClassifier";
 import { getAllSkills, getMatchedSkillIds } from "./skills";
 import {
   buildAgentResourceContextPlan,
   commitAgentReadActivities,
-  commitAgentResourceContextPlan,
   hydrateAgentEvidenceCache,
   type AgentPendingReadActivity,
-} from "./context/resourceLifecycle";
+} from "./context/resourceContextPlan";
 import {
   commitAgentCoverageActivities,
   hydrateAgentCoverageLedger,
 } from "./context/coverageLedger";
 import {
+  buildNotesDirectoryWritePolicy,
   getNotesDirectoryNickname,
   isNotesDirectoryConfigured,
 } from "../utils/notesDirectoryConfig";
-import {
-  estimateContextMessagesTokens,
-  resolveContextWindowTokens,
-} from "../utils/modelInputCap";
 import {
   buildAgentContextBudgetState,
   resolveAgentContextBudgetPolicy,
 } from "./context/budgetPolicy";
 import { compactAgentTranscript } from "./context/transcriptCompactor";
 import {
+  AgentPromptBudgetError,
+  enforceAgentPromptBudget,
+} from "./context/promptBudget";
+import {
   appendAgentRunEvent,
   createAgentRun,
   finishAgentRun,
   getAgentRunTrace,
 } from "./store/traceStore";
+import {
+  hasAgentToolResultHandles,
+  hydrateAgentToolResultHandles,
+  upsertAgentToolResultHandles,
+} from "./store/toolResultHandles";
+
+const TOOL_RESULT_READ_TOOL_NAME = "tool_result_read";
 
 type AgentRuntimeDeps = {
   registry: AgentToolRegistry;
@@ -130,43 +141,87 @@ function summarizeArtifacts(artifacts: AgentToolArtifact[]): string {
   return parts.join(" ");
 }
 
-function summarizeTextOnlyArtifacts(
-  artifacts: AgentToolArtifact[],
-  modelName?: string,
-): string {
-  const imageCount = artifacts.filter(
-    (artifact) => artifact.kind === "image",
-  ).length;
-  const fileCount = artifacts.filter(
-    (artifact) => artifact.kind === "file_ref",
-  ).length;
-  return summarizeTextOnlyOmittedParts(imageCount, fileCount, modelName);
+type OmittedContentInputCounts = {
+  images: number;
+  pdfDocuments: number;
+  nativeFiles: number;
+};
+
+function hasOmittedContentInputs(counts: OmittedContentInputCounts): boolean {
+  return counts.images > 0 || counts.pdfDocuments > 0 || counts.nativeFiles > 0;
 }
 
-function summarizeTextOnlyOmittedParts(
-  imageCount: number,
-  fileCount: number,
+function summarizeUnsupportedContentInputs(
+  counts: OmittedContentInputCounts,
   modelName?: string,
 ): string {
   const omitted: string[] = [];
-  if (imageCount) {
-    omitted.push(`${imageCount} image${imageCount === 1 ? "" : "s"}`);
+  const unsupportedKinds: string[] = [];
+  if (counts.images) {
+    omitted.push(
+      `${counts.images} image input${counts.images === 1 ? "" : "s"}`,
+    );
+    unsupportedKinds.push("image input");
   }
-  if (fileCount) {
-    omitted.push(`${fileCount} file${fileCount === 1 ? "" : "s"}`);
+  if (counts.pdfDocuments) {
+    omitted.push(
+      `${counts.pdfDocuments} PDF/document input${
+        counts.pdfDocuments === 1 ? "" : "s"
+      }`,
+    );
+    unsupportedKinds.push("PDF/document input");
+  }
+  if (counts.nativeFiles) {
+    omitted.push(
+      `${counts.nativeFiles} native file input${
+        counts.nativeFiles === 1 ? "" : "s"
+      }`,
+    );
+    unsupportedKinds.push("native file input");
   }
   const target = (modelName || "The selected model").trim();
   const omittedLabel = omitted.length ? omitted.join(" and ") : "artifacts";
+  const unsupportedLabel = unsupportedKinds.length
+    ? unsupportedKinds.join(" or ")
+    : "that content type";
   return (
-    `${omittedLabel} prepared by the tool were not attached because ${target} does not support image or file input. ` +
-    "Use the tool result text, MinerU manifest/full.md content, captions, and surrounding extracted text instead. " +
-    "If direct visual inspection is required, say that a vision-capable model is needed."
+    `${omittedLabel} prepared by the tool were not attached because ${target} does not support ${unsupportedLabel}. ` +
+    "Use the tool result text, local PDF path, captions, and surrounding extracted text instead. " +
+    "If direct visual or document inspection is required, say that a model with the needed content-input support is required."
   );
+}
+
+function isPdfFileRefPart(
+  part: Extract<AgentModelContentPart, { type: "file_ref" }>,
+): boolean {
+  return part.file_ref.mimeType.trim().toLowerCase() === "application/pdf";
+}
+
+function supportsFileRefPart(
+  part: Extract<AgentModelContentPart, { type: "file_ref" }>,
+  contentInputs: AgentContentInputCapabilities,
+): boolean {
+  if (contentInputs.nativeFiles) return true;
+  return isPdfFileRefPart(part) && contentInputs.pdfDocuments;
+}
+
+function countOmittedFileRefPart(
+  part: Extract<AgentModelContentPart, { type: "file_ref" }>,
+  counts: OmittedContentInputCounts,
+): void {
+  if (isPdfFileRefPart(part)) {
+    counts.pdfDocuments += 1;
+  } else {
+    counts.nativeFiles += 1;
+  }
 }
 
 async function buildArtifactFollowupMessage(
   result: AgentToolResult,
-  _options: { multimodal?: boolean; modelName?: string } = {},
+  _options: {
+    contentInputs?: AgentContentInputCapabilities;
+    modelName?: string;
+  } = {},
 ): Promise<AgentModelMessage | null> {
   const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
   if (!artifacts.length || !result.ok) return null;
@@ -181,33 +236,64 @@ function filterFollowupMessageForCapabilities(
   capabilities: AgentModelCapabilities,
   modelName?: string,
 ): AgentModelMessage | null {
-  if (!message || capabilities.multimodal) return message;
+  if (!message) return null;
+  if (message.role === "tool") return message;
   if (typeof message.content === "string") return message;
 
-  const textParts: string[] = [];
-  let omittedImages = 0;
-  let omittedFiles = 0;
+  const contentInputs = resolveCapabilitiesContentInputs(capabilities);
+  const parts: AgentModelContentPart[] = [];
+  const omitted: OmittedContentInputCounts = {
+    images: 0,
+    pdfDocuments: 0,
+    nativeFiles: 0,
+  };
   for (const part of message.content) {
     if (part.type === "text") {
-      if (part.text.trim()) textParts.push(part.text);
+      if (part.text.trim()) parts.push(part);
       continue;
     }
     if (part.type === "image_url") {
-      omittedImages += 1;
+      if (contentInputs.images) {
+        parts.push(part);
+      } else {
+        omitted.images += 1;
+      }
       continue;
     }
-    omittedFiles += 1;
+    if (supportsFileRefPart(part, contentInputs)) {
+      parts.push(part);
+    } else {
+      countOmittedFileRefPart(part, omitted);
+    }
   }
 
-  if (omittedImages || omittedFiles) {
-    textParts.push(
-      summarizeTextOnlyOmittedParts(omittedImages, omittedFiles, modelName),
-    );
+  if (hasOmittedContentInputs(omitted)) {
+    parts.push({
+      type: "text",
+      text: summarizeUnsupportedContentInputs(omitted, modelName),
+    });
   }
-  return {
-    ...message,
-    content: textParts.filter(Boolean).join("\n\n"),
-  };
+
+  const hasNonTextPart = parts.some((part) => part.type !== "text");
+  if (!hasNonTextPart) {
+    return {
+      ...message,
+      content: parts
+        .filter(
+          (part): part is Extract<AgentModelContentPart, { type: "text" }> =>
+            part.type === "text",
+        )
+        .map((part) => part.text)
+        .filter(Boolean)
+        .join("\n\n"),
+    };
+  }
+  return parts.length
+    ? {
+        ...message,
+        content: parts,
+      }
+    : null;
 }
 
 type ToolWorkflowDelivery = {
@@ -341,6 +427,25 @@ function isUserDeniedToolResult(result: AgentToolResult): boolean {
   return readToolError(result).toLowerCase() === "user denied action";
 }
 
+function setToolResultReadAvailability(
+  request: AgentRuntimeRequest,
+  available: boolean,
+): void {
+  const metadata = { ...(request.metadata || {}) };
+  if (available) {
+    metadata.agentToolResultReadAvailable = true;
+  } else {
+    delete metadata.agentToolResultReadAvailable;
+  }
+  request.metadata = metadata;
+}
+
+function filterTransientRecoveryTool<T extends { name: string }>(
+  tools: T[],
+): T[] {
+  return tools.filter((tool) => tool.name !== TOOL_RESULT_READ_TOOL_NAME);
+}
+
 function isWriteNoteFileRequest(
   request: AgentRuntimeRequest,
   matchedSkills: ReadonlyArray<string>,
@@ -350,12 +455,11 @@ function isWriteNoteFileRequest(
     ...(request.forcedSkillIds || []),
   ]);
   if (!activeSkillIds.has("write-note")) return false;
-  const text = request.userText || "";
-  if (/\b(zotero\s+note|current\s+zotero\s+note|active\s+note)\b/i.test(text)) {
-    return false;
-  }
-  return /\b(obsidian|vault|markdown\s+file|md\s+file|file|folder|directory|disk|export|save|write\s+(?:it|this|that)?\s*(?:to|into))\b/i.test(
-    text,
+  return (
+    classifyWriteNoteDestination(
+      request.userText,
+      getNotesDirectoryNickname(),
+    ) === "file"
   );
 }
 
@@ -363,10 +467,16 @@ function isSuccessfulFileIoWrite(record: {
   name: string;
   ok: boolean;
   input?: unknown;
+  content?: unknown;
 }): boolean {
   if (record.name !== "file_io" || !record.ok) return false;
   if (!record.input || typeof record.input !== "object") return false;
-  return (record.input as { action?: unknown }).action === "write";
+  if ((record.input as { action?: unknown }).action !== "write") return false;
+  return !(
+    record.content &&
+    typeof record.content === "object" &&
+    "error" in record.content
+  );
 }
 
 export class AgentRuntime {
@@ -503,17 +613,26 @@ export class AgentRuntime {
       name: string;
       ok: boolean;
       input?: unknown;
+      content?: unknown;
     }> = [];
     const pendingReadActivities: AgentPendingReadActivity[] = [];
+    await hydrateAgentToolResultHandles(request.conversationKey);
+    let toolResultReadAvailable = hasAgentToolResultHandles(
+      request.conversationKey,
+    );
+    setToolResultReadAvailability(request, false);
     const toolDefinitions =
       this.registry.listToolDefinitionsForRequest(request);
-    const toolSpecs = this.registry.listToolsForRequest(request);
+    const toolSpecs = filterTransientRecoveryTool(
+      this.registry.listToolsForRequest(request),
+    );
     await hydrateAgentEvidenceCache(request.conversationKey);
     await hydrateAgentCoverageLedger({
       conversationKey: request.conversationKey,
       request,
     });
     const resourceContextPlan = buildAgentResourceContextPlan(request);
+    context.resourceSignature = resourceContextPlan.resourceSignature;
     request.contextCache = resourceContextPlan.contextCache;
     const transcriptCompatibilityKey = buildAgentTranscriptCompatibilityKey({
       request,
@@ -542,6 +661,8 @@ export class AgentRuntime {
         messages: transcriptMessagesForPrompt,
         budget,
         force: true,
+        conversationKey: request.conversationKey,
+        resourceSignature: resourceContextPlan.resourceSignature,
       });
       const text = compacted.compacted
         ? "Conversation compacted"
@@ -552,6 +673,8 @@ export class AgentRuntime {
           messages: compacted.messages,
           compactedAt: this.now(),
         };
+        await upsertAgentToolResultHandles(compacted.handleRecords);
+        if (compacted.handleRecords.length) toolResultReadAvailable = true;
         await replaceAgentTranscriptSegment(transcriptSegment);
         await emit({ type: "context_compacted", automatic: false });
       }
@@ -580,13 +703,31 @@ export class AgentRuntime {
     // inside the agent loop — no per-step classification cost.
     const classifiedSkillIds = await detectSkillIntent(request, getAllSkills());
     const matchedSkills = getMatchedSkillIds(request, classifiedSkillIds);
+    const requiresFileNoteWrite = isWriteNoteFileRequest(
+      request,
+      matchedSkills,
+    );
+    const noteWritePolicy = requiresFileNoteWrite
+      ? buildNotesDirectoryWritePolicy({ userText: request.userText })
+      : null;
+    if (noteWritePolicy) {
+      request.metadata = {
+        ...(request.metadata || {}),
+        fileNoteWritePolicy: noteWritePolicy,
+      };
+    }
     await emit({
       type: "provider_event",
-      providerType: "agent_resource_lifecycle",
+      providerType: "agent_context_envelope",
       payload: {
-        lifecycleState: resourceContextPlan.lifecycleState,
-        contextInjection: resourceContextPlan.injection,
-        resourceDelta: resourceContextPlan.resourceDeltaCounts,
+        resourceSignature: resourceContextPlan.resourceSignature,
+        selectedPaperCount: request.selectedPaperContexts?.length || 0,
+        fullTextPaperCount: request.fullTextPaperContexts?.length || 0,
+        selectedCollectionCount:
+          request.selectedCollectionContexts?.length || 0,
+        selectedTagCount: request.selectedTagContexts?.length || 0,
+        attachmentCount: request.attachments?.length || 0,
+        screenshotCount: request.screenshots?.length || 0,
       },
     });
     const messages = (await buildAgentInitialMessages(
@@ -596,6 +737,7 @@ export class AgentRuntime {
       resourceContextPlan,
       {
         transcriptMessages: transcriptMessagesForPrompt,
+        contentInputs: resolveCapabilitiesContentInputs(adapterCapabilities),
       },
     )) as AgentModelMessage[];
 
@@ -610,6 +752,8 @@ export class AgentRuntime {
       const compacted = compactAgentTranscript({
         messages: transcriptMessagesForPrompt,
         budget: budgetState,
+        conversationKey: request.conversationKey,
+        resourceSignature: resourceContextPlan.resourceSignature,
       });
       if (compacted.compacted) {
         transcriptSegment = {
@@ -618,6 +762,8 @@ export class AgentRuntime {
           compactedAt: this.now(),
         };
         transcriptMessagesForPrompt = transcriptSegment.messages;
+        await upsertAgentToolResultHandles(compacted.handleRecords);
+        if (compacted.handleRecords.length) toolResultReadAvailable = true;
         await replaceAgentTranscriptSegment(transcriptSegment);
         await emit({ type: "context_compacted", automatic: true });
         messages.splice(
@@ -630,6 +776,8 @@ export class AgentRuntime {
             resourceContextPlan,
             {
               transcriptMessages: transcriptMessagesForPrompt,
+              contentInputs:
+                resolveCapabilitiesContentInputs(adapterCapabilities),
             },
           )) as AgentModelMessage[]),
         );
@@ -648,10 +796,6 @@ export class AgentRuntime {
     const intent = classifyRequest(request);
     const { maxRounds, maxToolCallsPerRound } = resolveAgentLimits(
       intent.isBulkOperation,
-    );
-    const requiresFileNoteWrite = isWriteNoteFileRequest(
-      request,
-      matchedSkills,
     );
     let noteWriteCorrectionUsed = false;
     const hasSuccessfulFileWrite = () =>
@@ -674,7 +818,6 @@ export class AgentRuntime {
       }
       await finishAgentRun(runId, status, finalText);
       if (status === "completed") {
-        commitAgentResourceContextPlan(resourceContextPlan);
         await commitAgentReadActivities({
           conversationKey: request.conversationKey,
           activities: pendingReadActivities,
@@ -785,11 +928,38 @@ export class AgentRuntime {
         stepStreamedText = "";
         stepPendingDelta = "";
       };
-      const stepContextWindow = resolveContextWindowTokens(
-        request.model || "",
-        request.advanced?.inputTokenCap,
-      );
-      const stepContextTokens = estimateContextMessagesTokens(messages);
+      const preflight = enforceAgentPromptBudget({
+        messages,
+        model: request.model,
+        inputTokenCap: request.advanced?.inputTokenCap,
+        conversationKey: request.conversationKey,
+        resourceSignature: resourceContextPlan.resourceSignature,
+      });
+      if (preflight.changed) {
+        await upsertAgentToolResultHandles(preflight.handleRecords);
+        if (preflight.handleRecords.length) toolResultReadAvailable = true;
+        messages.splice(0, messages.length, ...preflight.messages);
+        adapter.resetState?.();
+        await emit({
+          type: "provider_event",
+          providerType: "agent_context_budget",
+          payload: {
+            action: "compacted_model_prompt",
+            beforeTokens: preflight.estimatedBeforeTokens,
+            afterTokens: preflight.estimatedAfterTokens,
+            softLimitTokens: preflight.softLimitTokens,
+            contextWindow: preflight.contextWindow,
+            reductions: preflight.reductions,
+            handleCount: preflight.handleRecords.length,
+          },
+        });
+      }
+      const stepToolResultReadAvailable =
+        toolResultReadAvailable || preflight.handleRecords.length > 0;
+      setToolResultReadAvailability(request, stepToolResultReadAvailable);
+      const stepToolSpecs = this.registry.listToolsForRequest(request);
+      const stepContextWindow = preflight.contextWindow;
+      const stepContextTokens = preflight.estimatedAfterTokens;
       if (stepContextTokens > 0 && stepContextWindow > 0) {
         await emit({
           type: "usage",
@@ -804,7 +974,7 @@ export class AgentRuntime {
       const step = await adapter.runStep({
         request,
         messages,
-        tools: toolSpecs,
+        tools: stepToolSpecs,
         signal: params.signal,
         onTextDelta: async (delta) => {
           if (!delta) return;
@@ -1028,6 +1198,7 @@ export class AgentRuntime {
         name: toolResult.name,
         ok: toolResult.ok,
         input: executedCall.input,
+        content: toolResult.content,
       });
       if (toolResult.ok) {
         consecutiveToolErrors = 0;
@@ -1079,7 +1250,8 @@ export class AgentRuntime {
             currentAnswerText,
           })
         : await buildArtifactFollowupMessage(toolResult, {
-            multimodal: adapterCapabilities.multimodal,
+            contentInputs:
+              resolveCapabilitiesContentInputs(adapterCapabilities),
             modelName: request.model,
           });
       const filteredFollowupMessage = filterFollowupMessageForCapabilities(
@@ -1237,12 +1409,21 @@ export class AgentRuntime {
       });
     };
     for (let round = 1; round <= maxRounds; round += 1) {
-      const { step, stepStreamedText } = await runModelStep(
-        round,
-        round === 1
-          ? "Running agent"
-          : `Continuing agent (${round}/${maxRounds})`,
-      );
+      let stepResult: { step: AgentModelStep; stepStreamedText: string };
+      try {
+        stepResult = await runModelStep(
+          round,
+          round === 1
+            ? "Running agent"
+            : `Continuing agent (${round}/${maxRounds})`,
+        );
+      } catch (err) {
+        if (err instanceof AgentPromptBudgetError) {
+          return completeRun(err.message, "failed");
+        }
+        throw err;
+      }
+      const { step, stepStreamedText } = stepResult;
       if (step.kind === "final") {
         if (
           requiresFileNoteWrite &&
@@ -1260,7 +1441,11 @@ export class AgentRuntime {
             const userCorrectionMessage: AgentModelMessage = {
               role: "user",
               content:
-                'Correction for this turn: the user\'s request requires writing a Markdown note to the configured notes directory. Call `file_io` with `action: "write"` now, using the configured notes directory/default target path and a clear `.md` filename. Do not put the note body in chat. If a write is impossible, explain the setup problem briefly.',
+                'Correction for this turn: the user\'s request requires writing a Markdown note to the configured notes directory. Call `file_io` with `action: "write"` now, using the configured notes directory/default target path and a clear `.md` filename.' +
+                (noteWritePolicy
+                  ? ` Default target path: ${noteWritePolicy.defaultTargetPath}.`
+                  : "") +
+                " Do not put the note body in chat. If a write is impossible, explain the setup problem briefly.",
             };
             messages.push(assistantCorrectionMessage, userCorrectionMessage);
             newTranscriptMessages.push(

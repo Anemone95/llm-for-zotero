@@ -7,7 +7,7 @@ import {
   commitAgentCoverageActivities,
   hydrateAgentCoverageLedger,
 } from "../src/agent/context/coverageLedger";
-import { buildAgentResourceContextPlan } from "../src/agent/context/resourceLifecycle";
+import { buildAgentResourceContextPlan } from "../src/agent/context/resourceContextPlan";
 import { buildAgentInitialMessages } from "../src/agent/model/messageBuilder";
 import type {
   AgentModelMessage,
@@ -136,7 +136,7 @@ describe("agent coverage ledger", function () {
     await clearPersistedAgentCoverage();
   });
 
-  it("derives compact coverage from library search, paper reads, MinerU file reads, and visual reads", function () {
+  it("derives compact coverage from library search, paper reads, visual reads, and attachment reads", function () {
     const req = request();
     const libraryEntries = buildAgentCoverageEntriesForActivity({
       toolName: "library_search",
@@ -176,26 +176,6 @@ describe("agent coverage ledger", function () {
       request: req,
       timestamp: 2,
     });
-    const mineruEntries = buildAgentCoverageEntriesForActivity({
-      toolName: "file_io",
-      input: {
-        action: "read",
-        filePath: "/tmp/mineru/10/full.md",
-        offset: 10,
-        length: 50,
-      },
-      content: { content: "MinerU methods section." },
-      request: {
-        ...req,
-        selectedPaperContexts: [
-          {
-            ...req.selectedPaperContexts![0],
-            mineruCacheDir: "/tmp/mineru/10",
-          },
-        ],
-      },
-      timestamp: 3,
-    });
     const visualEntries = buildAgentCoverageEntriesForActivity({
       toolName: "view_pdf_pages",
       input: {
@@ -206,6 +186,57 @@ describe("agent coverage ledger", function () {
       artifacts: [{ kind: "image", mimeType: "image/png", contentHash: "img" }],
       request: req,
       timestamp: 4,
+    });
+    const attachmentEntries = buildAgentCoverageEntriesForActivity({
+      toolName: "read_attachment",
+      input: { target: { contextItemId: 77 } },
+      content: {
+        attachmentId: 77,
+        title: "translation.md",
+        sourceLabel: "(translation.md, attachment under Smith, 2024)",
+        textContent: "Translated attachment evidence.",
+        paperContext: {
+          itemId: 1,
+          contextItemId: 77,
+          title: "Coverage Paper",
+          firstCreator: "Smith",
+          year: "2024",
+          contentSourceMode: "markdown",
+        },
+      },
+      request: req,
+      timestamp: 5,
+    });
+    const libraryRetrieveEntries = buildAgentCoverageEntriesForActivity({
+      toolName: "library_retrieve",
+      input: { query: "stable readout", depth: "evidence" },
+      content: {
+        depth: "evidence",
+        methodsUsed: ["metadata", "exact"],
+        resourcePool: {
+          type: "collection",
+          name: "Methods",
+          scope: { libraryID: 1, collectionIds: [3] },
+          totalItems: 12,
+          queryCoverage: {
+            metadataInspected: 12,
+            fullTextSearched: 2,
+            snippetsReturned: 1,
+          },
+        },
+        snippets: [
+          {
+            itemId: "1",
+            contextItemId: "10",
+            title: "Coverage Paper",
+            sourceKind: "pdf_text",
+            matchMethod: "exact",
+            snippet: "The method used a stable readout.",
+          },
+        ],
+      },
+      request: req,
+      timestamp: 6,
     });
 
     assert.isTrue(
@@ -222,16 +253,33 @@ describe("agent coverage ledger", function () {
       granularity: "passage",
       coverage: "targeted",
     });
-    assert.deepInclude(mineruEntries[0], {
-      resourceKey: "paper:1:10",
-      sourceKind: "mineru",
-      granularity: "section",
-    });
     assert.deepInclude(visualEntries[0], {
       resourceKey: "paper:1:10",
       sourceKind: "pdf_visual",
       granularity: "visual_page",
     });
+    assert.deepInclude(attachmentEntries[0], {
+      resourceKey: "paper:1:77",
+      sourceKind: "attachment_text",
+      granularity: "attachment",
+      coverage: "targeted",
+    });
+    assert.isTrue(
+      libraryRetrieveEntries.some(
+        (entry) =>
+          entry.resourceKey === "collection:1:3" &&
+          entry.sourceKind === "zotero_metadata" &&
+          entry.granularity === "scope",
+      ),
+    );
+    assert.isTrue(
+      libraryRetrieveEntries.some(
+        (entry) =>
+          entry.resourceKey === "paper:1:10" &&
+          entry.sourceKind === "zotero_fulltext" &&
+          entry.granularity === "passage",
+      ),
+    );
   });
 
   it("persists, hydrates, renders, and clears conversation coverage", async function () {

@@ -11,8 +11,6 @@ declare const Services:
 
 const LEGACY_PREFS_PREFIX = "extensions.zotero.zoterollm";
 const PREF_MIGRATION_MARKER_KEY = `${config.prefsPrefix}.migrationFromZoterollmV1Done`;
-const PREF_MINERU_CONTENT_MD_CLEANUP = `${config.prefsPrefix}.migrationMineruContentMdCleanupDone`;
-const PREF_MINERU_MANIFEST_BUILD = `${config.prefsPrefix}.migrationMineruManifestBuildDone`;
 const PREF_NICKNAME_MIGRATION = `${config.prefsPrefix}.migrationNicknameAutoSetDone`;
 const PREF_ATTACHMENTS_VAULT_RELATIVE = `${config.prefsPrefix}.migrationAttachmentsVaultRelativeDone`;
 
@@ -92,69 +90,6 @@ function migrateLegacyPrefs(): void {
   if (migrated > 0) {
     ztoolkit.log(`LLM: Migrated ${migrated} legacy preference value(s).`);
   }
-}
-
-async function migrateMineruContentMdCleanup(): Promise<void> {
-  if (Zotero.Prefs.get(PREF_MINERU_CONTENT_MD_CLEANUP, true)) return;
-  try {
-    const { cleanupLegacyContentMdFiles } = await import(
-      "../modules/contextPanel/mineruCache"
-    );
-    await cleanupLegacyContentMdFiles();
-  } catch {
-    /* ignore – cache dir may not exist yet */
-  }
-  Zotero.Prefs.set(PREF_MINERU_CONTENT_MD_CLEANUP, true, true);
-}
-
-/**
- * Build manifest.json for existing MinerU cached papers that don't have one yet.
- * Runs in the background — non-blocking best-effort.
- */
-async function migrateMineruManifestBuild(): Promise<void> {
-  if (Zotero.Prefs.get(PREF_MINERU_MANIFEST_BUILD, true)) return;
-  try {
-    const { getMineruCacheDir, buildAndWriteManifest } = await import(
-      "../modules/contextPanel/mineruCache"
-    );
-    const cacheDir = getMineruCacheDir();
-    const IOUtils = (globalThis as Record<string, unknown>).IOUtils as
-      | { getChildren?: (path: string) => Promise<string[]>; exists?: (path: string) => Promise<boolean> }
-      | undefined;
-    if (!IOUtils?.getChildren || !IOUtils?.exists) {
-      Zotero.Prefs.set(PREF_MINERU_MANIFEST_BUILD, true, true);
-      return;
-    }
-    if (!(await IOUtils.exists(cacheDir))) {
-      Zotero.Prefs.set(PREF_MINERU_MANIFEST_BUILD, true, true);
-      return;
-    }
-    const entries = await IOUtils.getChildren(cacheDir);
-    let built = 0;
-    for (const entry of entries) {
-      const basename = entry.split(/[\\/]/).pop() || "";
-      if (!/^\d+$/.test(basename)) continue;
-      const id = parseInt(basename, 10);
-      // Skip if manifest already exists
-      const manifestPath = entry + "/manifest.json";
-      if (await IOUtils.exists(manifestPath)) continue;
-      // Skip if no full.md
-      const mdPath = entry + "/full.md";
-      if (!(await IOUtils.exists(mdPath))) continue;
-      try {
-        await buildAndWriteManifest(id);
-        built += 1;
-      } catch {
-        // Non-critical — skip this paper
-      }
-    }
-    if (built > 0) {
-      ztoolkit.log(`LLM: Built manifest.json for ${built} existing MinerU cached paper(s).`);
-    }
-  } catch {
-    /* ignore – cache dir may not exist yet */
-  }
-  Zotero.Prefs.set(PREF_MINERU_MANIFEST_BUILD, true, true);
 }
 
 /**
@@ -254,11 +189,15 @@ function migrateAttachmentsVaultRelative(): void {
   Zotero.Prefs.set(PREF_ATTACHMENTS_VAULT_RELATIVE, true, true);
 }
 
-export async function runLegacyMigrations(): Promise<void> {
+export function runStartupPreferenceMigrations(): void {
   migrateLegacyPrefs();
   migrateNickname();
   migrateAttachmentsVaultRelative();
-  await migrateMineruContentMdCleanup();
-  // Run manifest build in background — non-blocking
-  migrateMineruManifestBuild().catch(() => {});
+}
+
+export async function runDeferredLegacyMigrations(): Promise<void> {}
+
+export async function runLegacyMigrations(): Promise<void> {
+  runStartupPreferenceMigrations();
+  await runDeferredLegacyMigrations();
 }

@@ -1,18 +1,44 @@
 import { config } from "../../package.json";
 import {
+  MAX_FULL_TEXT_PAPER_CONTEXTS,
+  MAX_SELECTED_PAPER_CONTEXTS,
+} from "../shared/contextLimits";
+import {
   getClaudeBridgeUrl,
   getClaudeCustomInstructionPref,
   getConversationSystemPref,
 } from "../claudeCode/prefs";
 import { getClaudeProfileSignature } from "../claudeCode/projectSkills";
 import { getClaudeConversationSummary } from "../claudeCode/store";
+import { isNativeZoteroMcpToolsEnabled } from "../codexAppServer/prefs";
+import {
+  normalizeAgentPermissionMode,
+  type AgentPermissionMode,
+} from "../shared/agentPermissionMode";
+import {
+  assertRequiredCodexZoteroMcpToolsReady,
+  buildClaudeZoteroMcpServerConfig,
+  preflightCodexZoteroMcpServer,
+  REQUIRED_CLAUDE_ZOTERO_MCP_TOOL_NAMES,
+} from "../codexAppServer/mcpSetup";
 import { dbg, dbgError } from "../utils/debugLogger";
+import { buildNotesDirectoryConfigSection } from "../utils/notesDirectoryConfig";
 import type { AgentRuntime } from "./runtime";
+import {
+  addZoteroMcpConfirmationHandler,
+  addZoteroMcpToolActivityObserver,
+  registerScopedZoteroMcpScope,
+  setActiveZoteroMcpScope,
+  type ZoteroMcpActiveScope,
+  type ZoteroMcpToolActivityEvent,
+} from "./mcp/server";
 import {
   appendAgentRunEvent,
   createAgentRun,
   finishAgentRun,
 } from "./store/traceStore";
+import { AGENT_PERSONA_INSTRUCTIONS } from "./model/agentPersona";
+import { buildAgentModelCapabilities } from "./model/contentCapabilities";
 import type {
   ActionConfirmationMode,
   ActionProgressEvent,
@@ -25,6 +51,11 @@ import type {
   AgentRuntimeOutcome,
   AgentRuntimeRequest,
 } from "./types";
+import type { PaperContentSourceMode, PaperContextRef } from "../shared/types";
+import {
+  buildTurnContextEnvelope,
+  renderTurnContextEnvelopeForModel,
+} from "./context/turnContextEnvelope";
 
 export type RunTurnParams = {
   request: AgentRuntimeRequest;
@@ -114,7 +145,10 @@ type BridgeLine =
   | { type: "outcome"; outcome: AgentRuntimeOutcome }
   | { type: "error"; error: string };
 
-function makeProfilingEvent(stage: string, payload?: Record<string, unknown>): AgentEvent {
+function makeProfilingEvent(
+  stage: string,
+  payload?: Record<string, unknown>,
+): AgentEvent {
   return {
     type: "provider_event",
     providerType: "profiling",
@@ -171,10 +205,12 @@ type ContextEnvelope = {
   selectedTextCount: number;
   selectedPaperCount: number;
   selectedCollectionCount: number;
+  selectedTagCount: number;
   fullTextPaperCount: number;
   pinnedPaperCount: number;
   attachmentCount: number;
   screenshotCount: number;
+  visibleContext?: string;
   selectedTexts: Array<{
     source: string;
     text: string;
@@ -191,6 +227,13 @@ type ContextEnvelope = {
     collectionId: number;
     name: string;
     libraryID: number;
+  }>;
+  selectedTags: Array<{
+    name: string;
+    libraryID: number;
+    normalizedName?: string;
+    scope?: "allTagged" | "untagged";
+    includeAutomatic?: boolean;
   }>;
   fullTextPapers: Array<{
     itemId: number;
@@ -236,8 +279,7 @@ type BridgePaperContext = {
   citationKey?: string;
   firstCreator?: string;
   year?: string;
-  mineruCacheDir?: string;
-  mineruFullMdPath?: string;
+  contentSourceMode?: PaperContentSourceMode;
   contextFilePath?: string;
 };
 
@@ -245,6 +287,14 @@ type BridgeCollectionContext = {
   collectionId?: number;
   name?: string;
   libraryID?: number;
+};
+
+type BridgeTagContext = {
+  name?: string;
+  libraryID?: number;
+  normalizedName?: string;
+  scope?: "allTagged" | "untagged";
+  includeAutomatic?: boolean;
 };
 
 type BridgeScopeType =
@@ -261,6 +311,7 @@ export type BridgeScopeSnapshot = {
   scopeLabel?: string;
 };
 type BridgeScope = BridgeScopeSnapshot;
+type ClaudeMcpServersConfig = Record<string, Record<string, unknown>>;
 
 function hashProviderIdentityStack(stack: string[]): string {
   let hash = 2166136261;
@@ -317,6 +368,7 @@ type BridgeRuntimeRequest = {
   fullTextPaperContexts?: BridgePaperContext[];
   pinnedPaperContexts?: BridgePaperContext[];
   selectedCollectionContexts?: BridgeCollectionContext[];
+  selectedTagContexts?: BridgeTagContext[];
   attachments?: BridgeAttachment[];
   screenshots?: string[];
   history?: Array<{ role: string; content: string }>;
@@ -329,7 +381,10 @@ type BridgeRuntimeRequest = {
   };
 };
 
-const lastRunBridgeContextByConversationKey = new Map<number, LastRunBridgeContext>();
+const lastRunBridgeContextByConversationKey = new Map<
+  number,
+  LastRunBridgeContext
+>();
 
 function isBridgeDebugEnabled(): boolean {
   return false;
@@ -349,10 +404,15 @@ async function resolveClaudeProviderSessionHint(
   conversationKey: number,
   scope?: BridgeScope,
 ): Promise<string | undefined> {
-  const summary = await getClaudeConversationSummary(conversationKey).catch(() => null);
+  const summary = await getClaudeConversationSummary(conversationKey).catch(
+    () => null,
+  );
   const providerSessionId = summary?.providerSessionId?.trim();
   if (!summary || !providerSessionId) return undefined;
-  const expectedScopedConversationKey = buildScopedConversationKey(conversationKey, scope);
+  const expectedScopedConversationKey = buildScopedConversationKey(
+    conversationKey,
+    scope,
+  );
   if (
     summary.scopedConversationKey &&
     summary.scopedConversationKey !== expectedScopedConversationKey
@@ -360,7 +420,10 @@ async function resolveClaudeProviderSessionHint(
     return undefined;
   }
   if (scope) {
-    if (summary.scopeType !== scope.scopeType || summary.scopeId !== scope.scopeId) {
+    if (
+      summary.scopeType !== scope.scopeType ||
+      summary.scopeId !== scope.scopeId
+    ) {
       return undefined;
     }
   } else if (summary.scopeType || summary.scopeId) {
@@ -399,7 +462,9 @@ function formatBridgeUserError(
   return `${context}: ${message}. ${hint}`;
 }
 
-function getLastRunBridgeContext(conversationKey: number): LastRunBridgeContext | undefined {
+function getLastRunBridgeContext(
+  conversationKey: number,
+): LastRunBridgeContext | undefined {
   return lastRunBridgeContextByConversationKey.get(Math.floor(conversationKey));
 }
 
@@ -429,15 +494,14 @@ function clearLastRunBridgeContext(conversationKey: number): void {
 function getClaudeConfigSourcePref(): "default" | "user-only" | "zotero-only" {
   try {
     const raw = String(
-      Zotero.Prefs.get(
-        `${config.prefsPrefix}.agentClaudeConfigSource`,
-        true,
-      ) || "",
+      Zotero.Prefs.get(`${config.prefsPrefix}.agentClaudeConfigSource`, true) ||
+        "",
     )
       .trim()
       .toLowerCase();
     if (raw === "user-level" || raw === "user-only") return "user-only";
-    if (raw === "zotero-specific" || raw === "zotero-only") return "zotero-only";
+    if (raw === "zotero-specific" || raw === "zotero-only")
+      return "zotero-only";
     return "default";
   } catch {
     return "default";
@@ -455,20 +519,20 @@ function getClaudeSettingSourcesCsvByPref(): string {
   return getClaudeSettingSourcesByPref().join(",");
 }
 
-function getAgentPermissionModePref(): "safe" | "yolo" {
+function getAgentPermissionModePref(): AgentPermissionMode {
   try {
     const raw = Zotero.Prefs.get(
       `${config.prefsPrefix}.agentPermissionMode`,
       true,
     );
-    return raw === "yolo" ? "yolo" : "safe";
+    return normalizeAgentPermissionMode(raw);
   } catch {
     return "safe";
   }
 }
 
 function buildAgentPermissionMetadata(): {
-  permissionMode: "safe" | "yolo";
+  permissionMode: AgentPermissionMode;
   allowDangerouslySkipPermissions?: true;
 } {
   const permissionMode = getAgentPermissionModePref();
@@ -481,9 +545,32 @@ function buildAgentPermissionMetadata(): {
   return { permissionMode };
 }
 
+function buildOriginalAgentModeInstructionBlock(): string {
+  return [
+    "## Original agent-mode Zotero behavior",
+    ...AGENT_PERSONA_INSTRUCTIONS,
+  ].join("\n\n");
+}
+
+function buildClaudeBridgeCustomInstruction(): string {
+  return [
+    getClaudeCustomInstructionPref(),
+    buildOriginalAgentModeInstructionBlock(),
+    "Claude Code receives Zotero access through the scoped MCP tools for this turn. When those tools are available, use library_search, library_retrieve, library_read, and paper_read for Zotero library or paper-content questions before relying on filesystem exploration or conversation-visible snippets. Use zotero_script for Zotero-native API inspection or scripted library operations only when the semantic Zotero tools cannot cover the request.",
+    'If the turn includes selected collection or tag scopes, resolve phrases like "this folder", "this collection", "inside this folder", and "this tag" against those selected Zotero scopes. Do not ask the user which folder or tag they mean unless no selected scope is present or multiple selected scopes make the reference genuinely ambiguous.',
+    buildNotesDirectoryConfigSection(),
+  ]
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 function isClaudeCodeModeEnabled(): boolean {
   try {
-    const enabled = Zotero.Prefs.get(`${config.prefsPrefix}.enableClaudeCodeMode`, true);
+    const enabled = Zotero.Prefs.get(
+      `${config.prefsPrefix}.enableClaudeCodeMode`,
+      true,
+    );
     return enabled === true || `${enabled || ""}`.toLowerCase() === "true";
   } catch {
     return false;
@@ -491,7 +578,9 @@ function isClaudeCodeModeEnabled(): boolean {
 }
 
 function isClaudeBridgeActive(): boolean {
-  return getConversationSystemPref() === "claude_code" && isClaudeCodeModeEnabled();
+  return (
+    getConversationSystemPref() === "claude_code" && isClaudeCodeModeEnabled()
+  );
 }
 
 function normalizeScopeType(value: unknown): BridgeScopeType | null {
@@ -516,7 +605,9 @@ function normalizeScopeId(value: unknown): string | null {
   return normalized ? normalized : null;
 }
 
-function resolvePaperScopeFromRequest(request: AgentRuntimeRequest): BridgeScope | null {
+function resolvePaperScopeFromRequest(
+  request: AgentRuntimeRequest,
+): BridgeScope | null {
   const libraryID =
     typeof request.libraryID === "number" && Number.isFinite(request.libraryID)
       ? Math.floor(request.libraryID)
@@ -524,7 +615,8 @@ function resolvePaperScopeFromRequest(request: AgentRuntimeRequest): BridgeScope
 
   let paperItemId: number | undefined;
   const fromActiveItem =
-    typeof request.activeItemId === "number" && Number.isFinite(request.activeItemId)
+    typeof request.activeItemId === "number" &&
+    Number.isFinite(request.activeItemId)
       ? Math.floor(request.activeItemId)
       : undefined;
   if (fromActiveItem && fromActiveItem > 0) {
@@ -583,8 +675,11 @@ function resolveBridgeScope(request: AgentRuntimeRequest): BridgeScope {
     (request as unknown as { scopeId?: unknown }).scopeId,
   );
   const explicitLabel =
-    typeof (request as unknown as { scopeLabel?: unknown }).scopeLabel === "string"
-      ? String((request as unknown as { scopeLabel?: unknown }).scopeLabel).trim() || undefined
+    typeof (request as unknown as { scopeLabel?: unknown }).scopeLabel ===
+    "string"
+      ? String(
+          (request as unknown as { scopeLabel?: unknown }).scopeLabel,
+        ).trim() || undefined
       : undefined;
   if (explicitType && explicitId) {
     return {
@@ -737,6 +832,8 @@ async function runExternalBridgeTurn(
   params: RunTurnParams & {
     contextEnvelope?: ContextEnvelope;
     runtimeRequest?: BridgeRuntimeRequest;
+    allowedTools?: string[];
+    mcpServers?: ClaudeMcpServersConfig;
     scope?: BridgeScope;
     registerPendingConfirmation?: (
       requestId: string,
@@ -773,7 +870,9 @@ async function runExternalBridgeTurn(
   const debugModeEnabled = false;
 
   const userTextRaw = params.request.userText || "";
-  const probeMatch = userTextRaw.match(/^\s*\/(?:debug-)?permission-probe\b\s*(.*)$/i);
+  const probeMatch = userTextRaw.match(
+    /^\s*\/(?:debug-)?permission-probe\b\s*(.*)$/i,
+  );
   const probeRequested = Boolean(probeMatch && debugModeEnabled);
   const probeStrippedText = probeMatch?.[1]?.trim() || "";
   const userTextForBridge = probeRequested
@@ -794,10 +893,12 @@ async function runExternalBridgeTurn(
     conversationKey: params.request.conversationKey,
     userText: userTextForBridge,
     providerSessionId: providerSessionIdHint,
+    allowedTools: params.allowedTools,
     scopeType: params.scope?.scopeType,
     scopeId: params.scope?.scopeId,
     scopeLabel: params.scope?.scopeLabel,
     runtimeRequest: params.runtimeRequest,
+    mcpServers: params.mcpServers,
     metadata: {
       ...requestMetadata,
       runType: "chat",
@@ -805,7 +906,7 @@ async function runExternalBridgeTurn(
       claudeSettingSources: getClaudeSettingSourcesByPref(),
       settingSources: getClaudeSettingSourcesCsvByPref(),
       ...buildAgentPermissionMetadata(),
-      customInstruction: getClaudeCustomInstructionPref(),
+      customInstruction: buildClaudeBridgeCustomInstruction(),
       providerIdentity,
       providerIdentityStack,
       model:
@@ -842,7 +943,9 @@ async function runExternalBridgeTurn(
   await streamBridgeLines(response, async (line) => {
     if (!sawFirstBridgeLine) {
       sawFirstBridgeLine = true;
-      await params.onEvent?.(makeProfilingEvent("frontend.bridge_stream.first_line"));
+      await params.onEvent?.(
+        makeProfilingEvent("frontend.bridge_stream.first_line"),
+      );
     }
     if (line.type === "start") {
       await params.onStart?.(line.runId);
@@ -869,7 +972,9 @@ async function runExternalBridgeTurn(
                     type: "status",
                     text:
                       `confirmation_sync ${result.requestId} http=${result.httpStatus} accepted=${result.accepted}` +
-                      (result.errorMessage ? ` error=${result.errorMessage}` : ""),
+                      (result.errorMessage
+                        ? ` error=${result.errorMessage}`
+                        : ""),
                   });
                   await params.onEvent?.({
                     type: "status",
@@ -878,7 +983,9 @@ async function runExternalBridgeTurn(
                 }
                 if (!result.ok || !result.accepted) {
                   if (attempt < 2) {
-                    await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
+                    await new Promise((resolve) =>
+                      setTimeout(resolve, 150 * (attempt + 1)),
+                    );
                     await syncConfirmation(attempt + 1);
                     return;
                   }
@@ -902,7 +1009,9 @@ async function runExternalBridgeTurn(
                 });
               } catch (error) {
                 if (attempt < 2) {
-                  await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
+                  await new Promise((resolve) =>
+                    setTimeout(resolve, 150 * (attempt + 1)),
+                  );
                   await syncConfirmation(attempt + 1);
                   return;
                 }
@@ -952,47 +1061,206 @@ function trimText(value: unknown, max = 360): string {
   return `${normalized.slice(0, Math.max(0, max - 3)).trimEnd()}...`;
 }
 
-function normalizePaperRefs(list: unknown, limit = 8): Array<{
-  itemId: number;
-  contextItemId: number;
-  title: string;
-  citationKey?: string;
-  firstCreator?: string;
-  year?: string;
-}> {
+function normalizePositiveInt(value: unknown): number | undefined {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+  return Math.floor(parsed);
+}
+
+function resolveLibraryName(libraryID: number | undefined): string | undefined {
+  if (!libraryID) return undefined;
+  try {
+    const libraries = (
+      Zotero as unknown as {
+        Libraries?: {
+          userLibraryID?: number;
+          getName?: (libraryID: number) => string;
+          get?: (libraryID: number) => { name?: string } | null | undefined;
+        };
+      }
+    ).Libraries;
+    const directName = libraries?.getName?.(libraryID);
+    if (typeof directName === "string" && directName.trim()) {
+      return directName.trim();
+    }
+    const library = libraries?.get?.(libraryID);
+    if (typeof library?.name === "string" && library.name.trim()) {
+      return library.name.trim();
+    }
+    return libraries?.userLibraryID === libraryID ? "My Library" : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveFallbackLibraryId(
+  request: AgentRuntimeRequest,
+): number | undefined {
+  const selectedCollectionLibraryId = normalizeCollectionRefs(
+    request.selectedCollectionContexts,
+    1,
+  )[0]?.libraryID;
+  const selectedTagLibraryId = normalizeTagRefs(
+    request.selectedTagContexts,
+    1,
+  )[0]?.libraryID;
+  const userLibraryId = normalizePositiveInt(
+    (Zotero as unknown as { Libraries?: { userLibraryID?: unknown } }).Libraries
+      ?.userLibraryID,
+  );
+  return (
+    normalizePositiveInt(request.libraryID) ||
+    normalizePositiveInt(request.item?.libraryID) ||
+    selectedCollectionLibraryId ||
+    selectedTagLibraryId ||
+    userLibraryId
+  );
+}
+
+function buildClaudeZoteroMcpScope(
+  request: AgentRuntimeRequest,
+  profileSignature: string,
+): ZoteroMcpActiveScope {
+  const selectedPaperContexts = normalizePaperRefs(
+    request.selectedPaperContexts,
+    MAX_SELECTED_PAPER_CONTEXTS,
+  );
+  const fullTextPaperContexts = normalizePaperRefs(
+    request.fullTextPaperContexts,
+    MAX_FULL_TEXT_PAPER_CONTEXTS,
+  );
+  const pinnedPaperContexts = normalizePaperRefs(
+    request.pinnedPaperContexts,
+    MAX_FULL_TEXT_PAPER_CONTEXTS,
+  );
+  const selectedPaper =
+    selectedPaperContexts[0] ||
+    fullTextPaperContexts[0] ||
+    pinnedPaperContexts[0];
+  const kind = request.conversationKind === "paper" ? "paper" : "global";
+  const activeItemId =
+    normalizePositiveInt(request.activeItemId) ||
+    normalizePositiveInt(request.item?.id) ||
+    selectedPaper?.itemId;
+  const paperItemID =
+    kind === "paper" ? selectedPaper?.itemId || activeItemId : undefined;
+  const libraryID = resolveFallbackLibraryId(request);
+  const activeNote = request.activeNoteContext;
+  return {
+    profileSignature,
+    conversationKey: normalizePositiveInt(request.conversationKey),
+    libraryID,
+    kind,
+    paperItemID,
+    activeItemId: paperItemID || activeItemId,
+    activeContextItemId: selectedPaper?.contextItemId,
+    activeNoteId: normalizePositiveInt(activeNote?.noteId),
+    activeNoteKind:
+      activeNote?.noteKind === "item" || activeNote?.noteKind === "standalone"
+        ? activeNote.noteKind
+        : undefined,
+    activeNoteTitle: activeNote?.title,
+    activeNoteParentItemId: normalizePositiveInt(activeNote?.parentItemId),
+    libraryName: resolveLibraryName(libraryID),
+    title: selectedPaper?.title,
+    userText: request.userText,
+    paperContext: selectedPaper,
+    selectedPaperContexts: selectedPaperContexts.length
+      ? selectedPaperContexts
+      : undefined,
+    fullTextPaperContexts: fullTextPaperContexts.length
+      ? fullTextPaperContexts
+      : undefined,
+    pinnedPaperContexts: pinnedPaperContexts.length
+      ? pinnedPaperContexts
+      : undefined,
+    selectedCollectionContexts: normalizeCollectionRefs(
+      request.selectedCollectionContexts,
+      20,
+    ),
+    selectedTagContexts: normalizeTagRefs(request.selectedTagContexts, 20),
+  };
+}
+
+function buildClaudeMcpToolActivityEvent(
+  event: ZoteroMcpToolActivityEvent,
+): AgentEvent {
+  return {
+    type: "codex_tool_activity",
+    itemId: `mcp:${event.requestId || `${event.toolName}:${event.timestamp}`}`,
+    phase: event.phase,
+    toolName: event.toolName,
+    toolLabel: event.toolLabel,
+    serverName: event.serverName,
+    args: event.arguments,
+    ok: event.ok,
+    text: event.error,
+  };
+}
+
+function normalizePaperContentSourceMode(
+  value: unknown,
+): PaperContentSourceMode | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  switch (normalized) {
+    case "pdf":
+    case "markdown":
+    case "html":
+    case "txt":
+    case "docx":
+      return normalized;
+    default:
+      return undefined;
+  }
+}
+
+function normalizePaperRefs(list: unknown, limit = 8): PaperContextRef[] {
   if (!Array.isArray(list)) return [];
-  const refs: Array<{
-    itemId: number;
-    contextItemId: number;
-    title: string;
-    citationKey?: string;
-    firstCreator?: string;
-    year?: string;
-  }> = [];
+  const refs: PaperContextRef[] = [];
   for (const entry of list) {
     if (!entry || typeof entry !== "object") continue;
     const record = entry as Record<string, unknown>;
-    const itemId = typeof record.itemId === "number" ? record.itemId : undefined;
+    const itemId =
+      typeof record.itemId === "number" ? record.itemId : undefined;
     const contextItemId =
-      typeof record.contextItemId === "number" ? record.contextItemId : undefined;
+      typeof record.contextItemId === "number"
+        ? record.contextItemId
+        : undefined;
     const title = trimText(record.title, 180);
     if (!itemId || !contextItemId || !title) continue;
-    refs.push({
+    const paperRef: PaperContextRef = {
       itemId,
       contextItemId,
       title,
+      attachmentTitle:
+        typeof record.attachmentTitle === "string"
+          ? trimText(record.attachmentTitle, 180)
+          : undefined,
       citationKey:
-        typeof record.citationKey === "string" ? trimText(record.citationKey, 80) : undefined,
+        typeof record.citationKey === "string"
+          ? trimText(record.citationKey, 80)
+          : undefined,
       firstCreator:
-        typeof record.firstCreator === "string" ? trimText(record.firstCreator, 80) : undefined,
-      year: typeof record.year === "string" ? trimText(record.year, 16) : undefined,
-    });
+        typeof record.firstCreator === "string"
+          ? trimText(record.firstCreator, 80)
+          : undefined,
+      year:
+        typeof record.year === "string" ? trimText(record.year, 16) : undefined,
+      contentSourceMode: normalizePaperContentSourceMode(
+        record.contentSourceMode,
+      ),
+    };
+    refs.push(paperRef);
     if (refs.length >= limit) break;
   }
   return refs;
 }
 
-function normalizeCollectionRefs(list: unknown, limit = 8): Array<{
+function normalizeCollectionRefs(
+  list: unknown,
+  limit = 8,
+): Array<{
   collectionId: number;
   name: string;
   libraryID: number;
@@ -1007,7 +1275,9 @@ function normalizeCollectionRefs(list: unknown, limit = 8): Array<{
     if (!entry || typeof entry !== "object") continue;
     const record = entry as Record<string, unknown>;
     const collectionId =
-      typeof record.collectionId === "number" ? Math.floor(record.collectionId) : 0;
+      typeof record.collectionId === "number"
+        ? Math.floor(record.collectionId)
+        : 0;
     const libraryID =
       typeof record.libraryID === "number" ? Math.floor(record.libraryID) : 0;
     if (!collectionId || !libraryID) continue;
@@ -1021,22 +1291,99 @@ function normalizeCollectionRefs(list: unknown, limit = 8): Array<{
   return refs;
 }
 
+function normalizeTagRefs(
+  list: unknown,
+  limit = 8,
+): Array<{
+  name: string;
+  libraryID: number;
+  normalizedName?: string;
+  scope?: "allTagged" | "untagged";
+  includeAutomatic?: boolean;
+}> {
+  if (!Array.isArray(list)) return [];
+  const refs: Array<{
+    name: string;
+    libraryID: number;
+    normalizedName?: string;
+    scope?: "allTagged" | "untagged";
+    includeAutomatic?: boolean;
+  }> = [];
+  const seen = new Set<string>();
+  for (const entry of list) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    const libraryID =
+      typeof record.libraryID === "number" ? Math.floor(record.libraryID) : 0;
+    const scope =
+      record.scope === "allTagged" || record.scope === "untagged"
+        ? record.scope
+        : undefined;
+    const name =
+      trimText(record.name, 180) ||
+      (scope === "allTagged"
+        ? "All Tagged"
+        : scope === "untagged"
+          ? "Untagged"
+          : "");
+    if (!libraryID || !name) continue;
+    const normalizedName = trimText(record.normalizedName || record.name, 180)
+      .toLowerCase()
+      .trim();
+    const includeAutomatic = record.includeAutomatic === true;
+    const key = scope
+      ? `${libraryID}:scope:${scope}:${includeAutomatic ? "auto" : "manual"}`
+      : `${libraryID}:tag:${normalizedName || name.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    refs.push({
+      name,
+      libraryID,
+      normalizedName: normalizedName || undefined,
+      scope,
+      includeAutomatic: includeAutomatic || undefined,
+    });
+    if (refs.length >= limit) break;
+  }
+  return refs;
+}
+
 function buildContextEnvelope(request: AgentRuntimeRequest): ContextEnvelope {
-  const selectedTexts = Array.isArray(request.selectedTexts) ? request.selectedTexts : [];
+  const turnContextEnvelope = buildTurnContextEnvelope(request);
+  const visibleContext =
+    renderTurnContextEnvelopeForModel(turnContextEnvelope) || undefined;
+  const selectedTexts = Array.isArray(request.selectedTexts)
+    ? request.selectedTexts
+    : [];
   const selectedSources = Array.isArray(request.selectedTextSources)
     ? request.selectedTextSources
     : [];
-  const selectedTextRows = selectedTexts.slice(0, 6).map((text, index) => ({
-    source: typeof selectedSources[index] === "string" ? selectedSources[index] : "unknown",
-    text: trimText(text, 280),
-  })).filter((row) => row.text);
-  const selectedPapers = normalizePaperRefs(request.selectedPaperContexts, 10);
-  const fullTextPapers = normalizePaperRefs(request.fullTextPaperContexts, 8).map((paper) => ({
+  const selectedTextRows = selectedTexts
+    .slice(0, 6)
+    .map((text, index) => ({
+      source:
+        typeof selectedSources[index] === "string"
+          ? selectedSources[index]
+          : "unknown",
+      text: trimText(text, 280),
+    }))
+    .filter((row) => row.text);
+  const selectedPapers = normalizePaperRefs(
+    request.selectedPaperContexts,
+    MAX_SELECTED_PAPER_CONTEXTS,
+  );
+  const fullTextPapers = normalizePaperRefs(
+    request.fullTextPaperContexts,
+    MAX_FULL_TEXT_PAPER_CONTEXTS,
+  ).map((paper) => ({
     itemId: paper.itemId,
     contextItemId: paper.contextItemId,
     title: paper.title,
   }));
-  const pinnedPapers = normalizePaperRefs(request.pinnedPaperContexts, 8).map((paper) => ({
+  const pinnedPapers = normalizePaperRefs(
+    request.pinnedPaperContexts,
+    MAX_FULL_TEXT_PAPER_CONTEXTS,
+  ).map((paper) => ({
     itemId: paper.itemId,
     contextItemId: paper.contextItemId,
     title: paper.title,
@@ -1045,7 +1392,10 @@ function buildContextEnvelope(request: AgentRuntimeRequest): ContextEnvelope {
     request.selectedCollectionContexts,
     8,
   );
-  const attachments = (Array.isArray(request.attachments) ? request.attachments : [])
+  const selectedTags = normalizeTagRefs(request.selectedTagContexts, 8);
+  const attachments = (
+    Array.isArray(request.attachments) ? request.attachments : []
+  )
     .slice(0, 10)
     .map((attachment) => ({
       id: attachment.id,
@@ -1074,17 +1424,26 @@ function buildContextEnvelope(request: AgentRuntimeRequest): ContextEnvelope {
     selectedCollectionCount: Array.isArray(request.selectedCollectionContexts)
       ? request.selectedCollectionContexts.length
       : 0,
+    selectedTagCount: Array.isArray(request.selectedTagContexts)
+      ? request.selectedTagContexts.length
+      : 0,
     fullTextPaperCount: Array.isArray(request.fullTextPaperContexts)
       ? request.fullTextPaperContexts.length
       : 0,
     pinnedPaperCount: Array.isArray(request.pinnedPaperContexts)
       ? request.pinnedPaperContexts.length
       : 0,
-    attachmentCount: Array.isArray(request.attachments) ? request.attachments.length : 0,
-    screenshotCount: Array.isArray(request.screenshots) ? request.screenshots.length : 0,
+    attachmentCount: Array.isArray(request.attachments)
+      ? request.attachments.length
+      : 0,
+    screenshotCount: Array.isArray(request.screenshots)
+      ? request.screenshots.length
+      : 0,
+    visibleContext,
     selectedTexts: selectedTextRows,
     selectedPapers,
     selectedCollections,
+    selectedTags,
     fullTextPapers,
     pinnedPapers,
     attachments,
@@ -1120,15 +1479,20 @@ async function buildBridgeRuntimeRequest(
       const attachment = Zotero.Items.get(attachmentId);
       if (!attachment?.isAttachment?.()) return undefined;
       const asyncPath = await (
-        attachment as unknown as { getFilePathAsync?: () => Promise<string | false> }
+        attachment as unknown as {
+          getFilePathAsync?: () => Promise<string | false>;
+        }
       ).getFilePathAsync?.();
       const directPath =
         typeof asyncPath === "string" && asyncPath.trim()
           ? asyncPath.trim()
-          : typeof (attachment as { getFilePath?: () => string | undefined }).getFilePath ===
-              "function"
-            ? (attachment as { getFilePath: () => string | undefined }).getFilePath()
-            : (attachment as unknown as { attachmentPath?: string }).attachmentPath;
+          : typeof (attachment as { getFilePath?: () => string | undefined })
+                .getFilePath === "function"
+            ? (
+                attachment as { getFilePath: () => string | undefined }
+              ).getFilePath()
+            : (attachment as unknown as { attachmentPath?: string })
+                .attachmentPath;
       if (typeof directPath !== "string") return undefined;
       const normalizedPath = directPath.trim();
       return normalizedPath.startsWith("/") ? normalizedPath : undefined;
@@ -1151,9 +1515,16 @@ async function buildBridgeRuntimeRequest(
       )
         .trim()
         .toLowerCase();
-      if (contentType === "text/markdown" || pathHint.endsWith(".md")) return 100;
-      if (contentType === "application/pdf" || pathHint.endsWith(".pdf")) return 90;
-      if (contentType === "text/html" || pathHint.endsWith(".html") || pathHint.endsWith(".htm")) return 80;
+      if (contentType === "text/markdown" || pathHint.endsWith(".md"))
+        return 100;
+      if (contentType === "application/pdf" || pathHint.endsWith(".pdf"))
+        return 90;
+      if (
+        contentType === "text/html" ||
+        pathHint.endsWith(".html") ||
+        pathHint.endsWith(".htm")
+      )
+        return 80;
       if (contentType.startsWith("text/")) return 70;
       return 10;
     };
@@ -1197,10 +1568,6 @@ async function buildBridgeRuntimeRequest(
     for (const raw of list) {
       if (!raw || typeof raw !== "object") continue;
       const paper = raw as Record<string, unknown>;
-      const mineruCacheDir =
-        typeof paper.mineruCacheDir === "string" && paper.mineruCacheDir.trim()
-          ? paper.mineruCacheDir.trim()
-          : undefined;
       const contextFilePath = await resolveAttachmentAbsolutePath(
         paper.contextItemId,
         paper.itemId,
@@ -1227,10 +1594,9 @@ async function buildBridgeRuntimeRequest(
             ? paper.firstCreator
             : undefined,
         year: typeof paper.year === "string" ? paper.year : undefined,
-        mineruCacheDir,
-        mineruFullMdPath: mineruCacheDir
-          ? joinPath(mineruCacheDir, "full.md")
-          : undefined,
+        contentSourceMode: normalizePaperContentSourceMode(
+          paper.contentSourceMode,
+        ),
         contextFilePath,
       };
       enriched.push(context);
@@ -1238,9 +1604,8 @@ async function buildBridgeRuntimeRequest(
     return enriched.length ? enriched : undefined;
   };
 
-  const attachments = (Array.isArray(request.attachments)
-    ? request.attachments
-    : []
+  const attachments = (
+    Array.isArray(request.attachments) ? request.attachments : []
   )
     .filter((entry) => Boolean(entry))
     .map((attachment) => ({
@@ -1262,7 +1627,10 @@ async function buildBridgeRuntimeRequest(
     }));
 
   const screenshots = Array.isArray(request.screenshots)
-    ? request.screenshots.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    ? request.screenshots.filter(
+        (entry): entry is string =>
+          typeof entry === "string" && entry.trim().length > 0,
+      )
     : [];
 
   const [selectedPaperContexts, fullTextPaperContexts, pinnedPaperContexts] =
@@ -1281,7 +1649,9 @@ async function buildBridgeRuntimeRequest(
     apiBase: request.apiBase,
     authMode: request.authMode,
     providerProtocol: request.providerProtocol,
-    selectedTexts: Array.isArray(request.selectedTexts) ? request.selectedTexts : undefined,
+    selectedTexts: Array.isArray(request.selectedTexts)
+      ? request.selectedTexts
+      : undefined,
     selectedTextSources: Array.isArray(request.selectedTextSources)
       ? request.selectedTextSources
       : undefined,
@@ -1292,6 +1662,7 @@ async function buildBridgeRuntimeRequest(
       request.selectedCollectionContexts,
       20,
     ),
+    selectedTagContexts: normalizeTagRefs(request.selectedTagContexts, 20),
     attachments: attachments.length ? attachments : undefined,
     screenshots: screenshots.length ? screenshots : undefined,
     activeNoteContext: request.activeNoteContext
@@ -1312,6 +1683,12 @@ async function buildBridgeRuntimeRequest(
   };
 }
 
+export function buildExternalBridgeContextEnvelopeForTests(
+  request: AgentRuntimeRequest,
+) {
+  return buildContextEnvelope(request);
+}
+
 function signatureForContextEnvelope(envelope: ContextEnvelope): string {
   return JSON.stringify({
     activeItemId: envelope.activeItemId,
@@ -1319,31 +1696,61 @@ function signatureForContextEnvelope(envelope: ContextEnvelope): string {
     selectedTextCount: envelope.selectedTextCount,
     selectedPaperCount: envelope.selectedPaperCount,
     selectedCollectionCount: envelope.selectedCollectionCount,
+    selectedTagCount: envelope.selectedTagCount,
     fullTextPaperCount: envelope.fullTextPaperCount,
     pinnedPaperCount: envelope.pinnedPaperCount,
     attachmentCount: envelope.attachmentCount,
     screenshotCount: envelope.screenshotCount,
-    selectedPaperIds: envelope.selectedPapers.map((paper) => paper.contextItemId).sort(),
-    selectedCollectionIds: envelope.selectedCollections.map((collection) => collection.collectionId).sort(),
-    fullTextPaperIds: envelope.fullTextPapers.map((paper) => paper.contextItemId).sort(),
-    pinnedPaperIds: envelope.pinnedPapers.map((paper) => paper.contextItemId).sort(),
-    selectedTextFingerprints: envelope.selectedTexts.map((row) => row.text.slice(0, 80)),
+    selectedPaperIds: envelope.selectedPapers
+      .map((paper) => paper.contextItemId)
+      .sort(),
+    selectedCollectionIds: envelope.selectedCollections
+      .map((collection) => collection.collectionId)
+      .sort(),
+    selectedTags: envelope.selectedTags
+      .map((tag) =>
+        [
+          tag.libraryID,
+          tag.scope || "",
+          tag.normalizedName || tag.name.toLowerCase(),
+          tag.includeAutomatic === true ? "auto" : "manual",
+        ].join(":"),
+      )
+      .sort(),
+    fullTextPaperIds: envelope.fullTextPapers
+      .map((paper) => paper.contextItemId)
+      .sort(),
+    pinnedPaperIds: envelope.pinnedPapers
+      .map((paper) => paper.contextItemId)
+      .sort(),
+    selectedTextFingerprints: envelope.selectedTexts.map((row) =>
+      row.text.slice(0, 80),
+    ),
     activeNoteId: envelope.activeNote?.noteId,
   });
+}
+
+export function buildExternalBridgeContextSignatureForTests(
+  request: AgentRuntimeRequest,
+): string {
+  return signatureForContextEnvelope(buildContextEnvelope(request));
 }
 
 async function fetchExternalTools(
   baseUrl: string,
   encodedSources: string,
 ): Promise<ExternalToolDescriptor[]> {
-  const response = await fetch(`${normalizeBaseUrl(baseUrl)}/tools?settingSources=${encodedSources}`, {
-    method: "GET",
-    headers: { Accept: "application/json" },
-  });
+  const response = await fetch(
+    `${normalizeBaseUrl(baseUrl)}/tools?settingSources=${encodedSources}`,
+    {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    },
+  );
   if (!response.ok) {
     throw new Error(`Bridge HTTP ${response.status}`);
   }
-  const json = await response.json() as { tools?: unknown[] };
+  const json = (await response.json()) as { tools?: unknown[] };
   const rawTools = Array.isArray(json.tools) ? json.tools : [];
   const tools: ExternalToolDescriptor[] = [];
   for (const raw of rawTools) {
@@ -1352,19 +1759,24 @@ async function fetchExternalTools(
     if (typeof tool.name !== "string" || !tool.name.trim()) continue;
     tools.push({
       name: tool.name,
-      description: typeof tool.description === "string" ? tool.description : tool.name,
+      description:
+        typeof tool.description === "string" ? tool.description : tool.name,
       inputSchema:
         tool.inputSchema && typeof tool.inputSchema === "object"
           ? (tool.inputSchema as object)
           : { type: "object", properties: {} },
       mutability: tool.mutability === "write" ? "write" : "read",
       riskLevel:
-        tool.riskLevel === "high" || tool.riskLevel === "medium" || tool.riskLevel === "low"
+        tool.riskLevel === "high" ||
+        tool.riskLevel === "medium" ||
+        tool.riskLevel === "low"
           ? tool.riskLevel
           : "medium",
       requiresConfirmation: Boolean(tool.requiresConfirmation),
       source:
-        tool.source === "claude-runtime" || tool.source === "mcp" || tool.source === "zotero-bridge"
+        tool.source === "claude-runtime" ||
+        tool.source === "mcp" ||
+        tool.source === "zotero-bridge"
           ? tool.source
           : "claude-runtime",
     });
@@ -1377,18 +1789,25 @@ async function fetchExternalEfforts(
   encodedSources: string,
   model?: string,
 ): Promise<ExternalEffortInfo> {
-  const modelParam = model?.trim() ? `&model=${encodeURIComponent(model.trim())}` : "";
-  const response = await fetch(`${normalizeBaseUrl(baseUrl)}/efforts?settingSources=${encodedSources}${modelParam}`, {
-    method: "GET",
-    headers: { Accept: "application/json" },
-  });
+  const modelParam = model?.trim()
+    ? `&model=${encodeURIComponent(model.trim())}`
+    : "";
+  const response = await fetch(
+    `${normalizeBaseUrl(baseUrl)}/efforts?settingSources=${encodedSources}${modelParam}`,
+    {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    },
+  );
   if (!response.ok) {
     throw new Error(`Bridge HTTP ${response.status}`);
   }
-  const json = await response.json() as { efforts?: unknown[] };
+  const json = (await response.json()) as { efforts?: unknown[] };
   return {
     efforts: Array.isArray(json.efforts)
-      ? json.efforts.filter((entry): entry is string => typeof entry === "string")
+      ? json.efforts.filter(
+          (entry): entry is string => typeof entry === "string",
+        )
       : [],
   };
 }
@@ -1398,20 +1817,26 @@ async function fetchExternalCommands(
   encodedSources: string,
 ): Promise<ExternalSlashCommandDescriptor[]> {
   try {
-    const response = await fetch(`${normalizeBaseUrl(baseUrl)}/commands?settingSources=${encodedSources}`, {
-      method: "GET",
-      headers: { Accept: "application/json" },
-    });
+    const response = await fetch(
+      `${normalizeBaseUrl(baseUrl)}/commands?settingSources=${encodedSources}`,
+      {
+        method: "GET",
+        headers: { Accept: "application/json" },
+      },
+    );
     if (!response.ok) {
       throw new Error(`Bridge HTTP ${response.status}`);
     }
-    const json = await response.json() as { commands?: unknown[] };
+    const json = (await response.json()) as { commands?: unknown[] };
     const rawCommands = Array.isArray(json.commands) ? json.commands : [];
     const commands: ExternalSlashCommandDescriptor[] = [];
     for (const raw of rawCommands) {
       if (!raw || typeof raw !== "object") continue;
       const command = raw as Record<string, unknown>;
-      const name = typeof command.name === "string" ? command.name.trim().replace(/^\/+/, "") : "";
+      const name =
+        typeof command.name === "string"
+          ? command.name.trim().replace(/^\/+/, "")
+          : "";
       if (!name) continue;
       commands.push({
         name,
@@ -1420,7 +1845,9 @@ async function fetchExternalCommands(
             ? command.description.trim()
             : `Claude Code slash command: /${name}`,
         argumentHint:
-          typeof command.argumentHint === "string" ? command.argumentHint.trim() : "",
+          typeof command.argumentHint === "string"
+            ? command.argumentHint.trim()
+            : "",
         source: command.source === "fallback" ? "fallback" : "sdk",
       });
     }
@@ -1448,14 +1875,22 @@ export async function fetchExternalBridgeSessionInfo(params: {
     scopeType?: BridgeScopeType;
     scopeId?: string;
     scopeLabel?: string;
-    source: "last_run_snapshot" | "runtime_scope" | "scope_no_label" | "conversation_only";
+    source:
+      | "last_run_snapshot"
+      | "runtime_scope"
+      | "scope_no_label"
+      | "conversation_only";
   }> = [];
   const seen = new Set<string>();
   const pushCandidate = (candidate: {
     scopeType?: BridgeScopeType;
     scopeId?: string;
     scopeLabel?: string;
-    source: "last_run_snapshot" | "runtime_scope" | "scope_no_label" | "conversation_only";
+    source:
+      | "last_run_snapshot"
+      | "runtime_scope"
+      | "scope_no_label"
+      | "conversation_only";
   }) => {
     const key = `${candidate.scopeType || ""}|${candidate.scopeId || ""}|${candidate.scopeLabel || ""}`;
     if (seen.has(key)) return;
@@ -1537,7 +1972,10 @@ export async function fetchExternalBridgeSessionInfo(params: {
           queryScopeType: candidate.scopeType,
           queryScopeId: candidate.scopeId,
           queryScopeLabel: candidate.scopeLabel,
-          queryScopedConversationKey: buildScopedConversationKey(conversationKey, candidate),
+          queryScopedConversationKey: buildScopedConversationKey(
+            conversationKey,
+            candidate,
+          ),
           responseScopedConversationKey: session?.scopedConversationKey || null,
           responseProviderSessionId: session?.providerSessionId || null,
         });
@@ -1690,7 +2128,9 @@ export function createExternalBackendBridgeRuntime(options: {
     }
     refreshInFlight = (async () => {
       try {
-        const encodedSources = encodeURIComponent(getClaudeSettingSourcesByPref().join(","));
+        const encodedSources = encodeURIComponent(
+          getClaudeSettingSourcesByPref().join(","),
+        );
         cachedTools = await fetchExternalTools(bridgeUrl, encodedSources);
         cacheExpiresAt = Date.now() + TOOL_CACHE_TTL_MS;
       } catch (error) {
@@ -1720,7 +2160,9 @@ export function createExternalBackendBridgeRuntime(options: {
     if (cachedEffortsByModel.has(key)) {
       return cachedEffortsByModel.get(key)?.efforts || [];
     }
-    const encodedSources = encodeURIComponent(getClaudeSettingSourcesByPref().join(","));
+    const encodedSources = encodeURIComponent(
+      getClaudeSettingSourcesByPref().join(","),
+    );
     const info = await fetchExternalEfforts(bridgeUrl, encodedSources, model);
     cachedEffortsByModel.set(key, info);
     return info.efforts;
@@ -1742,8 +2184,14 @@ export function createExternalBackendBridgeRuntime(options: {
       lastCapabilityConfigKey = "";
       return;
     }
-    if (!force && Date.now() < slashCommandsCacheExpiresAt && cachedSlashCommands.length > 0) {
-      dbg("refreshSlashCommands: using cached", { count: cachedSlashCommands.length });
+    if (
+      !force &&
+      Date.now() < slashCommandsCacheExpiresAt &&
+      cachedSlashCommands.length > 0
+    ) {
+      dbg("refreshSlashCommands: using cached", {
+        count: cachedSlashCommands.length,
+      });
       return;
     }
     if (slashCommandsRefreshInFlight) {
@@ -1753,11 +2201,18 @@ export function createExternalBackendBridgeRuntime(options: {
     }
     slashCommandsRefreshInFlight = (async () => {
       try {
-        const encodedSources = encodeURIComponent(getClaudeSettingSourcesByPref().join(","));
+        const encodedSources = encodeURIComponent(
+          getClaudeSettingSourcesByPref().join(","),
+        );
         dbg("refreshSlashCommands: fetching from adapter", { bridgeUrl });
-        cachedSlashCommands = await fetchExternalCommands(bridgeUrl, encodedSources);
+        cachedSlashCommands = await fetchExternalCommands(
+          bridgeUrl,
+          encodedSources,
+        );
         slashCommandsCacheExpiresAt = Date.now() + SLASH_COMMANDS_CACHE_TTL_MS;
-        dbg("refreshSlashCommands: fetched successfully", { count: cachedSlashCommands.length });
+        dbg("refreshSlashCommands: fetched successfully", {
+          count: cachedSlashCommands.length,
+        });
       } catch (error) {
         dbgError("refreshSlashCommands failed", error);
         const message = formatBridgeUserError(
@@ -1804,13 +2259,17 @@ export function createExternalBackendBridgeRuntime(options: {
       if (!bridgeUrl || !isClaudeBridgeActive()) {
         return coreRuntime.getCapabilities(request);
       }
-      return {
+      return buildAgentModelCapabilities({
         streaming: true,
         toolCalls: true,
-        multimodal: true,
+        contentInputs: {
+          images: true,
+          pdfDocuments: true,
+          nativeFiles: true,
+        },
         fileInputs: true,
         reasoning: true,
-      };
+      });
     },
     listExternalActionsSync: () => {
       if (!normalizeBaseUrl(getBridgeUrl()) || !isClaudeBridgeActive()) {
@@ -1831,7 +2290,14 @@ export function createExternalBackendBridgeRuntime(options: {
     listSlashCommandsSync,
     refreshSlashCommands,
     listEfforts,
-    updateRuntimeRetention: async ({ conversationKey, scope, mountId, retain, probeId, providerSessionId }) => {
+    updateRuntimeRetention: async ({
+      conversationKey,
+      scope,
+      mountId,
+      retain,
+      probeId,
+      providerSessionId,
+    }) => {
       const bridgeUrl = normalizeBaseUrl(getBridgeUrl());
       if (!bridgeUrl) {
         return null;
@@ -1845,7 +2311,9 @@ export function createExternalBackendBridgeRuntime(options: {
         probeId,
         providerSessionId:
           providerSessionId ||
-          (retain ? await resolveClaudeProviderSessionHint(conversationKey, scope) : undefined),
+          (retain
+            ? await resolveClaudeProviderSessionHint(conversationKey, scope)
+            : undefined),
       });
     },
     invalidateSession: async ({ conversationKey, scope, metadata }) => {
@@ -1879,7 +2347,9 @@ export function createExternalBackendBridgeRuntime(options: {
         body: "{}",
       });
       if (!response.ok) {
-        throw new Error(`Failed to invalidate all hot runtimes (${response.status})`);
+        throw new Error(
+          `Failed to invalidate all hot runtimes (${response.status})`,
+        );
       }
       conversationScopeByKey.clear();
       conversationContextSignature.clear();
@@ -1888,7 +2358,10 @@ export function createExternalBackendBridgeRuntime(options: {
     runExternalAction: async (name, input, opts = {}) => {
       const bridgeUrl = normalizeBaseUrl(getBridgeUrl());
       if (!bridgeUrl) {
-        return { ok: false, error: "External backend bridge is not configured" };
+        return {
+          ok: false,
+          error: "External backend bridge is not configured",
+        };
       }
       const toolName = fromExternalActionName(name);
       if (!toolName) {
@@ -1897,15 +2370,25 @@ export function createExternalBackendBridgeRuntime(options: {
       const tool = cachedTools.find((entry) => entry.name === toolName);
       const onProgress = opts.onProgress ?? (() => {});
       const actionConversationKey =
-        typeof opts.conversationKey === "number" && Number.isFinite(opts.conversationKey)
+        typeof opts.conversationKey === "number" &&
+        Number.isFinite(opts.conversationKey)
           ? Math.floor(opts.conversationKey)
           : Date.now();
       const actionScope = conversationScopeByKey.get(actionConversationKey);
 
-      onProgress({ type: "step_start", step: `Run ${toolName}`, index: 1, total: 1 });
-      const doRun = async (approved = false): Promise<ActionResult<unknown>> => {
+      onProgress({
+        type: "step_start",
+        step: `Run ${toolName}`,
+        index: 1,
+        total: 1,
+      });
+      const doRun = async (
+        approved = false,
+      ): Promise<ActionResult<unknown>> => {
         const providerIdentityStack = await buildClaudeProviderIdentityStack();
-        const providerIdentity = hashProviderIdentityStack(providerIdentityStack);
+        const providerIdentity = hashProviderIdentityStack(
+          providerIdentityStack,
+        );
         const outcome = await runExternalBridgeAction(bridgeUrl, {
           conversationKey: actionConversationKey,
           toolName,
@@ -1931,14 +2414,19 @@ export function createExternalBackendBridgeRuntime(options: {
           },
         });
 
-        if (outcome.kind === "fallback" && outcome.reason === "approval_required") {
+        if (
+          outcome.kind === "fallback" &&
+          outcome.reason === "approval_required"
+        ) {
           if (
             opts.confirmationMode === "native_ui" &&
             typeof opts.requestConfirmation === "function"
           ) {
             const requestId = `ext-confirm-${Date.now()}`;
             const riskLevel =
-              tool?.riskLevel === "high" || tool?.riskLevel === "medium" || tool?.riskLevel === "low"
+              tool?.riskLevel === "high" ||
+              tool?.riskLevel === "medium" ||
+              tool?.riskLevel === "low"
                 ? tool.riskLevel
                 : "high";
             const pendingAction: AgentPendingAction = {
@@ -1950,8 +2438,15 @@ export function createExternalBackendBridgeRuntime(options: {
               description: `This action is marked as ${riskLevel} risk.`,
               fields: [],
             };
-            onProgress({ type: "confirmation_required", requestId, action: pendingAction });
-            const resolution = await opts.requestConfirmation(requestId, pendingAction);
+            onProgress({
+              type: "confirmation_required",
+              requestId,
+              action: pendingAction,
+            });
+            const resolution = await opts.requestConfirmation(
+              requestId,
+              pendingAction,
+            );
             if (!resolution.approved) {
               return { ok: false, error: "User denied action" };
             }
@@ -1977,7 +2472,9 @@ export function createExternalBackendBridgeRuntime(options: {
     runTurn: async (params: RunTurnParams): Promise<AgentRuntimeOutcome> => {
       const bridgeUrl = normalizeBaseUrl(getBridgeUrl());
       if (!bridgeUrl) {
-        throw new Error("Claude bridge URL is empty. Set Bridge URL to http://127.0.0.1:19787.");
+        throw new Error(
+          "Claude bridge URL is empty. Set Bridge URL to http://127.0.0.1:19787.",
+        );
       }
       let persistedRunId = "";
       let persistedRunCreated = false;
@@ -2017,11 +2514,19 @@ export function createExternalBackendBridgeRuntime(options: {
       await appendPersistedEvent(makeProfilingEvent("frontend.run_turn.enter"));
       await params.onEvent?.(makeProfilingEvent("frontend.run_turn.enter"));
       const contextEnvelope = buildContextEnvelope(params.request);
-      await appendPersistedEvent(makeProfilingEvent("frontend.context_envelope.ready"));
-      await params.onEvent?.(makeProfilingEvent("frontend.context_envelope.ready"));
+      await appendPersistedEvent(
+        makeProfilingEvent("frontend.context_envelope.ready"),
+      );
+      await params.onEvent?.(
+        makeProfilingEvent("frontend.context_envelope.ready"),
+      );
       const runtimeRequest = await buildBridgeRuntimeRequest(params.request);
-      await appendPersistedEvent(makeProfilingEvent("frontend.bridge_runtime_request.ready"));
-      await params.onEvent?.(makeProfilingEvent("frontend.bridge_runtime_request.ready"));
+      await appendPersistedEvent(
+        makeProfilingEvent("frontend.bridge_runtime_request.ready"),
+      );
+      await params.onEvent?.(
+        makeProfilingEvent("frontend.bridge_runtime_request.ready"),
+      );
       const scope = resolveBridgeScope(params.request);
       rememberLastRunBridgeContext(params.request.conversationKey, scope);
       if (isBridgeDebugEnabled()) {
@@ -2038,34 +2543,118 @@ export function createExternalBackendBridgeRuntime(options: {
       }
       conversationScopeByKey.set(params.request.conversationKey, scope);
       const currentSignature = signatureForContextEnvelope(contextEnvelope);
-      conversationContextSignature.set(params.request.conversationKey, currentSignature);
+      conversationContextSignature.set(
+        params.request.conversationKey,
+        currentSignature,
+      );
+      const emitTurnEvent = async (event: AgentEvent): Promise<void> => {
+        await appendPersistedEvent(event);
+        await params.onEvent?.(event);
+      };
+      let mcpServers: ClaudeMcpServersConfig | undefined;
+      let allowedTools: string[] | undefined;
+      let clearScopedMcpScope: () => void = () => undefined;
+      let clearActiveMcpScope: () => void = () => undefined;
+      let clearMcpConfirmationHandler: () => void = () => undefined;
+      let unregisterMcpToolActivity: () => void = () => undefined;
       try {
+        if (isNativeZoteroMcpToolsEnabled()) {
+          const profileSignature = getClaudeProfileSignature();
+          const mcpScope = buildClaudeZoteroMcpScope(
+            params.request,
+            profileSignature,
+          );
+          const scopedMcp = registerScopedZoteroMcpScope(mcpScope);
+          clearScopedMcpScope = scopedMcp.clear;
+          clearActiveMcpScope = setActiveZoteroMcpScope(mcpScope);
+          clearMcpConfirmationHandler = addZoteroMcpConfirmationHandler(
+            mcpScope,
+            async ({ requestId, action }) => {
+              const resolution = new Promise<AgentConfirmationResolution>(
+                (resolve) => {
+                  coreRuntime.registerPendingConfirmation(requestId, resolve);
+                },
+              );
+              await emitTurnEvent({
+                type: "confirmation_required",
+                requestId,
+                action,
+              });
+              const settled = await resolution;
+              await emitTurnEvent({
+                type: "confirmation_resolved",
+                requestId,
+                approved: settled.approved,
+                actionId: settled.actionId,
+                data: settled.data,
+              });
+              return settled;
+            },
+          );
+          unregisterMcpToolActivity = addZoteroMcpToolActivityObserver(
+            (event) => {
+              const sameConversation =
+                !event.conversationKey ||
+                event.conversationKey === params.request.conversationKey;
+              const sameProfile =
+                !event.profileSignature ||
+                !profileSignature ||
+                event.profileSignature === profileSignature;
+              if (!sameConversation || !sameProfile) return;
+              void emitTurnEvent(buildClaudeMcpToolActivityEvent(event));
+            },
+          );
+          const mcpConfig = buildClaudeZoteroMcpServerConfig({
+            profileSignature,
+            scopeToken: scopedMcp.token,
+            required: true,
+          });
+          const mcpStatus = await preflightCodexZoteroMcpServer({
+            serverName: mcpConfig.serverName,
+            scopeToken: scopedMcp.token,
+            required: true,
+          });
+          assertRequiredCodexZoteroMcpToolsReady(
+            mcpStatus,
+            REQUIRED_CLAUDE_ZOTERO_MCP_TOOL_NAMES,
+          );
+          mcpServers = mcpConfig.mcpServers;
+          allowedTools = mcpConfig.allowedTools;
+          await emitTurnEvent(
+            makeProfilingEvent("frontend.zotero_mcp.ready", {
+              serverName: mcpConfig.serverName,
+              toolNames: mcpStatus.toolNames,
+            }),
+          );
+        }
         const outcome = await runExternalBridgeTurn(bridgeUrl, {
           ...params,
           onStart: async (runId) => {
             await ensurePersistedRun(runId);
             await params.onStart?.(runId);
           },
-          onEvent: async (event) => {
-            await appendPersistedEvent(event);
-            await params.onEvent?.(event);
-          },
+          onEvent: emitTurnEvent,
           contextEnvelope,
           runtimeRequest,
+          allowedTools,
+          mcpServers,
           scope,
           registerPendingConfirmation: (requestId, resolve) =>
             coreRuntime.registerPendingConfirmation(requestId, resolve),
           resolveExternalConfirmation: async (requestId, resolution) => {
-            const response = await fetch(`${normalizeBaseUrl(bridgeUrl)}/resolve-confirmation`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                requestId,
-                approved: Boolean(resolution.approved),
-                actionId: resolution.actionId,
-                data: resolution.data,
-              }),
-            });
+            const response = await fetch(
+              `${normalizeBaseUrl(bridgeUrl)}/resolve-confirmation`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  requestId,
+                  approved: Boolean(resolution.approved),
+                  actionId: resolution.actionId,
+                  data: resolution.data,
+                }),
+              },
+            );
             const payload = (await response.json().catch(() => ({}))) as Record<
               string,
               unknown
@@ -2076,12 +2665,15 @@ export function createExternalBackendBridgeRuntime(options: {
               requestId,
               httpStatus: response.status,
               accepted,
-              source: typeof payload.source === "string" ? payload.source : undefined,
+              source:
+                typeof payload.source === "string" ? payload.source : undefined,
               pendingPermissionCount:
                 typeof payload.pendingPermissionCount === "number"
                   ? payload.pendingPermissionCount
                   : undefined,
-              recentPendingRequestIds: Array.isArray(payload.recentPendingRequestIds)
+              recentPendingRequestIds: Array.isArray(
+                payload.recentPendingRequestIds,
+              )
                 ? payload.recentPendingRequestIds
                     .filter((x): x is string => typeof x === "string")
                     .slice(0, 5)
@@ -2138,13 +2730,18 @@ export function createExternalBackendBridgeRuntime(options: {
         await appendPersistedEvent(fallbackEvent);
         await params.onEvent?.(fallbackEvent);
         await finishAgentRun(fallbackRunId, "failed", message);
-        if (typeof ztoolkit !== "undefined" && typeof ztoolkit.log === "function") {
-          ztoolkit.log(
-            "LLM Agent: External bridge unavailable",
-            message,
-          );
+        if (
+          typeof ztoolkit !== "undefined" &&
+          typeof ztoolkit.log === "function"
+        ) {
+          ztoolkit.log("LLM Agent: External bridge unavailable", message);
         }
         throw new Error(message);
+      } finally {
+        unregisterMcpToolActivity();
+        clearMcpConfirmationHandler();
+        clearActiveMcpScope();
+        clearScopedMcpScope();
       }
     },
   };

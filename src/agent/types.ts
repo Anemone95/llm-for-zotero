@@ -5,8 +5,10 @@ import type {
   ActiveNoteContext,
   ChatAttachment,
   CollectionContextRef,
+  PaperContentSourceMode,
   PaperContextRef,
   SelectedTextSource,
+  TagContextRef,
 } from "../shared/types";
 import type {
   ChatMessage,
@@ -28,6 +30,9 @@ export type AgentRequest = {
   fullTextPaperContexts?: PaperContextRef[];
   pinnedPaperContexts?: PaperContextRef[];
   selectedCollectionContexts?: CollectionContextRef[];
+  selectedTagContexts?: TagContextRef[];
+  availableAttachmentResources?: AgentAttachmentResource[];
+  attachmentResourceSummaries?: AgentAttachmentResourceSummary[];
   attachments?: ChatAttachment[];
   screenshots?: string[];
   /** Skill IDs to force-activate regardless of regex matching (from slash menu selection). */
@@ -44,6 +49,7 @@ export type AgentPendingActionButton = {
   id: string;
   label: string;
   style?: "primary" | "secondary" | "danger";
+  approved?: boolean;
   executionMode?: "immediate" | "edit";
   submitLabel?: string;
   backLabel?: string;
@@ -69,6 +75,12 @@ export type AgentPendingField =
       label: string;
       value?: string;
       placeholder?: string;
+    })
+  | (AgentPendingFieldBase & {
+      type: "code_preview";
+      label: string;
+      value: string;
+      language?: string;
     })
   | (AgentPendingFieldBase & {
       type: "select";
@@ -311,6 +323,7 @@ export type AgentEvent =
       args?: unknown;
       ok?: boolean;
       text?: string;
+      codeBlock?: string;
     }
   | {
       type: "usage";
@@ -356,10 +369,21 @@ export type AgentToolCall = {
   arguments: unknown;
 };
 
+export type AgentTraceDetailKind = "text" | "code" | "json" | "url";
+
+export type AgentTraceDetail = {
+  label: string;
+  value: string;
+  kind?: AgentTraceDetailKind;
+};
+
 export type AgentTraceChip = {
-  icon: string;
+  icon?: string;
+  iconName?: string;
   label: string;
   title?: string;
+  detail?: AgentTraceDetail;
+  details?: AgentTraceDetail[];
 };
 
 export type AgentTraceRequestSummary = {
@@ -372,9 +396,18 @@ export type AgentTraceRequestSummary = {
 export type AgentModelCapabilities = {
   streaming: boolean;
   toolCalls: boolean;
+  contentInputs?: AgentContentInputCapabilities;
+  /** Compatibility alias: true when any non-text content input is available. */
   multimodal: boolean;
+  /** Native upload/file-reference support, not inline document-block support. */
   fileInputs: boolean;
   reasoning: boolean;
+};
+
+export type AgentContentInputCapabilities = {
+  images: boolean;
+  pdfDocuments: boolean;
+  nativeFiles: boolean;
 };
 
 export type AgentModelContentPart =
@@ -449,6 +482,41 @@ export type AgentRuntimeRequest = AgentRequest & {
   activeNoteContext?: ActiveNoteContext;
   metadata?: Record<string, unknown>;
   contextCache?: ContextCachePlan;
+};
+
+export type AgentAttachmentReadableVia =
+  | "read_attachment"
+  | "paper_read"
+  | "unsupported";
+
+export type AgentAttachmentType =
+  | "pdf"
+  | "markdown"
+  | "html"
+  | "txt"
+  | "docx"
+  | "unsupported";
+
+export type AgentAttachmentResource = {
+  lifecycleState: "available";
+  parentItemId: number;
+  parentTitle: string;
+  contextItemId: number;
+  title: string;
+  contentType: string;
+  attachmentType: AgentAttachmentType;
+  readableVia: AgentAttachmentReadableVia;
+  contentSourceMode?: PaperContentSourceMode;
+  isPrimary?: boolean;
+};
+
+export type AgentAttachmentResourceSummary = {
+  scope: "selected-collection";
+  collectionId: number;
+  libraryID: number;
+  collectionName: string;
+  parentItemCount: number;
+  attachmentCounts: Partial<Record<AgentAttachmentType, number>>;
 };
 
 export type AgentRuntimeOutcome =
@@ -533,6 +601,7 @@ export type AgentToolContext = {
   currentAnswerText: string;
   modelName: string;
   modelProviderLabel?: string;
+  resourceSignature?: string;
 };
 
 export type AgentToolInputValidation<T> =

@@ -1,8 +1,10 @@
 import type {
   CollectionContextRef,
   NoteContextRef,
+  PaperContentSourceMode,
   PaperContextRef,
   SelectedTextSource,
+  TagContextRef,
 } from "./types";
 
 type TextSanitizer = (value: string) => string;
@@ -69,7 +71,9 @@ export function normalizePositiveInt(value: unknown): number | null {
   return normalized > 0 ? normalized : null;
 }
 
-export function normalizeSelectedTextSource(value: unknown): SelectedTextSource {
+export function normalizeSelectedTextSource(
+  value: unknown,
+): SelectedTextSource {
   if (value === "model") return "model";
   if (value === "note") return "note";
   if (value === "note-edit") return "note-edit";
@@ -119,9 +123,13 @@ export function normalizeNoteContextRef(
   }
   if (!parentItemKey && parentItemId) {
     const parentItem =
-      (globalThis as {
-        Zotero?: { Items?: { get?: (id: number) => Zotero.Item | null | undefined } };
-      }).Zotero?.Items?.get?.(parentItemId) || null;
+      (
+        globalThis as {
+          Zotero?: {
+            Items?: { get?: (id: number) => Zotero.Item | null | undefined };
+          };
+        }
+      ).Zotero?.Items?.get?.(parentItemId) || null;
     parentItemKey = normalizeLibraryItemKey((parentItem as any)?.key);
   }
   if (!resolvedTitle) {
@@ -175,6 +183,23 @@ export function normalizeAttachmentContentHash(
   return /^[a-f0-9]{64}$/.test(normalized) ? normalized : undefined;
 }
 
+function normalizePaperContentSourceMode(
+  value: unknown,
+): PaperContentSourceMode | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  switch (normalized) {
+    case "pdf":
+    case "markdown":
+    case "html":
+    case "txt":
+    case "docx":
+      return normalized;
+    default:
+      return undefined;
+  }
+}
+
 export function normalizePaperContextRefs(
   value: unknown,
   options?: {
@@ -197,10 +222,13 @@ export function normalizePaperContextRefs(
     const citationKey = normalizeText(typed.citationKey, sanitize);
     const firstCreator = normalizeText(typed.firstCreator, sanitize);
     const year = normalizeText(typed.year, sanitize);
+    const contentSourceMode = normalizePaperContentSourceMode(
+      typed.contentSourceMode,
+    );
     const dedupeKey = `${itemId}:${contextItemId}`;
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
-    out.push({
+    const normalized: PaperContextRef = {
       itemId,
       contextItemId,
       title,
@@ -208,7 +236,9 @@ export function normalizePaperContextRefs(
       citationKey: citationKey || undefined,
       firstCreator: firstCreator || undefined,
       year: year || undefined,
-    });
+    };
+    if (contentSourceMode) normalized.contentSourceMode = contentSourceMode;
+    out.push(normalized);
   }
   return out;
 }
@@ -229,12 +259,55 @@ export function normalizeCollectionContextRefs(
     const collectionId = normalizePositiveInt(typed.collectionId);
     const libraryID = normalizePositiveInt(typed.libraryID);
     if (!collectionId || !libraryID || seen.has(collectionId)) continue;
-    const name = normalizeText(typed.name, sanitize) || `Collection ${collectionId}`;
+    const name =
+      normalizeText(typed.name, sanitize) || `Collection ${collectionId}`;
     seen.add(collectionId);
     out.push({
       collectionId,
       name,
       libraryID,
+    });
+  }
+  return out;
+}
+
+export function normalizeTagContextRefs(
+  value: unknown,
+  options?: {
+    sanitizeText?: TextSanitizer;
+  },
+): TagContextRef[] {
+  if (!Array.isArray(value)) return [];
+  const sanitize = options?.sanitizeText;
+  const out: TagContextRef[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const typed = entry as Record<string, unknown>;
+    const libraryID = normalizePositiveInt(typed.libraryID);
+    if (!libraryID) continue;
+    const name = normalizeText(typed.name, sanitize);
+    const rawScope = typed.scope;
+    const scope =
+      rawScope === "allTagged" || rawScope === "untagged"
+        ? rawScope
+        : undefined;
+    const normalizedName = normalizeText(typed.normalizedName, sanitize)
+      .toLowerCase()
+      .trim();
+    if (!name || (!scope && !normalizedName)) continue;
+    const includeAutomatic = typed.includeAutomatic === true;
+    const key = scope
+      ? `${libraryID}:scope:${scope}:${includeAutomatic ? "auto" : "manual"}`
+      : `${libraryID}:tag:${normalizedName}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      name,
+      libraryID,
+      normalizedName: scope ? undefined : normalizedName,
+      scope,
+      includeAutomatic,
     });
   }
   return out;

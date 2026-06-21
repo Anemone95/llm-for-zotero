@@ -54,9 +54,8 @@ If unclear, default to Zotero note.
 
 ### Step 1 — Read content
 
-- If `mineruCacheDir` is available: use `file_io({ action:'read', filePath:'{mineruCacheDir}/full.md' })`.
-- Otherwise: use `paper_read({ mode:'overview' })` for the overview, then optionally one `paper_read({ mode:'targeted', query:'...' })` call for key results/methods if the user wants detail beyond the abstract.
-- For multi-paper notes (reviews, comparisons): use `library_search` + `paper_read`/`file_io` for each paper.
+- Use `paper_read({ mode:'overview' })` for the overview, then optionally one `paper_read({ mode:'targeted', query:'...' })` call for key results/methods if the user wants detail beyond the abstract.
+- For multi-paper notes (reviews, comparisons): use `library_retrieve` with the right intent (`enumerate` for comprehensive evidence search, `summarize` for taxonomies/themes, or `verify` for exact presence/absence) to search the scoped library/collection resource pool and gather snippets, then use `paper_read` only for the few papers that need close reading.
 - For free-form notes: use whatever the user provides or requests.
 - Keep the read phase minimal: 1 call (overview) or 1–2 calls (overview/targeted). Do not read the entire paper section by section.
 
@@ -159,7 +158,7 @@ Written by LLM-for-Zotero.
 
 #### For Zotero notes (`note_write`)
 
-- Use `![Caption](file:///{mineruCacheDir}/images/filename.png)`. The `note_write` tool auto-imports `file://` images as Zotero embedded attachments.
+- Use `![Caption](file:///absolute/path/to/image.png)` only when a real local image path is available. The `note_write` tool auto-imports `file://` images as Zotero embedded attachments.
 - Place figures inline near the relevant discussion.
 
 #### For file-based notes (`file_io`)
@@ -173,7 +172,7 @@ Written by LLM-for-Zotero.
 **Algorithm — follow exactly:**
 
 1. Create the destination directory: `run_command` with `mkdir -p "{attachmentsPath}/{sanitized-paper-title}"`. The folder is named after the **paper title only** (no subtopic, no date) so multiple notes about the same paper share the same images folder.
-2. Copy image files from `{mineruCacheDir}/images/` to `{attachmentsPath}/{sanitized-paper-title}/` using `run_command`. Copy images BEFORE writing the note file.
+2. Copy the available image files to `{attachmentsPath}/{sanitized-paper-title}/` using `run_command`. Copy images BEFORE writing the note file.
 3. Compute the **relative path from the note's directory to the image file**. Use `..` to climb to the common ancestor, then descend to the image. Count path segments deterministically — don't guess.
 4. Embed with `![<caption>](<relative-path>)`. Nothing else.
 
@@ -194,7 +193,7 @@ Write:        ![Figure 2. RSA toolbox schematic](../imgs/Nili2014/figure-2.jpg)
 - `![Figure 2|400](../imgs/foo.jpg)` — `|400` becomes literal alt text; image is not resized.
 - `![[imgs/foo/figure-2.jpg]]` — wiki-link embed; we use standard markdown only.
 
-**If the figure image cannot be found** in the MinerU cache, tell the user clearly. Do NOT fall back to `file:///`, absolute paths, or any of the negative examples above.
+**If the figure image cannot be found**, tell the user clearly. Do NOT fall back to guessed `file:///`, absolute paths, or any of the negative examples above.
 
 ### Step 4a — Write to Zotero (`note_write`)
 
@@ -226,7 +225,8 @@ Write:        ![Figure 2. RSA toolbox schematic](../imgs/Nili2014/figure-2.jpg)
 
 **Prerequisites:**
 
-- The user's notes directory path and default folder are provided in the system prompt under "Notes directory configuration". If missing, tell the user to configure the notes directory in the plugin preferences (Settings > Agent tab).
+- The user's notes directory path, default folder, and resolved default target path are provided in the system prompt under "Notes directory configuration". If missing, tell the user to configure the notes directory in the plugin preferences (Settings > Agent tab).
+- The `Default target path` is the already-resolved directory for default file notes. When the user doesn't specify another folder, use `Default target path/<filename>.md` directly. Do not append the default folder to the default target path again.
 - The default folder is used when the user doesn't specify a folder. If the user specifies a different folder, write there instead.
 
 **Filename pattern (default):** `{papertitle}-{notetitle}-{date}.md`
@@ -257,7 +257,7 @@ Three components, joined by single hyphens:
 
 **Writing steps:**
 
-1. Construct the file path: `{notesDirectoryPath}/{folder}/<filename>.md`, using the native path separator from the runtime platform section.
+1. Construct the file path: `{defaultTargetPath}/<filename>.md` unless the user explicitly specifies another folder, using the native path separator from the runtime platform section.
 2. Call `file_io({ action:'write', filePath, content:noteContent })`.
 3. If writing fails, report the error clearly with the attempted path.
 

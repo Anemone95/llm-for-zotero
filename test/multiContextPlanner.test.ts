@@ -5,7 +5,11 @@ import {
   resolveMultiContextPlan,
   selectContextAssemblyMode,
 } from "../src/modules/contextPanel/multiContextPlanner";
-import { COLLECTION_RETRIEVAL_MAX_PAPERS } from "../src/modules/contextPanel/constants";
+import {
+  COLLECTION_RETRIEVAL_MAX_PAPERS,
+  COLLECTION_RETRIEVAL_MIN_SCORE_FALLBACK_PAPERS,
+  MAX_FULL_TEXT_PAPER_CONTEXTS,
+} from "../src/modules/contextPanel/constants";
 import {
   buildChunkMetadata,
   buildPaperKey,
@@ -73,6 +77,7 @@ type MockItem = {
   }>;
   getField: (field: string) => string;
   getAttachments: () => number[];
+  getTags?: () => Array<{ tag: string; type?: number }>;
 };
 
 type MockCollection = {
@@ -97,6 +102,7 @@ function registerMockPaper(params: {
   citationKey?: string;
   abstractNote?: string;
   dateModified?: string;
+  tags?: Array<{ tag: string; type?: number }>;
   pdfContext: PdfContext;
 }): PaperContextRef {
   const parent: MockItem = {
@@ -128,6 +134,7 @@ function registerMockPaper(params: {
       }
     },
     getAttachments: () => [params.contextItemId],
+    getTags: () => params.tags || [],
   };
   const attachment: MockItem = {
     id: params.contextItemId,
@@ -189,6 +196,11 @@ describe("multiContextPlanner", function () {
       Items: {
         get(id: number) {
           return zoteroItems.get(id) || null;
+        },
+        getAll(libraryID: number) {
+          return Array.from(zoteroItems.values()).filter(
+            (item) => item.libraryID === libraryID && item.isRegularItem(),
+          );
         },
       },
       Collections: {
@@ -626,9 +638,41 @@ describe("multiContextPlanner", function () {
     assert.match(plan.contextText, /Title: Pinned [AB]/);
   });
 
+  it("caps full-text prompt preload without dropping retrieval paper refs", async function () {
+    const papers = Array.from(
+      { length: MAX_FULL_TEXT_PAPER_CONTEXTS + 5 },
+      (_, index) => ({
+        itemId: 7_000 + index,
+        contextItemId: 8_000 + index,
+        title: `Full cap paper ${String(index + 1).padStart(2, "0")}`,
+      }),
+    );
+
+    const plan = await resolveMultiContextPlan({
+      conversationMode: "open",
+      activeContextItem: null,
+      question: "Compare the selected papers.",
+      paperContexts: papers,
+      fullTextPaperContexts: papers,
+      historyPaperContexts: [],
+      history: [],
+      model: "gpt-5.4",
+      advanced: {
+        temperature: 0.2,
+        maxTokens: 512,
+        inputTokenCap: 1_000_000,
+      },
+    });
+
+    assert.equal(plan.mode, "full");
+    assert.equal(plan.selectedPaperCount, MAX_FULL_TEXT_PAPER_CONTEXTS);
+    assert.include(plan.contextText, "Title: Full cap paper 30");
+    assert.notInclude(plan.contextText, "Title: Full cap paper 31");
+  });
+
   it("metadata-ranks large collection scopes and caps deep retrieval", async function () {
     const itemIds: number[] = [];
-    for (let index = 1; index <= 60; index += 1) {
+    for (let index = 1; index <= 120; index += 1) {
       const suffix = String(index).padStart(3, "0");
       itemIds.push(1_000 + index);
       registerMockPaper({
@@ -677,20 +721,21 @@ describe("multiContextPlanner", function () {
     });
 
     assert.equal(plan.mode, "retrieval");
-    assert.include(plan.contextText, "Selected Zotero collection scopes:");
+    assert.include(plan.contextText, "Selected Zotero context scopes:");
     assert.include(
       plan.contextText,
-      "Collection manifest (PDF-backed papers):",
+      "Scope manifest (PDF-backed papers):",
     );
     assert.include(plan.contextText, "metadata-ranked shortlist");
     assert.include(
       plan.contextText,
-      `${COLLECTION_RETRIEVAL_MAX_PAPERS} of 60 PDF-backed papers selected`,
+      `${COLLECTION_RETRIEVAL_MAX_PAPERS} of 120 PDF-backed papers selected`,
     );
     assert.include(plan.contextText, "Title: Calibration Drift Paper 001");
-    assert.include(plan.contextText, "Title: Calibration Drift Paper 060");
-    assert.include(plan.contextText, "itemId=1060");
-    assert.include(plan.contextText, "contextItemId=2060");
+    assert.include(plan.contextText, "Title: Calibration Drift Paper 100");
+    assert.include(plan.contextText, "Title: Calibration Drift Paper 120");
+    assert.include(plan.contextText, "itemId=1100");
+    assert.include(plan.contextText, "contextItemId=2100");
     assert.isAtMost(plan.selectedPaperCount, COLLECTION_RETRIEVAL_MAX_PAPERS);
     assert.isAtLeast(plan.citationPaperContexts?.length || 0, 1);
     assert.isAtMost(
@@ -703,7 +748,132 @@ describe("multiContextPlanner", function () {
     );
     assert.notInclude(
       (plan.citationPaperContexts || []).map((paper) => paper.title),
-      "Calibration Drift Paper 060",
+      "Calibration Drift Paper 120",
+    );
+  });
+
+  it("metadata-ranks selected tag scopes and builds a tag manifest", async function () {
+    for (let index = 1; index <= 8; index += 1) {
+      registerMockPaper({
+        itemId: 5_000 + index,
+        contextItemId: 6_000 + index,
+        title: `Stable Tag Paper ${index}`,
+        firstCreator: "Tagger",
+        year: "2026",
+        abstractNote:
+          index <= 2
+            ? "This abstract discusses stable oscillation retrieval."
+            : "This abstract is unrelated filler.",
+        tags: [{ tag: "Stable", type: 0 }],
+        pdfContext: buildPdfContext(`Stable Tag Paper ${index}`, [
+          `${"stable oscillation ".repeat(80)}paper ${index}`.trim(),
+        ]),
+      });
+    }
+    registerMockPaper({
+      itemId: 5_100,
+      contextItemId: 6_100,
+      title: "Outside Tag Paper",
+      firstCreator: "Other",
+      year: "2026",
+      abstractNote: "Outside scope.",
+      tags: [{ tag: "Other", type: 0 }],
+      pdfContext: buildPdfContext("Outside Tag Paper", ["Outside scope."]),
+    });
+
+    const plan = await resolveMultiContextPlan({
+      conversationMode: "open",
+      activeContextItem: null,
+      question: "What does stable oscillation retrieval say?",
+      tagContexts: [
+        {
+          name: "Stable",
+          normalizedName: "stable",
+          libraryID: 1,
+        },
+      ],
+      paperContexts: [],
+      fullTextPaperContexts: [],
+      historyPaperContexts: [],
+      history: [],
+      model: "gpt-4o-mini",
+      advanced: {
+        temperature: 0.2,
+        maxTokens: 512,
+        inputTokenCap: 8_000,
+      },
+    });
+
+    assert.equal(plan.mode, "retrieval");
+    assert.include(plan.contextText, "Selected Zotero context scopes:");
+    assert.include(plan.contextText, "- Stable [tag=Stable, libraryID=1, papers=8]");
+    assert.include(plan.contextText, "Scope manifest (PDF-backed papers):");
+    assert.include(plan.contextText, "Title: Stable Tag Paper 1");
+    assert.include(plan.contextText, "itemId=5001");
+    assert.notInclude(plan.contextText, "Outside Tag Paper");
+    assert.isAtLeast(plan.selectedPaperCount, 1);
+    assert.include(
+      (plan.citationPaperContexts || []).map((paper) => paper.title),
+      "Stable Tag Paper 1",
+    );
+  });
+
+  it("keeps no-score collection fallback below the broad shortlist cap", async function () {
+    const itemIds: number[] = [];
+    for (let index = 1; index <= 60; index += 1) {
+      itemIds.push(9_000 + index);
+      registerMockPaper({
+        itemId: 9_000 + index,
+        contextItemId: 10_000 + index,
+        title: `Unrelated Folder Paper ${String(index).padStart(3, "0")}`,
+        firstCreator: "NoMatch",
+        year: "2026",
+        abstractNote: "Alpha beta gamma content.",
+        pdfContext: buildPdfContext(`Unrelated Folder Paper ${index}`, [
+          "Alpha beta gamma content.",
+        ]),
+      });
+    }
+    zoteroCollections.set(88, {
+      id: 88,
+      name: "Unrelated Folder",
+      libraryID: 1,
+      getChildItems: () => itemIds,
+      getChildCollections: () => [],
+    });
+
+    const plan = await resolveMultiContextPlan({
+      conversationMode: "open",
+      activeContextItem: null,
+      question: "zzzznonmatch",
+      collectionContexts: [
+        {
+          collectionId: 88,
+          name: "Unrelated Folder",
+          libraryID: 1,
+        },
+      ],
+      paperContexts: [],
+      fullTextPaperContexts: [],
+      historyPaperContexts: [],
+      history: [],
+      model: "gpt-4o-mini",
+      advanced: {
+        temperature: 0.2,
+        maxTokens: 512,
+        inputTokenCap: 8_000,
+      },
+    });
+
+    assert.include(
+      plan.contextText,
+      `${COLLECTION_RETRIEVAL_MIN_SCORE_FALLBACK_PAPERS} of 60 PDF-backed papers selected`,
+    );
+    assert.include(plan.contextText, "Title: Unrelated Folder Paper 010");
+    assert.include(plan.contextText, "Title: Unrelated Folder Paper 060");
+    assert.isAtMost(
+      plan.selectedPaperCount,
+      COLLECTION_RETRIEVAL_MIN_SCORE_FALLBACK_PAPERS,
     );
   });
 
@@ -761,7 +931,7 @@ describe("multiContextPlanner", function () {
     assert.equal(plan.mode, "retrieval");
     assert.include(
       plan.contextText,
-      "Collection manifest (PDF-backed papers):",
+      "Scope manifest (PDF-backed papers):",
     );
     assert.include(plan.contextText, "Citation key: SmallKey1");
     for (let index = 1; index <= 6; index += 1) {

@@ -9,13 +9,18 @@ import {
   PAPER_CONTEXT_REF_SCHEMA,
   validateObject,
 } from "../shared";
-import { normalizeTarget, normalizeTargets, resolveDefaultTargets } from "./pdfToolUtils";
+import {
+  normalizeTarget,
+  normalizeTargets,
+  resolveDefaultTargets,
+} from "./pdfToolUtils";
 import type { PdfTarget } from "./pdfToolUtils";
 
 type SearchPaperInput = {
   target?: PdfTarget;
   targets?: PdfTarget[];
   question?: string;
+  queryVariants?: string[];
   topK?: number;
   perPaperTopK?: number;
 };
@@ -33,7 +38,7 @@ export function createSearchPaperTool(
       description:
         "Search for specific evidence within papers using a question. " +
         "Returns the most relevant passages ranked by relevance. " +
-        "Supports up to 10 papers per call. Automatically indexes PDFs if needed. If mineruCacheDir is available, first use file_io on MinerU manifest.json/full.md for summaries or section reads; use search_paper only for targeted evidence that MinerU did not already answer.",
+        "Supports up to 10 papers per call. Automatically indexes PDFs if needed. For ordinary summaries, section reads, and targeted paper Q&A, use paper_read; use search_paper only for targeted evidence search that paper_read did not already answer.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -77,6 +82,12 @@ export function createSearchPaperTool(
             type: "string",
             description: "What to search for in the paper(s).",
           },
+          queryVariants: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Optional search probes such as translations, acronyms, notation variants, or technical equivalents.",
+          },
           topK: {
             type: "number",
             description: "Max total results to return (default 6).",
@@ -114,6 +125,17 @@ export function createSearchPaperTool(
           typeof args.question === "string" && args.question.trim()
             ? args.question.trim()
             : undefined,
+        queryVariants: Array.isArray(args.queryVariants)
+          ? Array.from(
+              new Set(
+                args.queryVariants
+                  .map((entry) =>
+                    typeof entry === "string" ? entry.trim() : "",
+                  )
+                  .filter(Boolean),
+              ),
+            )
+          : undefined,
         topK: normalizePositiveInt(args.topK),
         perPaperTopK: normalizePositiveInt(args.perPaperTopK),
       };
@@ -156,8 +178,13 @@ export function createSearchPaperTool(
         results: await retrievalService.retrieveEvidence({
           papers,
           question: input.question || context.request.userText,
+          queryVariants: input.queryVariants,
+          model: context.request.model,
           apiBase: context.request.apiBase,
           apiKey: context.request.apiKey,
+          authMode: context.request.authMode,
+          providerProtocol: context.request.providerProtocol,
+          reasoning: context.request.reasoning,
           topK: input.topK,
           perPaperTopK: input.perPaperTopK,
         }),

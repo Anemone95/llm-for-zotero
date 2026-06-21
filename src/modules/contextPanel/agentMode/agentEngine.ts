@@ -87,7 +87,9 @@ import type {
   PaperContextRef,
   QuoteCitation,
   SelectedTextSource,
+  TagContextRef,
 } from "../../../shared/types";
+import type { ResolvedContextSource } from "../types";
 import type { UsageStats } from "../../../shared/llm";
 import type { ReasoningConfig as LLMReasoningConfig } from "../../../utils/llmClient";
 import type { ChatMessage } from "../../../utils/llmClient";
@@ -174,6 +176,25 @@ function appendPendingFinalText(
   message.text = message.pendingFinalText || message.text;
 }
 
+export function mergeAgentToolResultQuoteCitations(
+  message: { quoteCitations?: QuoteCitation[] },
+  event: Pick<Extract<AgentEvent, { type: "tool_result" }>, "ok"> & {
+    content?: unknown;
+    artifacts?: unknown;
+  },
+): void {
+  if (!event.ok) return;
+  const toolQuoteCitations = mergeQuoteCitations(
+    extractQuoteCitationsFromToolContent(event.content),
+    extractQuoteCitationsFromToolContent(event.artifacts),
+  );
+  if (!toolQuoteCitations.length) return;
+  message.quoteCitations = mergeQuoteCitations(
+    message.quoteCitations,
+    toolQuoteCitations,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Types for panel helpers (defined inline to avoid importing from chat.ts)
 // ---------------------------------------------------------------------------
@@ -252,7 +273,7 @@ function showInlineConfirmationCard(
     return;
   }
   const wrapper = ownerDoc.createElement("div");
-  wrapper.className = "llm-action-inline-card";
+  wrapper.className = "llm-action-inline-card llm-action-inline-card-review";
   wrapper.dataset.requestId = requestId;
   wrapper.appendChild(renderPendingActionCard(ownerDoc, { requestId, action }));
   chatBox.appendChild(wrapper);
@@ -320,15 +341,13 @@ type EffectiveRequestConfigShape = {
     | "api_key"
     | "codex_auth"
     | "codex_app_server"
-    | "copilot_auth"
-    | "webchat";
+    | "copilot_auth";
   providerProtocol?:
     | "codex_responses"
     | "responses_api"
     | "openai_chat_compat"
     | "anthropic_messages"
-    | "gemini_native"
-    | "web_sync";
+    | "gemini_native";
   modelEntryId?: string;
   modelProviderLabel?: string;
   reasoning: LLMReasoningConfig | undefined;
@@ -345,6 +364,7 @@ type BuildAgentRuntimeRequestParamsShape = {
   paperContexts: PaperContextRef[];
   fullTextPaperContexts: PaperContextRef[];
   selectedCollectionContexts?: CollectionContextRef[];
+  selectedTagContexts?: TagContextRef[];
   attachments: ChatAttachment[] | undefined;
   screenshots: string[] | undefined;
   forcedSkillIds?: string[];
@@ -365,6 +385,7 @@ type ReconstructedRetryPayload = {
   fullTextPaperContexts: PaperContextRef[];
   citationPaperContexts?: PaperContextRef[];
   selectedCollectionContexts: CollectionContextRef[];
+  selectedTagContexts: TagContextRef[];
 };
 
 // ---------------------------------------------------------------------------
@@ -478,15 +499,13 @@ export type AgentEngineDeps = {
       | "api_key"
       | "codex_auth"
       | "codex_app_server"
-      | "copilot_auth"
-      | "webchat";
+      | "copilot_auth";
     providerProtocol?:
       | "codex_responses"
       | "responses_api"
       | "openai_chat_compat"
       | "anthropic_messages"
-      | "gemini_native"
-      | "web_sync";
+      | "gemini_native";
     modelEntryId?: string;
     modelProviderLabel?: string;
     reasoning?: LLMReasoningConfig;
@@ -513,6 +532,8 @@ export type AgentEngineDeps = {
     item: Zotero.Item,
     paperContexts?: PaperContextRef[],
     fullTextPaperContexts?: PaperContextRef[],
+    excludePaperKeys?: Set<string>,
+    contextSource?: ResolvedContextSource | null,
   ) => {
     paperContexts: PaperContextRef[];
     fullTextPaperContexts: PaperContextRef[];
@@ -527,6 +548,10 @@ export type AgentEngineDeps = {
     fallbackText?: string,
   ) => void;
   sanitizeText: (text: string) => string;
+  finalizeAssistantQuoteCitations: (
+    assistantMessage: Pick<Message, "text" | "quoteCitations">,
+    pairedUserMessage?: Message | null,
+  ) => Promise<void>;
   appendReasoningPart: (base: string | undefined, next?: string) => string;
 
   // Persistence
@@ -563,6 +588,7 @@ export async function sendAgentTurn(
   opts: {
     body: Element;
     item: Zotero.Item;
+    contextSource?: ResolvedContextSource | null;
     question: string;
     images?: string[];
     model?: string;
@@ -572,15 +598,13 @@ export async function sendAgentTurn(
       | "api_key"
       | "codex_auth"
       | "codex_app_server"
-      | "copilot_auth"
-      | "webchat";
+      | "copilot_auth";
     providerProtocol?:
       | "codex_responses"
       | "responses_api"
       | "openai_chat_compat"
       | "anthropic_messages"
-      | "gemini_native"
-      | "web_sync";
+      | "gemini_native";
     modelEntryId?: string;
     modelProviderLabel?: string;
     reasoning?: LLMReasoningConfig;
@@ -593,6 +617,7 @@ export async function sendAgentTurn(
     paperContexts?: PaperContextRef[];
     fullTextPaperContexts?: PaperContextRef[];
     selectedCollectionContexts?: CollectionContextRef[];
+    selectedTagContexts?: TagContextRef[];
     attachments?: ChatAttachment[];
     modelAttachments?: ChatAttachment[];
     forcedSkillIds?: string[];
@@ -602,6 +627,7 @@ export async function sendAgentTurn(
   const {
     body,
     item,
+    contextSource,
     question,
     images,
     model,
@@ -621,6 +647,7 @@ export async function sendAgentTurn(
     paperContexts,
     fullTextPaperContexts,
     selectedCollectionContexts,
+    selectedTagContexts,
     attachments,
     modelAttachments,
     forcedSkillIds,
@@ -699,6 +726,10 @@ export async function sendAgentTurn(
     selectedCollectionContexts: selectedCollectionContexts?.length
       ? selectedCollectionContexts
       : undefined,
+    selectedTagContexts: selectedTagContexts?.length
+      ? selectedTagContexts
+      : undefined,
+    forcedSkillIds: forcedSkillIds?.length ? forcedSkillIds.slice() : undefined,
   };
   if (modelAttachments !== undefined) {
     userMessage.modelAttachments = modelAttachments;
@@ -715,8 +746,10 @@ export async function sendAgentTurn(
       selectedTextSources: userMessage.selectedTextSources,
       selectedTextPaperContexts: userMessage.selectedTextPaperContexts,
       selectedTextNoteContexts: userMessage.selectedTextNoteContexts,
+      forcedSkillIds: userMessage.forcedSkillIds,
       citationPaperContexts: userMessage.citationPaperContexts,
       selectedCollectionContexts: userMessage.selectedCollectionContexts,
+      selectedTagContexts: userMessage.selectedTagContexts,
       screenshotImages: userMessage.screenshotImages,
       attachments: userMessage.attachments,
       modelAttachments: userMessage.modelAttachments,
@@ -783,7 +816,7 @@ export async function sendAgentTurn(
     deps.scheduleQueuedInputDrain(body, {
       conversationSystem: deps.getConversationSystem(),
       conversationKey,
-      webChatActive: effectiveRequestConfig.providerProtocol === "web_sync",
+      webChatActive: false,
     });
   setStatusSafely(
     "Checking the request against the attached context.",
@@ -805,6 +838,8 @@ export async function sendAgentTurn(
     item,
     normalizedPaperContexts,
     normalizedFullTextPaperContexts,
+    undefined,
+    contextSource,
   );
   userMessage.paperContexts = paperContextsForMessage.length
     ? paperContextsForMessage
@@ -827,10 +862,12 @@ export async function sendAgentTurn(
       selectedTextSources: userMessage.selectedTextSources,
       selectedTextPaperContexts: userMessage.selectedTextPaperContexts,
       selectedTextNoteContexts: userMessage.selectedTextNoteContexts,
+      forcedSkillIds: userMessage.forcedSkillIds,
       paperContexts: userMessage.paperContexts,
       fullTextPaperContexts: userMessage.fullTextPaperContexts,
       citationPaperContexts: userMessage.citationPaperContexts,
       selectedCollectionContexts: userMessage.selectedCollectionContexts,
+      selectedTagContexts: userMessage.selectedTagContexts,
       screenshotImages: userMessage.screenshotImages,
       attachments: userMessage.attachments,
       modelAttachments: userMessage.modelAttachments,
@@ -849,6 +886,7 @@ export async function sendAgentTurn(
     paperContexts: paperContextsForMessage,
     fullTextPaperContexts: fullTextPaperContextsForMessage,
     selectedCollectionContexts,
+    selectedTagContexts,
     attachments: modelAttachments ?? attachments,
     screenshots: images,
     forcedSkillIds,
@@ -885,6 +923,7 @@ export async function sendAgentTurn(
         paperContexts,
         fullTextPaperContexts,
         selectedCollectionContexts,
+        selectedTagContexts,
         attachments,
         modelAttachments,
         runtimeMode: "agent",
@@ -966,6 +1005,7 @@ export async function sendAgentTurn(
             fullTextPaperContexts: userMessage.fullTextPaperContexts,
             citationPaperContexts: userMessage.citationPaperContexts,
             selectedCollectionContexts: userMessage.selectedCollectionContexts,
+            selectedTagContexts: userMessage.selectedTagContexts,
             attachments: userMessage.attachments,
             modelAttachments: userMessage.modelAttachments,
             modelName: userMessage.modelName,
@@ -1092,16 +1132,7 @@ export async function sendAgentTurn(
           }
           case "tool_result": {
             if (!event.ok) break;
-            const toolQuoteCitations = mergeQuoteCitations(
-              extractQuoteCitationsFromToolContent(event.content),
-              extractQuoteCitationsFromToolContent(event.artifacts),
-            );
-            if (toolQuoteCitations.length) {
-              assistantMessage.quoteCitations = mergeQuoteCitations(
-                assistantMessage.quoteCitations,
-                toolQuoteCitations,
-              );
-            }
+            mergeAgentToolResultQuoteCitations(assistantMessage, event);
             const toolPaperContexts = deps.normalizePaperContexts([
               ...extractPaperContextCandidatesFromToolContent(event.content),
               ...extractPaperContextCandidatesFromToolContent(event.artifacts),
@@ -1131,6 +1162,7 @@ export async function sendAgentTurn(
                 citationPaperContexts: userMessage.citationPaperContexts,
                 selectedCollectionContexts:
                   userMessage.selectedCollectionContexts,
+                selectedTagContexts: userMessage.selectedTagContexts,
                 screenshotImages: userMessage.screenshotImages,
                 attachments: userMessage.attachments,
                 modelAttachments: userMessage.modelAttachments,
@@ -1304,6 +1336,7 @@ export async function sendAgentTurn(
       assistantMessage.pendingFinalText ||
       assistantMessage.text ||
       "No response.";
+    await deps.finalizeAssistantQuoteCitations(assistantMessage, userMessage);
     assistantMessage.pendingFinalText = undefined;
     assistantMessage.waitingAnimationStartedAt = undefined;
     assistantMessage.streaming = false;
@@ -1375,7 +1408,6 @@ export async function retryAgentTurn(
     | "codex_auth"
     | "codex_app_server"
     | "copilot_auth"
-    | "webchat"
     | undefined,
   providerProtocol:
     | "codex_responses"
@@ -1383,7 +1415,6 @@ export async function retryAgentTurn(
     | "openai_chat_compat"
     | "anthropic_messages"
     | "gemini_native"
-    | "web_sync"
     | undefined,
   modelEntryId: string | undefined,
   modelProviderLabel: string | undefined,
@@ -1467,7 +1498,7 @@ export async function retryAgentTurn(
     deps.scheduleQueuedInputDrain(body, {
       conversationSystem: deps.getConversationSystem(),
       conversationKey,
-      webChatActive: effectiveRequestConfig.providerProtocol === "web_sync",
+      webChatActive: false,
     });
   refreshChatSafely(); // Immediately clear the old trace from view
 
@@ -1477,6 +1508,7 @@ export async function retryAgentTurn(
     paperContexts,
     fullTextPaperContexts,
     selectedCollectionContexts,
+    selectedTagContexts,
   } = deps.reconstructRetryPayload(retryPair.userMessage);
   if (!question.trim()) {
     setStatusSafely("Nothing to retry for latest turn", "error");
@@ -1529,6 +1561,7 @@ export async function retryAgentTurn(
     paperContexts,
     fullTextPaperContexts,
     selectedCollectionContexts,
+    selectedTagContexts,
     attachments: retryModelAttachments,
     screenshots: screenshotImages,
     effectiveRequestConfig,
@@ -1607,6 +1640,7 @@ export async function retryAgentTurn(
           citationPaperContexts: retryPair.userMessage.citationPaperContexts,
           selectedCollectionContexts:
             retryPair.userMessage.selectedCollectionContexts,
+          selectedTagContexts: retryPair.userMessage.selectedTagContexts,
           attachments: retryPair.userMessage.attachments,
           modelAttachments: retryPair.userMessage.modelAttachments,
           modelName: retryPair.userMessage.modelName,
@@ -1732,16 +1766,7 @@ export async function retryAgentTurn(
           }
           case "tool_result": {
             if (!event.ok) break;
-            const toolQuoteCitations = mergeQuoteCitations(
-              extractQuoteCitationsFromToolContent(event.content),
-              extractQuoteCitationsFromToolContent(event.artifacts),
-            );
-            if (toolQuoteCitations.length) {
-              assistantMessage.quoteCitations = mergeQuoteCitations(
-                assistantMessage.quoteCitations,
-                toolQuoteCitations,
-              );
-            }
+            mergeAgentToolResultQuoteCitations(assistantMessage, event);
             const toolPaperContexts = deps.normalizePaperContexts([
               ...extractPaperContextCandidatesFromToolContent(event.content),
               ...extractPaperContextCandidatesFromToolContent(event.artifacts),
@@ -1778,6 +1803,7 @@ export async function retryAgentTurn(
                 retryPair.userMessage.citationPaperContexts,
               selectedCollectionContexts:
                 retryPair.userMessage.selectedCollectionContexts,
+              selectedTagContexts: retryPair.userMessage.selectedTagContexts,
               screenshotImages: retryPair.userMessage.screenshotImages,
               attachments: retryPair.userMessage.attachments,
               modelAttachments: retryPair.userMessage.modelAttachments,
@@ -1940,6 +1966,10 @@ export async function retryAgentTurn(
       assistantMessage.pendingFinalText ||
       assistantMessage.text ||
       "No response.";
+    await deps.finalizeAssistantQuoteCitations(
+      assistantMessage,
+      retryPair.userMessage,
+    );
     assistantMessage.pendingFinalText = undefined;
     assistantMessage.waitingAnimationStartedAt = undefined;
     assistantMessage.streaming = false;

@@ -1,8 +1,7 @@
-import type {
-  AgentToolInputValidation,
-} from "../types";
+import type { AgentToolInputValidation } from "../types";
 import type {
   ChatAttachment,
+  PaperContentSourceMode,
   PaperContextRef,
 } from "../../shared/types";
 
@@ -29,8 +28,9 @@ export function normalizePositiveInt(value: unknown): number | undefined {
 }
 
 export function normalizePositiveIntArray(value: unknown): number[] | null {
-  if (!Array.isArray(value)) return null;
-  const out = value
+  const entries = normalizeBracketedArray(value);
+  if (!entries) return null;
+  const out = entries
     .map((entry) => normalizePositiveInt(entry))
     .filter((entry): entry is number => Number.isFinite(entry));
   if (!out.length) return null;
@@ -38,12 +38,46 @@ export function normalizePositiveIntArray(value: unknown): number[] | null {
 }
 
 export function normalizeStringArray(value: unknown): string[] | null {
-  if (!Array.isArray(value)) return null;
-  const out = value
+  const entries = normalizeBracketedArray(value);
+  if (!entries) return null;
+  const out = entries
     .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
     .filter(Boolean);
   if (!out.length) return null;
   return Array.from(new Set(out));
+}
+
+function normalizeBracketedArray(value: unknown): unknown[] | null {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return null;
+  try {
+    const repaired = trimmed.replace(/,\s*]/g, "]");
+    const parsed = JSON.parse(repaired);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function normalizePaperContentSourceMode(
+  value: unknown,
+): PaperContentSourceMode | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  switch (normalized) {
+    case "text":
+      return "pdf";
+    case "pdf":
+    case "markdown":
+    case "html":
+    case "txt":
+    case "docx":
+      return normalized;
+    default:
+      return undefined;
+  }
 }
 
 export function normalizeToolPaperContext(
@@ -76,10 +110,7 @@ export function normalizeToolPaperContext(
       typeof value.year === "string" && value.year.trim()
         ? value.year.trim()
         : undefined,
-    mineruCacheDir:
-      typeof value.mineruCacheDir === "string" && value.mineruCacheDir.trim()
-        ? value.mineruCacheDir.trim()
-        : undefined,
+    contentSourceMode: normalizePaperContentSourceMode(value.contentSourceMode),
   };
 }
 
@@ -102,10 +133,15 @@ export const PAPER_CONTEXT_REF_SCHEMA = {
       description: "Zotero attachment/context item ID",
     },
     title: { type: "string" as const },
-    mineruCacheDir: {
+    attachmentTitle: { type: "string" as const },
+    citationKey: { type: "string" as const },
+    firstCreator: { type: "string" as const },
+    year: { type: "string" as const },
+    contentSourceMode: {
       type: "string" as const,
+      enum: ["pdf", "markdown", "html", "txt", "docx"],
       description:
-        "Optional MinerU cache directory for this paper. Prefer file_io on manifest.json/full.md under this path before raw PDF tools.",
+        "Selected source mode for this Zotero context item. Preserve it from context summaries.",
     },
   },
   additionalProperties: false,

@@ -1,6 +1,18 @@
 import { config } from "../../../package.json";
 import { t } from "../../utils/i18n";
 import { ReasoningLevel as LLMReasoningLevel } from "../../utils/llmClient";
+import {
+  buildDefaultUpstreamGlobalConversationKey,
+  isConversationKeyForKind,
+  UPSTREAM_GLOBAL_CONVERSATION_KEY_BASE,
+  UPSTREAM_PAPER_CONVERSATION_KEY_BASE,
+} from "../../shared/conversationKeySpace";
+export { buildDefaultUpstreamGlobalConversationKey };
+export {
+  COLLECTION_RETRIEVAL_MAX_PAPERS,
+  MAX_FULL_TEXT_PAPER_CONTEXTS,
+  MAX_SELECTED_PAPER_CONTEXTS,
+} from "../../shared/contextLimits";
 
 // =============================================================================
 // Constants
@@ -18,28 +30,36 @@ export const RETRIEVAL_MIN_ACTIVE_PAPER_CHUNKS = 2;
 export const RETRIEVAL_MIN_OTHER_PAPER_CHUNKS = 1;
 export const PAPER_FOLLOWUP_RETRIEVAL_MIN_CHUNKS = 2;
 export const PAPER_FOLLOWUP_RETRIEVAL_MAX_CHUNKS = 5;
-export const COLLECTION_RETRIEVAL_MAX_PAPERS = 50;
 export const COLLECTION_RETRIEVAL_MIN_SCORE_FALLBACK_PAPERS = 10;
 export const PERSISTED_HISTORY_LIMIT = 200;
-export const AUTO_SCROLL_BOTTOM_THRESHOLD = 64;
+export const AUTO_SCROLL_BOTTOM_THRESHOLD = 1;
 export const FONT_SCALE_DEFAULT_PERCENT = 120;
 export const FONT_SCALE_MIN_PERCENT = 80;
 export const FONT_SCALE_MAX_PERCENT = 180;
 export const FONT_SCALE_STEP_PERCENT = 10;
+export const MESSAGE_LINE_SPACING_DEFAULT_PERCENT = 150;
+export const MESSAGE_LINE_SPACING_MIN_PERCENT = 150;
+export const MESSAGE_LINE_SPACING_MAX_PERCENT = 250;
+export const MESSAGE_PARAGRAPH_SPACING_DEFAULT_PX = 8;
+export const MESSAGE_PARAGRAPH_SPACING_MIN_PX = 0;
+export const MESSAGE_PARAGRAPH_SPACING_MAX_PX = 32;
+export const MESSAGE_WORD_SPACING_DEFAULT_PX = 0;
+export const MESSAGE_WORD_SPACING_MIN_PX = 0;
+export const MESSAGE_WORD_SPACING_MAX_PX = 8;
 export const SELECTED_TEXT_MAX_LENGTH = 4000;
 export const SELECTED_TEXT_PREVIEW_LENGTH = 240;
 export const MAX_SELECTED_TEXT_CONTEXTS = 5;
-export const MAX_EDITABLE_SHORTCUTS = 10;
+// Total visible editable shortcuts: built-in plus user-created custom shortcuts.
+export const MAX_EDITABLE_SHORTCUTS = 20;
 export const MAX_SELECTED_IMAGES = 50;
 export const MAX_UPLOAD_PDF_SIZE_BYTES = 50 * 1024 * 1024;
-export const MAX_SELECTED_PAPER_CONTEXTS = 10;
 export const CHAT_ATTACHMENTS_DIR_NAME = "chat-attachments";
-export const PAPER_CONVERSATION_KEY_BASE = 1_500_000_000;
-export const GLOBAL_CONVERSATION_KEY_BASE = 2_000_000_000;
+export const PAPER_CONVERSATION_KEY_BASE = UPSTREAM_PAPER_CONVERSATION_KEY_BASE;
+export const GLOBAL_CONVERSATION_KEY_BASE = UPSTREAM_GLOBAL_CONVERSATION_KEY_BASE;
 export const GLOBAL_HISTORY_LIMIT = 50;
 
 export function isUpstreamGlobalConversationKey(conversationKey: number): boolean {
-  return Number.isFinite(conversationKey) && Math.floor(conversationKey) >= GLOBAL_CONVERSATION_KEY_BASE && Math.floor(conversationKey) < 3_000_000_000;
+  return isConversationKeyForKind("upstream", "global", conversationKey);
 }
 
 export function formatFigureCountLabel(
@@ -84,6 +104,7 @@ export const BUILTIN_SHORTCUT_FILES = [
   { id: "key-points", label: "Key Points", file: "key-points.txt" },
   { id: "methodology", label: "Methodology", file: "methodology.txt" },
   { id: "limitations", label: "Limitations", file: "limitations.txt" },
+  { id: "mermaid-diagram", label: "Diagram", file: "mermaid-diagram.txt" },
 ] as const;
 
 

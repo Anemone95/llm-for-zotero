@@ -46,6 +46,10 @@ describe("modelProviders", function () {
     assert.equal(deriveProviderLabel("https://api.moonshot.ai/v1"), "Kimi");
     assert.equal(deriveProviderLabel("https://api.x.ai/v1/responses"), "Grok");
     assert.equal(
+      deriveProviderLabel("https://api.xiaomimimo.com/v1"),
+      "Xiaomi MiMo",
+    );
+    assert.equal(
       deriveProviderLabel("https://api.minimax.io/anthropic"),
       "MiniMax",
     );
@@ -355,7 +359,7 @@ describe("modelProviders", function () {
     assert.equal(entries[0].advanced.maxTokens, 384000);
   });
 
-  it("normalizes missing authMode to api_key for stored groups", function () {
+  it("normalizes missing authMode to Codex app-server for stored groups", function () {
     (
       globalThis.Zotero.Prefs as {
         set: (key: string, value: unknown, global?: boolean) => void;
@@ -382,8 +386,8 @@ describe("modelProviders", function () {
 
     const entries = getRuntimeModelEntries();
     assert.lengthOf(entries, 1);
-    assert.equal(entries[0].authMode, "api_key");
-    assert.equal(entries[0].providerProtocol, "responses_api");
+    assert.equal(entries[0].authMode, "codex_app_server");
+    assert.equal(entries[0].providerProtocol, "codex_responses");
   });
 
   it("forces stored codex auth groups onto codex_responses", function () {

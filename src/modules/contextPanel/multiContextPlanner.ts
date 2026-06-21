@@ -1,4 +1,8 @@
-import type { ChatMessage, ReasoningConfig } from "../../utils/llmClient";
+import type {
+  ChatMessage,
+  ChatParams,
+  ReasoningConfig,
+} from "../../utils/llmClient";
 import {
   estimateAvailableContextBudget,
   callEmbeddings,
@@ -8,6 +12,7 @@ import { estimateTextTokens } from "../../utils/modelInputCap";
 import {
   COLLECTION_RETRIEVAL_MAX_PAPERS,
   COLLECTION_RETRIEVAL_MIN_SCORE_FALLBACK_PAPERS,
+  MAX_FULL_TEXT_PAPER_CONTEXTS,
   PAPER_FOLLOWUP_RETRIEVAL_MAX_CHUNKS,
   PAPER_FOLLOWUP_RETRIEVAL_MIN_CHUNKS,
   RETRIEVAL_MMR_LAMBDA,
@@ -31,10 +36,20 @@ import {
   ensureNoteTextCached,
   buildEvidencePack,
 } from "./pdfContext";
+import {
+  isPdfContextAttachment,
+  isSupportedContextAttachment,
+} from "./contextAttachmentSupport";
 import { mergeQuoteCitations } from "./quoteCitations";
 import { pdfTextCache } from "./state";
 import { sanitizeText } from "./textUtils";
 import { tokenizeRetrievalDiversity } from "./retrievalTokenizer";
+import {
+  buildRetrievalQueryPlan,
+  buildRetrievalQueryPlanCacheKey,
+  resolveRetrievalQueryPlan,
+  type RetrievalQueryPlan,
+} from "./retrievalQueryPlan";
 import {
   planContextCacheReuse,
   shouldPreferCacheAwareFullContext,
@@ -84,7 +99,7 @@ function setCachedRetrievalCandidates(
 /**
  * Evict retrieval candidates for a specific context item (PDF attachment
  * or note), or all entries if no contextItemId is given.
- * Called when chunks change (MinerU refresh) or when the embedding
+ * Called when chunks change or when the embedding
  * provider changes (scores become stale).
  *
  * Paper keys are formatted as "${parentItemId}:${contextItemId}", so we
@@ -132,6 +147,7 @@ import type {
   PaperContextRef,
   PdfContext,
   QuoteCitation,
+  TagContextRef,
 } from "./types";
 
 type PlannerPaperEntry = {
@@ -153,11 +169,7 @@ function getFirstPdfChildAttachment(
   const attachments = item.getAttachments();
   for (const attachmentId of attachments) {
     const attachment = Zotero.Items.get(attachmentId);
-    if (
-      attachment &&
-      attachment.isAttachment() &&
-      attachment.attachmentContentType === "application/pdf"
-    ) {
+    if (isPdfContextAttachment(attachment)) {
       return attachment;
     }
   }
@@ -166,11 +178,7 @@ function getFirstPdfChildAttachment(
 
 function resolveContextItem(ref: PaperContextRef): Zotero.Item | null {
   const direct = Zotero.Items.get(ref.contextItemId);
-  if (
-    direct &&
-    direct.isAttachment() &&
-    direct.attachmentContentType === "application/pdf"
-  ) {
+  if (isSupportedContextAttachment(direct)) {
     return direct;
   }
   if (direct && (direct as any).isNote?.()) {
@@ -185,6 +193,12 @@ function resolveContextItem(ref: PaperContextRef): Zotero.Item | null {
 
 function normalizePaperContextEntries(value: unknown): PaperContextRef[] {
   return normalizePaperContextRefs(value, { sanitizeText });
+}
+
+function limitFullTextPaperContexts(
+  paperContexts: PaperContextRef[],
+): PaperContextRef[] {
+  return paperContexts.slice(0, MAX_FULL_TEXT_PAPER_CONTEXTS);
 }
 
 function buildPaperRefFromContextItem(
@@ -310,14 +324,12 @@ function normalizeMetadataText(value: string): string {
     .trim();
 }
 
-function tokenizeMetadataQuery(question: string): string[] {
-  return Array.from(
-    new Set(
-      normalizeMetadataText(question)
-        .split(/\s+/g)
-        .filter((token) => token.length >= 3),
-    ),
-  );
+function tokenizeMetadataQuery(
+  question: string,
+  queryPlan?: RetrievalQueryPlan,
+): string[] {
+  if (queryPlan?.lexicalTerms.length) return queryPlan.lexicalTerms;
+  return buildRetrievalQueryPlan({ query: question }).lexicalTerms;
 }
 
 function scoreCollectionPaperMetadata(params: {
@@ -386,6 +398,65 @@ function collectCollectionItemIds(
   return Array.from(out);
 }
 
+function getTagContextItemTagNames(
+  item: Zotero.Item,
+  includeAutomatic: boolean,
+): string[] {
+  try {
+    const rawTags = (item as { getTags?: () => unknown[] }).getTags?.();
+    if (!Array.isArray(rawTags)) return [];
+    const out = new Set<string>();
+    for (const entry of rawTags) {
+      let name = "";
+      let type: unknown;
+      if (typeof entry === "string") {
+        name = entry;
+      } else if (entry && typeof entry === "object") {
+        const typed = entry as { tag?: unknown; name?: unknown; type?: unknown };
+        name =
+          typeof typed.tag === "string"
+            ? typed.tag
+            : typeof typed.name === "string"
+              ? typed.name
+              : "";
+        type = typed.type;
+      }
+      const normalized = sanitizeText(name).trim();
+      if (!normalized) continue;
+      if (type === 1 && !includeAutomatic) continue;
+      out.add(normalized);
+    }
+    return Array.from(out);
+  } catch (_err) {
+    return [];
+  }
+}
+
+async function collectTagContextItems(
+  tagContext: TagContextRef,
+): Promise<Zotero.Item[]> {
+  const libraryID = Math.floor(Number(tagContext.libraryID) || 0);
+  if (libraryID <= 0) return [];
+  const allItems = await Promise.resolve(
+    (Zotero.Items as any).getAll?.(libraryID, true, false, false) || [],
+  );
+  if (!Array.isArray(allItems)) return [];
+  const includeAutomatic = tagContext.includeAutomatic === true;
+  const tagName = sanitizeText(
+    tagContext.normalizedName || tagContext.name || "",
+  ).trim();
+  const tagNameLower = tagName.toLowerCase();
+  return allItems.filter((item): item is Zotero.Item => {
+    if (!item?.isRegularItem?.()) return false;
+    const tags = getTagContextItemTagNames(item, includeAutomatic);
+    if (tagContext.scope === "allTagged") return tags.length > 0;
+    if (tagContext.scope === "untagged") return tags.length === 0;
+    return tags.some(
+      (tag) => tag === tagName || tag.toLowerCase() === tagNameLower,
+    );
+  });
+}
+
 type CollectionScopeResolution = {
   papers: PlannerPaperEntry[];
   manifestText: string;
@@ -422,10 +493,10 @@ function buildCollectionManifestText(params: {
   candidates: CollectionPaperCandidate[];
 }): string {
   const lines = [
-    "Selected Zotero collection scopes:",
+    "Selected Zotero context scopes:",
     ...params.scopeLines,
     "",
-    "Collection manifest (PDF-backed papers):",
+    "Scope manifest (PDF-backed papers):",
   ];
   if (!params.candidates.length) {
     lines.push("(No PDF-backed regular items found.)");
@@ -439,14 +510,17 @@ function buildCollectionManifestText(params: {
 
 async function resolveCollectionScopePapers(params: {
   collectionContexts?: CollectionContextRef[];
+  tagContexts?: TagContextRef[];
   question: string;
+  queryPlan?: RetrievalQueryPlan;
   excludePaperKeys: Set<string>;
   orderStart: number;
 }): Promise<CollectionScopeResolution> {
   const collectionContexts = Array.isArray(params.collectionContexts)
     ? params.collectionContexts
     : [];
-  if (!collectionContexts.length) {
+  const tagContexts = Array.isArray(params.tagContexts) ? params.tagContexts : [];
+  if (!collectionContexts.length && !tagContexts.length) {
     return {
       papers: [],
       manifestText: "",
@@ -456,7 +530,10 @@ async function resolveCollectionScopePapers(params: {
     };
   }
 
-  const questionTokens = tokenizeMetadataQuery(params.question);
+  const questionTokens = tokenizeMetadataQuery(
+    params.question,
+    params.queryPlan,
+  );
   const candidates: CollectionPaperCandidate[] = [];
   const scopeLines: string[] = [];
   const manifestSeenPaperKeys = new Set<string>();
@@ -505,6 +582,44 @@ async function resolveCollectionScopePapers(params: {
     );
   }
 
+  for (const tagContext of tagContexts) {
+    const tagName = sanitizeText(tagContext.name).trim();
+    if (!tagName) continue;
+    const items = await collectTagContextItems(tagContext);
+    let tagPaperCount = 0;
+    for (const item of items) {
+      const paperContext = buildPaperRefFromRegularItem(item);
+      if (!paperContext) continue;
+      tagPaperCount += 1;
+      const paperKey = buildPaperKey(paperContext);
+      if (manifestSeenPaperKeys.has(paperKey)) continue;
+      manifestSeenPaperKeys.add(paperKey);
+      const title = paperContext.title;
+      const creators = readItemCreators(item);
+      const year = paperContext.year || readItemField(item, "date");
+      const abstractNote = readItemField(item, "abstractNote");
+      candidates.push({
+        paperContext,
+        score: scoreCollectionPaperMetadata({
+          questionTokens,
+          title,
+          creators,
+          year,
+          abstractNote,
+          collectionName: tagName,
+        }),
+        modifiedAt: readModifiedTimestamp(item),
+      });
+    }
+    totalPaperCount += tagPaperCount;
+    const scopeKind = tagContext.scope
+      ? `tagScope=${tagContext.scope}`
+      : `tag=${tagName}`;
+    scopeLines.push(
+      `- ${tagName} [${scopeKind}, libraryID=${tagContext.libraryID}, papers=${tagPaperCount}]`,
+    );
+  }
+
   candidates.sort((left, right) => {
     const scoreDelta = right.score - left.score;
     if (scoreDelta !== 0) return scoreDelta;
@@ -528,8 +643,12 @@ async function resolveCollectionScopePapers(params: {
   const positive = retrievalCandidates.filter(
     (candidate) => candidate.score > 0,
   );
-  const shortlistSource = positive.length ? positive : retrievalCandidates;
-  const shortlistLimit = positive.length
+  const enoughPositiveMatches =
+    positive.length >= COLLECTION_RETRIEVAL_MIN_SCORE_FALLBACK_PAPERS;
+  const shortlistSource = enoughPositiveMatches
+    ? positive
+    : retrievalCandidates;
+  const shortlistLimit = enoughPositiveMatches
     ? COLLECTION_RETRIEVAL_MAX_PAPERS
     : Math.min(
         COLLECTION_RETRIEVAL_MAX_PAPERS,
@@ -540,7 +659,9 @@ async function resolveCollectionScopePapers(params: {
   for (const [index, candidate] of shortlisted.entries()) {
     const contextItem = resolveContextItem(candidate.paperContext);
     if (contextItem) {
-      await ensurePDFTextCached(contextItem);
+      await ensurePDFTextCached(contextItem, {
+        sourceMode: candidate.paperContext.contentSourceMode,
+      });
     }
     papers.push({
       order: params.orderStart + index,
@@ -767,12 +888,16 @@ export function selectContextAssemblyMode(params: {
 export async function assembleRetrievedMultiPaperContext(params: {
   papers: PlannerPaperEntry[];
   question: string;
+  queryPlan?: RetrievalQueryPlan;
   contextBudgetTokens: number;
   minChunksByPaper?: Map<string, number>;
   options?: RetrievedAssemblyOptions;
 }): Promise<RetrievedAssembly> {
   const { papers, question, contextBudgetTokens, minChunksByPaper, options } =
     params;
+  const queryPlan =
+    params.queryPlan || buildRetrievalQueryPlan({ query: question });
+  const retrievalCacheKey = buildRetrievalQueryPlanCacheKey(queryPlan);
   if (!papers.length || contextBudgetTokens <= 0) {
     return {
       contextText: "",
@@ -786,9 +911,11 @@ export async function assembleRetrievedMultiPaperContext(params: {
   // Pre-compute query embedding once so we don't make N identical API calls
   // for N papers in the loop below.
   let precomputedQueryEmbedding: number[] | undefined;
-  if (question.trim() && checkEmbeddingAvailability()) {
+  if (queryPlan.semanticQuery.trim() && checkEmbeddingAvailability()) {
     try {
-      precomputedQueryEmbedding = (await callEmbeddings([question]))[0];
+      precomputedQueryEmbedding = (
+        await callEmbeddings([queryPlan.semanticQuery])
+      )[0];
     } catch {
       // Embedding unavailable — fall back to BM25-only scoring per paper.
     }
@@ -796,7 +923,10 @@ export async function assembleRetrievedMultiPaperContext(params: {
 
   const allCandidates: PaperContextCandidate[] = [];
   for (const paper of papers) {
-    const cached = getCachedRetrievalCandidates(paper.paperKey, question);
+    const cached = getCachedRetrievalCandidates(
+      paper.paperKey,
+      retrievalCacheKey,
+    );
     if (cached) {
       allCandidates.push(...cached);
       continue;
@@ -809,9 +939,10 @@ export async function assembleRetrievedMultiPaperContext(params: {
         topK: RETRIEVAL_TOP_K_PER_PAPER,
         mode: "evidence",
         precomputedQueryEmbedding,
+        queryPlan,
       },
     );
-    setCachedRetrievalCandidates(paper.paperKey, question, candidates);
+    setCachedRetrievalCandidates(paper.paperKey, retrievalCacheKey, candidates);
     allCandidates.push(...candidates);
   }
 
@@ -1001,7 +1132,9 @@ export async function assembleRetrievedMultiPaperContext(params: {
           new Set(selectedCandidates.map((candidate) => candidate.paperKey)),
         )
       : mergePlannerCitationPaperContexts(papers),
-    quoteCitations: selectedCandidates.length ? evidencePack.quoteCitations : [],
+    quoteCitations: selectedCandidates.length
+      ? evidencePack.quoteCitations
+      : [],
   };
 }
 
@@ -1071,8 +1204,8 @@ async function resolvePlannerPaperEntries(params: {
   historyPaperContexts: PaperContextRef[] | undefined;
 }): Promise<PlannerPaperEntry[]> {
   const selected = normalizePaperContextEntries(params.paperContexts || []);
-  const explicitFullText = normalizePaperContextEntries(
-    params.fullTextPaperContexts || [],
+  const explicitFullText = limitFullTextPaperContexts(
+    normalizePaperContextEntries(params.fullTextPaperContexts || []),
   );
   const historyPool = normalizePaperContextEntries(
     params.historyPaperContexts || [],
@@ -1095,7 +1228,19 @@ async function resolvePlannerPaperEntries(params: {
 
   const pushRef = (paper: PaperContextRef) => {
     const key = buildPaperKey(paper);
-    if (seen.has(key)) return;
+    if (seen.has(key)) {
+      const existingIndex = orderedRefs.findIndex(
+        (entry) => buildPaperKey(entry) === key,
+      );
+      if (
+        existingIndex >= 0 &&
+        !orderedRefs[existingIndex].contentSourceMode &&
+        paper.contentSourceMode
+      ) {
+        orderedRefs[existingIndex] = paper;
+      }
+      return;
+    }
     seen.add(key);
     orderedRefs.push(paper);
   };
@@ -1124,7 +1269,9 @@ async function resolvePlannerPaperEntries(params: {
       if ((contextItem as any).isNote?.()) {
         await ensureNoteTextCached(contextItem);
       } else {
-        await ensurePDFTextCached(contextItem);
+        await ensurePDFTextCached(contextItem, {
+          sourceMode: paperContext.contentSourceMode,
+        });
       }
     }
     const isActive = Boolean(activeKey && paperKey === activeKey);
@@ -1154,6 +1301,7 @@ export async function resolveMultiContextPlan(params: {
   paperContexts?: PaperContextRef[];
   fullTextPaperContexts?: PaperContextRef[];
   collectionContexts?: CollectionContextRef[];
+  tagContexts?: TagContextRef[];
   historyPaperContexts?: PaperContextRef[];
   history?: ChatMessage[];
   images?: string[];
@@ -1168,16 +1316,46 @@ export async function resolveMultiContextPlan(params: {
   systemPrompt?: string;
   signal?: AbortSignal;
 }): Promise<MultiContextPlan> {
+  const fullTextPaperContexts = limitFullTextPaperContexts(
+    normalizePaperContextEntries(params.fullTextPaperContexts || []),
+  );
   const papers = await resolvePlannerPaperEntries({
     conversationMode: params.conversationMode,
     activeContextItem: params.activeContextItem,
     paperContexts: params.paperContexts,
-    fullTextPaperContexts: params.fullTextPaperContexts,
+    fullTextPaperContexts,
     historyPaperContexts: params.historyPaperContexts,
   });
+  const firstPaperTurn =
+    params.conversationMode === "paper" && isFirstPaperTurn(params.history);
+  const hasCollectionContext = Boolean(params.collectionContexts?.length);
+  const hasTagContext = Boolean(params.tagContexts?.length);
+  const queryPlan = await resolveRetrievalQueryPlan({
+    query: params.question,
+    hasRetrievalContext:
+      Boolean(papers.length || hasCollectionContext || hasTagContext) &&
+      (!firstPaperTurn || hasCollectionContext || hasTagContext),
+    model: params.model,
+    apiBase: params.apiBase,
+    apiKey: params.apiKey,
+    authMode: params.authMode as ChatParams["authMode"],
+    providerProtocol: params.providerProtocol,
+    reasoning: params.reasoning,
+    signal: params.signal,
+  });
+  const queryPlanForQuestion = (question: string): RetrievalQueryPlan =>
+    question === params.question
+      ? queryPlan
+      : buildRetrievalQueryPlan({
+          query: question,
+          queryVariants: queryPlan.variants,
+          notes: queryPlan.notes,
+        });
   const collectionScope = await resolveCollectionScopePapers({
     collectionContexts: params.collectionContexts,
+    tagContexts: params.tagContexts,
     question: params.question,
+    queryPlan,
     excludePaperKeys: new Set(papers.map((paper) => paper.paperKey)),
     orderStart: papers.length + 1,
   });
@@ -1222,7 +1400,7 @@ export async function resolveMultiContextPlan(params: {
       strategy: plan.strategy,
       contextText: plan.contextText,
       paperContexts: params.paperContexts,
-      fullTextPaperContexts: params.fullTextPaperContexts,
+      fullTextPaperContexts,
     }),
   });
 
@@ -1245,6 +1423,7 @@ export async function resolveMultiContextPlan(params: {
     const retrieved = await assembleRetrievedMultiPaperContext({
       papers: collectionPapers,
       question: params.question,
+      queryPlan,
       contextBudgetTokens: adjustedContextBudget.contextBudgetTokens,
       minChunksByPaper: new Map<string, number>(),
     });
@@ -1269,9 +1448,6 @@ export async function resolveMultiContextPlan(params: {
   const unpinned = papers.filter((paper) => paper.pinKind === "none");
   const activePaper =
     papers.find((paper) => paper.isActive) || papers[0] || null;
-  const firstPaperTurn =
-    params.conversationMode === "paper" && isFirstPaperTurn(params.history);
-
   if (params.conversationMode === "paper" && activePaper) {
     // Collect other explicitly selected papers (@-referenced) beyond the
     // active paper so they are not silently dropped.
@@ -1310,6 +1486,7 @@ export async function resolveMultiContextPlan(params: {
           extraRetrieved = await assembleRetrievedMultiPaperContext({
             papers: extraRetrievalPapers,
             question: enrichedQuestion,
+            queryPlan: queryPlanForQuestion(enrichedQuestion),
             contextBudgetTokens: remainingTokens,
             minChunksByPaper: buildMinChunkMapForRetrievedPapers(otherUnpinned),
           });
@@ -1380,6 +1557,7 @@ export async function resolveMultiContextPlan(params: {
         extraRetrieved = await assembleRetrievedMultiPaperContext({
           papers: extraRetrievalPapers,
           question: enrichedQuestion,
+          queryPlan: queryPlanForQuestion(enrichedQuestion),
           contextBudgetTokens: remainingTokens,
           minChunksByPaper: buildMinChunkMapForRetrievedPapers(otherUnpinned),
         });
@@ -1424,6 +1602,7 @@ export async function resolveMultiContextPlan(params: {
     const retrieved = await assembleRetrievedMultiPaperContext({
       papers: allRetrievalPapers,
       question: enrichedQuestion,
+      queryPlan: queryPlanForQuestion(enrichedQuestion),
       contextBudgetTokens: adjustedContextBudget.contextBudgetTokens,
       minChunksByPaper: buildMinChunkMapForRetrievedPapers(
         directRetrievalPapers,
@@ -1484,6 +1663,7 @@ export async function resolveMultiContextPlan(params: {
         extraUnpinned = await assembleRetrievedMultiPaperContext({
           papers: extraUnpinnedPapers,
           question: params.question,
+          queryPlan,
           contextBudgetTokens: remainingTokens,
           minChunksByPaper: buildMinChunkMapForRetrievedPapers(unpinned),
         });
@@ -1550,6 +1730,7 @@ export async function resolveMultiContextPlan(params: {
         extraRetrieved = await assembleRetrievedMultiPaperContext({
           papers: retrievalCompanionPapers,
           question: params.question,
+          queryPlan,
           contextBudgetTokens: remainingTokens,
           minChunksByPaper: buildMinChunkMapForRetrievedPapers(
             retrievalCompanionPapers.filter(
@@ -1615,6 +1796,7 @@ export async function resolveMultiContextPlan(params: {
   const retrieved = await assembleRetrievedMultiPaperContext({
     papers: retrievalPapers,
     question: params.question,
+    queryPlan,
     contextBudgetTokens: adjustedContextBudget.contextBudgetTokens,
     minChunksByPaper: buildMinChunkMapForRetrievedPapers(directRetrievalPapers),
   });

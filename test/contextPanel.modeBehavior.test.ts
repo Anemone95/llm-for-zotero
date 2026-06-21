@@ -97,21 +97,6 @@ describe("contextPanel mode behavior", function () {
     );
   });
 
-  it("forces webchat to chat without changing cached intent", function () {
-    const cachedMode = "agent" as const;
-
-    assert.equal(
-      resolveRuntimeModeForConversation({
-        cachedMode,
-        isWebChat: true,
-        agentModeEnabled: true,
-        displayConversationKind: "global",
-      }),
-      "chat",
-    );
-    assert.equal(cachedMode, "agent");
-  });
-
   it("uses explicit cached user choices over defaults", function () {
     assert.equal(
       resolveRuntimeModeForConversation({
@@ -137,7 +122,6 @@ describe("contextPanel mode behavior", function () {
         cachedMode: "chat",
         isRuntimeConversationSystem: true,
         runtimeConversationSystem: "claude_code",
-        isWebChat: true,
         agentModeEnabled: false,
         displayConversationKind: "paper",
       }),
@@ -151,7 +135,6 @@ describe("contextPanel mode behavior", function () {
         cachedMode: "agent",
         isRuntimeConversationSystem: true,
         runtimeConversationSystem: "codex",
-        isWebChat: false,
         agentModeEnabled: true,
         displayConversationKind: "global",
       }),

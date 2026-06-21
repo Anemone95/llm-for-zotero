@@ -39,6 +39,7 @@ declare namespace _ZoteroTypes {
       "codexAppServerPath": string;
       "codexAppServerConversationModeMap": string;
       "codexAppServerZoteroMcpToolsEnabled": boolean;
+      "codexNativeSkillMode": string;
       "codexNativeSkillRoutingMode": string;
       "codexAppServerGlobalConversationMap": string;
       "codexAppServerPaperConversationMap": string;
@@ -62,14 +63,6 @@ declare namespace _ZoteroTypes {
       "obsidianNoteTemplate": string;
       "notesDirectoryNickname": string;
       "locale": string;
-      "mineruMode": string;
-      "mineruLocalApiBase": string;
-      "mineruLocalBackend": string;
-      "mineruAutoWatchCollections": string;
-      "mineruGlobalAutoParse": boolean;
-      "mineruSyncEnabled": boolean;
-      "mineruMaxAutoPages": number;
-      "mineruExcludePatterns": string;
     };
   }
 }

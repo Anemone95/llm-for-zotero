@@ -3,7 +3,7 @@
  *
  * Manages:
  * - Send mode overrides (retrieval / full-next / full-sticky)
- * - Content source overrides (text / mineru / pdf)
+ * - Content source overrides (PDF path and attachment-backed sources)
  * - State clearing and lifecycle
  *
  * Override maps use flat composite keys: "ownerItemId:paperKey"
@@ -17,6 +17,7 @@ import type {
 import {
   selectedPaperContextCache,
   selectedCollectionContextCache,
+  selectedTagContextCache,
   selectedOtherRefContextCache,
   paperContextModeOverrides,
   paperContentSourceOverrides,
@@ -87,12 +88,11 @@ export function clearPaperContentSourceOverrides(itemId: number): void {
 
 export function getNextContentSourceMode(
   current: PaperContentSourceMode,
-  hasMinerU: boolean,
+  hasCachedText: boolean,
 ): PaperContentSourceMode {
-  if (hasMinerU) {
-    return current === "pdf" ? "mineru" : "pdf";
-  }
-  return current === "pdf" ? "text" : "pdf";
+  void current;
+  void hasCachedText;
+  return "pdf";
 }
 
 // ── State clearing ──────────────────────────────────────────────────────────
@@ -108,6 +108,7 @@ export function clearSelectedPaperState(itemId: number): void {
 export function clearAllRefContextState(itemId: number): void {
   clearSelectedPaperState(itemId);
   selectedCollectionContextCache.delete(itemId);
+  selectedTagContextCache.delete(itemId);
   selectedOtherRefContextCache.delete(itemId);
 }
 

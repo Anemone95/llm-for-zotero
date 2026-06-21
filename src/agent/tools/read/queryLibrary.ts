@@ -195,6 +195,13 @@ function resolveReferenceItemId(
   if (contextualPaper?.itemId) {
     return contextualPaper.itemId;
   }
+  if (
+    context.request.conversationKind === "global" ||
+    context.request.selectedCollectionContexts?.length ||
+    context.request.selectedTagContexts?.length
+  ) {
+    return null;
+  }
   const activePaperContext = zoteroGateway.getActivePaperContext(
     context.item || zoteroGateway.getItem(context.request.activeItemId),
   );
