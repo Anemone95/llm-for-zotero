@@ -124,7 +124,7 @@ function buildClassifierPrompt(
     context.push(`- Screenshots attached: ${request.screenshots.length}`);
   if (request.fullTextPaperContexts?.length)
     context.push(
-      `- Full-text papers marked: ${request.fullTextPaperContexts.length}`,
+      `- PDF papers in context: ${request.fullTextPaperContexts.length}`,
     );
   if (request.selectedCollectionContexts?.length) {
     context.push(

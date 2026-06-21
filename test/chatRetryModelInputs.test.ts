@@ -250,7 +250,7 @@ describe("chat retry model inputs", function () {
     };
   }
 
-  it("fails same-provider retries when the target no longer supports full PDF mode", async function () {
+  it("fails same-provider retries when the target cannot accept the existing PDF evidence", async function () {
     const screenshotImages = ["data:image/png;base64,abc"];
 
     try {

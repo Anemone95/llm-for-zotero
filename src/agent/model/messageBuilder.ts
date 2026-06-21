@@ -329,7 +329,7 @@ function buildAutoReadInstruction(
   if (!fullTextPapers.length) return "";
   if (resourceContextPlan?.priorReadBlock) {
     return (
-      "TURN RULE: The same full-text paper resources remain in this conversation. " +
+      "TURN RULE: The same PDF paper resources remain in this conversation. " +
       "Reuse the prior paper_read context already in the conversation when it is sufficient. " +
       "Call paper_read({ mode:'targeted', query:'...' }) only if the follow-up asks for evidence that has not already been read."
     );

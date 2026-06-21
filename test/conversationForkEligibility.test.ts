@@ -58,7 +58,7 @@ describe("conversation fork eligibility", function () {
     assert.equal(result.reason, "codex_older_turn");
   });
 
-  it("rejects Claude Code, webchat, compact, pending, and missing native thread states", function () {
+  it("rejects Claude Code, legacy WebChat rows, compact, pending, and missing native thread states", function () {
     assert.equal(
       evaluateConversationForkEligibility({
         system: "claude_code",
@@ -70,7 +70,7 @@ describe("conversation fork eligibility", function () {
       evaluateConversationForkEligibility({
         system: "upstream",
         assistantTimestamp: 200,
-        webchatMode: true,
+        assistantMessage: assistant(200, { webchatRunState: "done" }),
       }).reason,
       "webchat",
     );

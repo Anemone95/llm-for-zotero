@@ -469,7 +469,7 @@ export function buildAgentResourceSnapshot(
       }),
       fullTextPapers: buildPaperResourceRecords({
         group: "fullTextPapers",
-        label: "Full-text paper",
+        label: "PDF paper",
         papers: request.fullTextPaperContexts,
       }),
       collections: buildCollectionResourceRecords(request),
@@ -631,9 +631,9 @@ export function buildAgentStableResourceContextBlock(
   }
   if (request.fullTextPaperContexts?.length) {
     lines.push(
-      "Full-text paper refs for this turn:",
+      "PDF paper refs for this turn:",
       ...request.fullTextPaperContexts.map((entry) =>
-        formatPaperResourceLine("Full-text paper", entry),
+        formatPaperResourceLine("PDF paper", entry),
       ),
       ...request.fullTextPaperContexts
         .flatMap((entry) => buildPaperQuoteCitationGuidance(entry))

@@ -56,7 +56,6 @@ export function evaluateConversationForkEligibility(params: {
   assistantMessage?: ConversationForkEligibilityMessage | null;
   history?: readonly ConversationForkEligibilityMessage[] | null;
   pendingResponse?: boolean;
-  webchatMode?: boolean;
   requireProviderSession?: boolean;
   sourceProviderSessionId?: string | null;
 }): ConversationForkEligibility {
@@ -73,7 +72,6 @@ export function evaluateConversationForkEligibility(params: {
   });
 
   if (params.pendingResponse) return blocked("pending_response");
-  if (params.webchatMode) return blocked("webchat");
   if (params.system === "claude_code") return blocked("claude_code");
   if (params.system !== "upstream" && params.system !== "codex") {
     return blocked("unsupported_system");

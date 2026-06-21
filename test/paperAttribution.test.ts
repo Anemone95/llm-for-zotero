@@ -236,8 +236,7 @@ describe("paperAttribution", function () {
     const stored: PaperContextRef = {
       itemId: 11,
       contextItemId: 12,
-      contentSourceMode: "mineru",
-      mineruCacheDir: "/tmp/mineru-cache",
+      contentSourceMode: "pdf",
       title: "Stored title",
       attachmentTitle: "stored.pdf",
       firstCreator: "Stored et al.",
@@ -248,8 +247,7 @@ describe("paperAttribution", function () {
 
     assert.equal(resolved.itemId, 11);
     assert.equal(resolved.contextItemId, 12);
-    assert.equal(resolved.contentSourceMode, "mineru");
-    assert.equal(resolved.mineruCacheDir, "/tmp/mineru-cache");
+    assert.equal(resolved.contentSourceMode, "pdf");
     assert.equal(resolved.title, "Live title");
     assert.equal(resolved.attachmentTitle, "live.pdf");
     assert.equal(resolved.firstCreator, "Live et al.");

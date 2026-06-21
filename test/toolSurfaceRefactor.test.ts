@@ -672,7 +672,7 @@ describe("semantic tool surface", function () {
     assert.lengthOf(output.artifacts || [], 1);
   });
 
-  it("paper_read visual renders PDF pages when MinerU cache is absent", async function () {
+  it("paper_read visual renders PDF pages without an extracted-text cache", async function () {
     const paperContext = {
       itemId: 11,
       contextItemId: 22,
