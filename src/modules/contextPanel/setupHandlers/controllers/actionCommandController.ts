@@ -110,7 +110,6 @@ type ActionCommandControllerDeps = {
   persistDraftInputForCurrentConversation: () => void;
   shouldRenderDynamicSlashMenu: () => boolean;
   shouldRenderSkillSlashMenu: () => boolean;
-  isWebChatMode: () => boolean;
   isClaudeConversationSystem: () => boolean;
   getCurrentRuntimeMode: () => string;
   setCurrentRuntimeMode: (mode: "chat" | "agent") => void;
@@ -648,15 +647,6 @@ export function createActionCommandController(
     if (!deps.getItem()) {
       closeActionPicker();
       return;
-    }
-    try {
-      if (deps.isWebChatMode()) {
-        closeActionPicker();
-        closeSlashMenu();
-        return;
-      }
-    } catch {
-      /* keep slash closed if mode cannot be resolved */
     }
     closeActionPicker();
     const token = deps.getActiveActionToken();

@@ -604,8 +604,6 @@ export function openStandaloneChat(options?: {
   let currentBasePaperItem: Zotero.Item | null = initialBasePaperItem;
   let currentRawContextItem: Zotero.Item | null =
     sourceItemForResolution || sourceItem || initialMountedItem;
-  let isInWebChatMode = false;
-  let currentChatHooks: SetupHandlersHooks | null = null;
   let standaloneSidebarRenderQueued = false;
   let explicitNewChatInFlight = false;
   let initialRuntimeModeSeeded = false;
@@ -845,10 +843,9 @@ export function openStandaloneChat(options?: {
       const updateStandaloneSystemToggle = () => {
         const targetSystem = getPreferredRuntimeSystem();
         const enabled =
-          !isInWebChatMode &&
-          (resolveActiveNoteSession(activeItem)
+          resolveActiveNoteSession(activeItem)
             ? targetSystem === "codex" || isCodexConversationSystem()
-            : getClaudeCodeModeEnabled() || isCodexAppServerModeEnabled());
+            : getClaudeCodeModeEnabled() || isCodexAppServerModeEnabled();
         systemToggleBtn.style.display = enabled ? "inline-flex" : "none";
         const active = isRuntimeConversationSystem();
         const iconSystem = active ? currentConversationSystem : targetSystem;
@@ -1003,18 +1000,6 @@ export function openStandaloneChat(options?: {
       ) as HTMLDivElement;
       sidebarHeaderActions.className = "llm-standalone-sidebar-actions";
 
-      const webHistoryRefreshBtn = doc.createElementNS(
-        HTML_NS,
-        "button",
-      ) as HTMLButtonElement;
-      webHistoryRefreshBtn.className = "llm-standalone-sidebar-refresh";
-      webHistoryRefreshBtn.type = "button";
-      webHistoryRefreshBtn.textContent = "\u21BB";
-      webHistoryRefreshBtn.title = t("Refresh web history");
-      webHistoryRefreshBtn.setAttribute("aria-label", t("Refresh web history"));
-      webHistoryRefreshBtn.style.display = "none";
-
-      sidebarHeaderActions.append(webHistoryRefreshBtn);
       sidebarHeader.append(sidebarTitle, sidebarHeaderActions);
 
       const standaloneHistoryUndo = doc.createElementNS(
@@ -1297,27 +1282,6 @@ export function openStandaloneChat(options?: {
         mode: entry.kind === "paper" ? "paper" : "open",
       });
 
-      const updateStandaloneWebChatUI = (isWebChat: boolean) => {
-        if (cancelled) return;
-        isInWebChatMode = false;
-        updateStandaloneSystemToggle();
-        syncPaperTabLabel();
-        paperTab.classList.toggle("active", standaloneMode === "paper");
-        openTab.classList.toggle("active", standaloneMode === "open");
-        iconClear.title = t("Clear");
-        iconClear.textContent = "";
-        iconClear.classList.remove("llm-standalone-icon-exit");
-        updateContentTitle();
-        webHistoryRefreshBtn.style.display = "none";
-        sidebarTitle.textContent = t("History");
-        scheduleStandaloneSidebarRender();
-      };
-
-      webHistoryRefreshBtn.addEventListener("click", () => {
-        if (cancelled) return;
-        scheduleStandaloneSidebarRender();
-      });
-
       // -----------------------------------------------------------------------
       // Mount chat UI into contentArea
       // -----------------------------------------------------------------------
@@ -1470,14 +1434,8 @@ export function openStandaloneChat(options?: {
               if (cancelled) return;
               scheduleStandaloneSidebarRender();
             },
-            onWebChatModeChanged: (isWebChat) => {
-              if (cancelled) return;
-              updateStandaloneWebChatUI(isWebChat);
-            },
           };
           setupHandlers(contentArea, mountedItem as any, chatHooks);
-          // Store hooks reference so webchat load handlers can call clearWebChatNewChatIntent
-          currentChatHooks = chatHooks;
 
           refreshChat(contentArea, mountedItem);
           applyPanelFontScale(llmMain);
@@ -1579,8 +1537,6 @@ export function openStandaloneChat(options?: {
 
       const renderSidebar = async () => {
         if (cancelled) return;
-        // In webchat mode, sidebar is managed by renderWebChatSidebar() — skip local rendering
-        if (isInWebChatMode) return;
         ztoolkit.log(
           "LLM: standalone renderSidebar",
           "mode=" + standaloneMode,
@@ -3052,16 +3008,6 @@ export function openStandaloneChat(options?: {
         if (explicitNewChatInFlight) return;
         explicitNewChatInFlight = true;
         try {
-          // [webchat] In webchat mode, delegate to embedded panel's "+" button.
-          // Don't clear sidebar — webchat history stays (conversations live on the web).
-          if (isInWebChatMode) {
-            const embeddedNewBtn = contentArea.querySelector(
-              "#llm-history-new",
-            ) as HTMLElement | null;
-            if (embeddedNewBtn) embeddedNewBtn.click();
-            return;
-          }
-
           if (standaloneMode === "open") {
             const currentLibraryID = getCurrentLibraryScopeID();
             const newKey = await resolveStandaloneGlobalConversation(true);
@@ -3499,14 +3445,6 @@ export function openStandaloneChat(options?: {
 
       const switchToMode = async (mode: "open" | "paper") => {
         try {
-          // [webchat] If in webchat mode and user clicks "Library chat", exit webchat first
-          if (isInWebChatMode && mode === "open") {
-            const clearBtnEl = contentArea.querySelector(
-              "#llm-clear",
-            ) as HTMLElement | null;
-            if (clearBtnEl) clearBtnEl.click();
-          }
-          if (isInWebChatMode && mode === "paper") return;
           if (mode === standaloneMode) return;
 
           if (mode === "open") {

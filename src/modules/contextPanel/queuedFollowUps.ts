@@ -26,9 +26,7 @@ export function setQueuedFollowUpBodySyncCallback(
 export function buildQueuedFollowUpThreadKey(params: {
   conversationSystem?: ConversationSystem | null;
   conversationKey?: number | null;
-  webChatActive?: boolean;
 }): string | null {
-  if (params.webChatActive) return null;
   const rawKey = Number(params.conversationKey);
   if (!Number.isFinite(rawKey) || rawKey <= 0) return null;
   const system = params.conversationSystem || "upstream";

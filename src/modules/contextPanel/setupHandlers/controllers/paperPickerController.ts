@@ -124,7 +124,6 @@ type PaperPickerControllerDeps = {
   paperPickerList: HTMLDivElement | null;
   getItem: () => Zotero.Item | null;
   getCurrentLibraryID: () => number;
-  isWebChatMode: () => boolean;
   resolveAutoLoadedPaperContext: () => PaperContextRef | null;
   getManualPaperContextsForItem: (
     itemId: number,
@@ -2138,14 +2137,6 @@ export function createPaperPickerController(deps: PaperPickerControllerDeps): {
     if (!item || !paperPicker || !paperPickerList) {
       closePaperPicker();
       return;
-    }
-    try {
-      if (deps.isWebChatMode()) {
-        closePaperPicker();
-        return;
-      }
-    } catch {
-      /* keep closed if mode cannot be resolved */
     }
     const slashToken = getActiveAtToken();
     if (!slashToken) {

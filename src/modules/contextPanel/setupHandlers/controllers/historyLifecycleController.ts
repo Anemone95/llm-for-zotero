@@ -3685,8 +3685,7 @@ export function createHistoryLifecycleController(
       closeHistoryMenu();
 
       // Reuse an existing blank draft in the active mode, or create one if none
-      // exists. Webchat above is the only mode where "+" always requests a new
-      // remote conversation.
+      // exists.
       void runExplicitNewChatAction(async () => {
         if (isGlobalMode()) {
           await createAndSwitchGlobalConversation(true);

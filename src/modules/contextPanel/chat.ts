@@ -2674,7 +2674,6 @@ function showNativeMcpActionCard(
 type QueuedInputDrainScope = {
   conversationSystem?: ConversationSystem | string | null;
   conversationKey?: number | null;
-  webChatActive?: boolean;
 };
 
 function normalizeQueuedInputConversationSystem(
@@ -2693,13 +2692,11 @@ function scheduleQueuedInputDrain(
         scope.conversationSystem,
       ),
       conversationKey: scope.conversationKey ?? null,
-      webChatActive: scope.webChatActive === true,
     });
     if (threadKey) {
       scheduleQueuedFollowUpDrainForThread(threadKey);
       return;
     }
-    if (scope.webChatActive) return;
   }
   const threadSchedule = (body as unknown as Record<string, unknown>)[
     SCHEDULE_QUEUED_FOLLOW_UP_THREAD_DRAIN_PROPERTY
@@ -7813,8 +7810,6 @@ export async function sendQuestion(
         reasoningDetails: assistantMessage.reasoningDetails,
         webchatRunState: assistantMessage.webchatRunState,
         webchatCompletionReason: assistantMessage.webchatCompletionReason,
-        webchatChatUrl: assistantMessage.webchatChatUrl,
-        webchatChatId: assistantMessage.webchatChatId,
         quoteCitations: assistantMessage.quoteCitations,
         generatedImages: assistantMessage.generatedImages,
         compactMarker: assistantMessage.compactMarker,
@@ -8570,10 +8565,6 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
   const latestAssistantIndex = latestRetryPair
     ? latestRetryPair.userIndex + 1
     : -1;
-  // [webchat] Resolve provider protocol once for editability checks
-  const renderProviderProtocol = resolveEffectiveRequestConfig({
-    item,
-  }).providerProtocol;
   const conversationIsIdle = !history.some((m) => m.streaming);
   for (const [index, msg] of history.entries()) {
     const isUser = msg.role === "user";
@@ -8584,7 +8575,6 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
       hasItem: Boolean(item),
       conversationIsIdle,
       assistantPair: assistantPairMsg,
-      providerProtocol: renderProviderProtocol,
     });
     const isInlineEditBubble = Boolean(
       canEditUserPrompt &&

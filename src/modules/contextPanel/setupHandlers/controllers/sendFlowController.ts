@@ -174,14 +174,10 @@ type SendFlowControllerDeps = {
   onComposerDraftCleared?: () => void;
   /** Consume forced skill IDs from slash menu selection. Returns the IDs and clears state. */
   consumeForcedSkillIds?: () => string[] | undefined;
-  // [webchat]
   hasActivePdfFullTextPapers?: (
     item: Zotero.Item,
     paperContexts?: any[],
   ) => boolean;
-  hasUploadedPdfInCurrentWebChatConversation?: () => boolean;
-  markWebChatPdfUploadedForCurrentConversation?: () => void;
-  consumeWebChatForceNewChatIntent?: () => boolean;
 };
 
 export function createSendFlowController(deps: SendFlowControllerDeps): {

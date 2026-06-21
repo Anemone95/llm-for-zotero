@@ -89,7 +89,6 @@ type ComposePreviewInteractionControllerDeps = {
     itemId: number,
     paperContext: PaperContextRef,
   ) => string;
-  isWebChatMode: () => boolean;
   resolveCurrentPaperBaseItem: () => Zotero.Item | null;
   clearSelectedImageState: (itemId: number) => void;
   clearSelectedFileState: (itemId: number) => void;

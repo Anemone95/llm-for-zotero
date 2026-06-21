@@ -26,10 +26,10 @@ type FloatingMenuInteractionControllerDeps = {
   shortcutMenu: HTMLDivElement | null;
   paperPicker: HTMLDivElement | null;
   getPaperChipMenu: () => HTMLDivElement | null;
-  getPaperChipMineruCacheMenu: () => HTMLDivElement | null;
+  getPaperChipNestedMenu: () => HTMLDivElement | null;
   getPaperChipMenuSticky: () => boolean;
   getPaperChipMenuAnchor: () => HTMLElement | null;
-  closePaperChipMineruCacheMenu: () => void;
+  closePaperChipNestedMenu: () => void;
   closePaperChipMenu: () => void;
   getItem: () => Zotero.Item | null;
   getInlineEditTarget: () => unknown;
@@ -197,11 +197,11 @@ export function attachFloatingMenuInteractionController(
     }
     const target = event.target as Node | null;
     if (target && paperChipMenu.contains(target)) return;
-    const paperChipMineruCacheMenu = deps.getPaperChipMineruCacheMenu();
-    if (target && paperChipMineruCacheMenu?.contains(target)) return;
+    const paperChipNestedMenu = deps.getPaperChipNestedMenu();
+    if (target && paperChipNestedMenu?.contains(target)) return;
     const paperChipMenuAnchor = deps.getPaperChipMenuAnchor();
     if (target && paperChipMenuAnchor?.contains(target)) return;
-    deps.closePaperChipMineruCacheMenu();
+    deps.closePaperChipNestedMenu();
     deps.closePaperChipMenu();
   };
   panelDoc.addEventListener(

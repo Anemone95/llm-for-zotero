@@ -389,7 +389,7 @@ describe("paper picker controller", function () {
     assert.deepEqual(tagNames.automatic, ["AutoOnly"]);
   });
 
-  it("filters reference candidates with the MinerU tag semantics", function () {
+  it("filters reference candidates with manual and automatic tag semantics", function () {
     const makeGroup = (
       itemId: number,
       tags: string[],
@@ -466,11 +466,9 @@ describe("paper picker controller", function () {
         paperPickerList: null,
         getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
-        isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
         getManualPaperContextsForItem: () =>
           selectedPaperContextCache.get(itemId) || [],
-        isPaperContextMineru: () => false,
         getTextContextConversationKey: () => null,
         persistDraftInputForCurrentConversation: () => undefined,
         updatePaperPreviewPreservingScroll: () => undefined,
@@ -565,11 +563,9 @@ describe("paper picker controller", function () {
         paperPickerList,
         getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
-        isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
         getManualPaperContextsForItem: () =>
           selectedPaperContextCache.get(itemId) || [],
-        isPaperContextMineru: () => false,
         getTextContextConversationKey: () => null,
         persistDraftInputForCurrentConversation: () => undefined,
         updatePaperPreviewPreservingScroll: () => undefined,
@@ -670,11 +666,9 @@ describe("paper picker controller", function () {
         paperPickerList,
         getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
-        isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
         getManualPaperContextsForItem: () =>
           selectedPaperContextCache.get(itemId) || [],
-        isPaperContextMineru: () => false,
         getTextContextConversationKey: () => null,
         persistDraftInputForCurrentConversation: () => undefined,
         updatePaperPreviewPreservingScroll: () => undefined,
@@ -785,11 +779,9 @@ describe("paper picker controller", function () {
         paperPickerList,
         getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
-        isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
         getManualPaperContextsForItem: () =>
           selectedPaperContextCache.get(itemId) || [],
-        isPaperContextMineru: () => false,
         getTextContextConversationKey: () => null,
         persistDraftInputForCurrentConversation: () => undefined,
         updatePaperPreviewPreservingScroll: () => undefined,
@@ -899,11 +891,9 @@ describe("paper picker controller", function () {
         paperPickerList,
         getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
-        isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
         getManualPaperContextsForItem: () =>
           selectedPaperContextCache.get(itemId) || [],
-        isPaperContextMineru: () => false,
         getTextContextConversationKey: () => null,
         persistDraftInputForCurrentConversation: () => undefined,
         updatePaperPreviewPreservingScroll: () => undefined,
@@ -1030,11 +1020,9 @@ describe("paper picker controller", function () {
         paperPickerList,
         getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
-        isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
         getManualPaperContextsForItem: () =>
           selectedPaperContextCache.get(itemId) || [],
-        isPaperContextMineru: () => false,
         getTextContextConversationKey: () => null,
         persistDraftInputForCurrentConversation: () => undefined,
         updatePaperPreviewPreservingScroll: () => undefined,
@@ -1150,11 +1138,9 @@ describe("paper picker controller", function () {
         paperPickerList,
         getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
-        isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
         getManualPaperContextsForItem: () =>
           selectedPaperContextCache.get(itemId) || [],
-        isPaperContextMineru: () => false,
         getTextContextConversationKey: () => null,
         persistDraftInputForCurrentConversation: () => undefined,
         updatePaperPreviewPreservingScroll: () => undefined,
@@ -1267,11 +1253,9 @@ describe("paper picker controller", function () {
         paperPickerList,
         getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
-        isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
         getManualPaperContextsForItem: () =>
           selectedPaperContextCache.get(itemId) || [],
-        isPaperContextMineru: () => false,
         getTextContextConversationKey: () => null,
         persistDraftInputForCurrentConversation: () => undefined,
         updatePaperPreviewPreservingScroll: () => undefined,
@@ -1420,10 +1404,8 @@ describe("paper picker controller", function () {
         paperPickerList: paperPickerList as unknown as HTMLDivElement,
         getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
-        isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
         getManualPaperContextsForItem: () => [],
-        isPaperContextMineru: () => false,
         getTextContextConversationKey: () => null,
         persistDraftInputForCurrentConversation: () => undefined,
         updatePaperPreviewPreservingScroll: () => undefined,
@@ -1522,11 +1504,9 @@ describe("paper picker controller", function () {
         paperPickerList,
         getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
-        isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
         getManualPaperContextsForItem: () =>
           selectedPaperContextCache.get(itemId) || [],
-        isPaperContextMineru: () => false,
         getTextContextConversationKey: () => null,
         persistDraftInputForCurrentConversation: () => undefined,
         updatePaperPreviewPreservingScroll: () => undefined,
@@ -1654,11 +1634,9 @@ describe("paper picker controller", function () {
         paperPickerList,
         getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
-        isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
         getManualPaperContextsForItem: () =>
           selectedPaperContextCache.get(itemId) || [],
-        isPaperContextMineru: () => false,
         getTextContextConversationKey: () => null,
         persistDraftInputForCurrentConversation: () => undefined,
         updatePaperPreviewPreservingScroll: () => undefined,

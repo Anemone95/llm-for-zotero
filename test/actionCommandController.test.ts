@@ -370,7 +370,6 @@ function createControllerHarness(
       options.shouldRenderDynamicSlashMenu || (() => true),
     shouldRenderSkillSlashMenu:
       options.shouldRenderSkillSlashMenu || (() => true),
-    isWebChatMode: () => false,
     isClaudeConversationSystem:
       options.isClaudeConversationSystem || (() => false),
     getCurrentRuntimeMode: () => "chat",
@@ -1209,7 +1208,6 @@ describe("actionCommandController", function () {
       persistDraftInputForCurrentConversation: () => undefined,
       shouldRenderDynamicSlashMenu: () => true,
       shouldRenderSkillSlashMenu: () => true,
-      isWebChatMode: () => false,
       isClaudeConversationSystem: () => false,
       getCurrentRuntimeMode: () => "chat",
       setCurrentRuntimeMode: () => {

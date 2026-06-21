@@ -50,14 +50,6 @@ function buildOptionsForItems(params: {
   return buildPaperSourceOptions({
     paperContext: params.paperContext,
     getItemById: (itemId) => itemsById.get(itemId) || null,
-    webChatMode: false,
-    pdfSupport: "native",
-    isMineruEnabled: false,
-    getItemStatus: () => undefined,
-    isPaperContextMineru: () => false,
-    mineruAvailableIds: new Set(),
-    fullPdfUnsupportedMessage: "PDF unsupported",
-    mineruDisabledParsingMessage: "",
     translate: (text) => text,
   });
 }

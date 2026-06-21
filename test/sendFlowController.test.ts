@@ -544,7 +544,7 @@ describe("sendFlowController", function () {
     assert.equal(getLastEditRuntimeMode(), "agent");
   });
 
-  it("blocks provider-upload full-PDF mode in latest-turn edit retries", async function () {
+  it("blocks provider-upload PDF mode in latest-turn edit retries", async function () {
     const {
       controller,
       getCounts,
@@ -629,7 +629,7 @@ describe("sendFlowController", function () {
       getModelPdfSupport: () => "none" as const,
       resolvePdfPaperAttachments: async () => [pdfAttachment],
       renderPdfPagesAsImages: async () => {
-        throw new Error("should not render full PDF pages");
+        throw new Error("should not render PDF page images");
       },
     });
 
@@ -717,7 +717,7 @@ describe("sendFlowController", function () {
       getModelPdfSupport: () => "none" as const,
       resolvePdfPaperAttachments: async () => [paperPdf],
       renderPdfPagesAsImages: async () => {
-        throw new Error("should not render full PDF pages");
+        throw new Error("should not render PDF page images");
       },
     });
 
@@ -822,7 +822,7 @@ describe("sendFlowController", function () {
       getModelPdfSupport: () => "none" as const,
       resolvePdfPaperAttachments: async () => [pdfAttachment],
       renderPdfPagesAsImages: async () => {
-        throw new Error("should not render full PDF pages");
+        throw new Error("should not render PDF page images");
       },
     });
 
@@ -1422,7 +1422,7 @@ describe("sendFlowController", function () {
         getModelPdfSupport: () => "none" as const,
         resolvePdfPaperAttachments: async () => [pdfAttachment],
         renderPdfPagesAsImages: async () => {
-          throw new Error("should not render full PDF pages");
+          throw new Error("should not render PDF page images");
         },
       });
 

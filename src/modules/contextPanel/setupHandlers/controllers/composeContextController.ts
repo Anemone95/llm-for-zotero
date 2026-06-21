@@ -32,7 +32,6 @@ type PaperChipSourceMenuOption = {
   mode?: PaperContentSourceMode;
   paperContext?: Pick<PaperContextRef, "itemId" | "contextItemId"> | null;
   disabledReason?: string;
-  mineruAction?: string;
 };
 
 export function isPaperContextFullTextOnlySourceMode(
@@ -52,7 +51,6 @@ export function hasPaperChipSourceMenuOption(
 ): boolean {
   return sourceOptions.some((option) => {
     if (option.disabledReason) return false;
-    if (option.mineruAction && option.mineruAction !== "select") return true;
     const optionContext = option.paperContext;
     if (!option.mode || !optionContext) return false;
     const itemId = Number(optionContext.itemId);
