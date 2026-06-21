@@ -27,7 +27,7 @@ const MERMAID_WINDOW_ZOOM_MAX = 4;
 const MERMAID_WINDOW_ZOOM_STEP = 0.25;
 const MERMAID_WINDOW_WHEEL_ZOOM_DELTA_MAX = 24;
 const MERMAID_WINDOW_WHEEL_ZOOM_SENSITIVITY = 0.002;
-const MERMAID_WINDOW_ROOT_ID = "llmforzotero-standalone-mermaid-root";
+const MERMAID_WINDOW_ROOT_ID = `${config.addonRef}-standalone-mermaid-root`;
 const MERMAID_WINDOW_FEATURES =
   "chrome,extrachrome,menubar,resizable,scrollbars,status,centerscreen,dialog=no,dependent=no";
 

@@ -1,4 +1,4 @@
-# llm-for-zotero custom build
+# zotero-codex-claude
 
 This fork is derived from
 [yilewang/llm-for-zotero](https://github.com/yilewang/llm-for-zotero).
@@ -23,10 +23,10 @@ npm run build
 The generated Zotero add-on is:
 
 ```text
-.scaffold/build/llm-for-zotero.xpi
+.scaffold/build/zotero-codex-claude.xpi
 ```
 
 ## Install
 
 In Zotero, open `Tools` -> `Add-ons` -> gear icon -> `Install Add-on From File`,
-then select `.scaffold/build/llm-for-zotero.xpi`.
+then select `.scaffold/build/zotero-codex-claude.xpi`.

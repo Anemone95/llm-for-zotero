@@ -273,7 +273,7 @@ async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
   const keyset = doc.getElementById("mainKeyset");
   if (keyset) {
     const key = doc.createXULElement("key");
-    key.id = "llmforzotero-key-standalone";
+    key.id = `${config.addonRef}-key-standalone`;
     key.setAttribute("modifiers", "accel,shift");
     key.setAttribute("key", "L");
     key.setAttribute("oncommand", "void(0)");
@@ -302,7 +302,7 @@ function registerPrefsPane() {
     pluginID: addon.data.config.addonID,
     id: PREFERENCES_PANE_ID,
     src: `chrome://${addon.data.config.addonRef}/content/preferences.xhtml`,
-    label: "llm-for-zotero",
+    label: config.addonName,
     image: `chrome://${addon.data.config.addonRef}/content/icons/icon-20.png`,
   });
 }
@@ -311,8 +311,8 @@ async function onMainWindowUnload(win: Window): Promise<void> {
   ztoolkit.unregisterAll();
   addon.data.dialog?.window?.close();
   addon.data.standaloneWindow?.close();
-  win.document.getElementById("llmforzotero-open-standalone")?.remove();
-  win.document.getElementById("llmforzotero-key-standalone")?.remove();
+  win.document.getElementById(`${config.addonRef}-open-standalone`)?.remove();
+  win.document.getElementById(`${config.addonRef}-key-standalone`)?.remove();
 }
 
 function onShutdown(): void {

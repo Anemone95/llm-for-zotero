@@ -12,10 +12,10 @@ item-info-row-example-label = 示例行
 
 # LLM 面板
 llm-panel-head =
-    .label = llm-for-zotero
+    .label = zotero-codex-claude
 llm-panel-sidenav-tooltip =
     .tooltiptext = 与 AI 讨论当前文档
-llm-panel-title = LLM 助手
+llm-panel-title = zotero-codex-claude
 llm-panel-subtitle = 向 AI 提问关于您的文档
 llm-panel-send = 发送
 llm-panel-placeholder = 询问关于这篇论文的问题...

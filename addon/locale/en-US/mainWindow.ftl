@@ -12,10 +12,10 @@ item-info-row-example-label = Example Row
 
 # LLM Panel
 llm-panel-head =
-    .label = llm-for-zotero
+    .label = zotero-codex-claude
 llm-panel-sidenav-tooltip =
     .tooltiptext = Chat with AI about the current document
-llm-panel-title = LLM-for-Zotero
+llm-panel-title = zotero-codex-claude
 llm-panel-subtitle = Ask questions about your documents
 llm-panel-send = Send
 llm-panel-placeholder = Ask a question about this paper...

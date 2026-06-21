@@ -21,6 +21,7 @@ import {
   ensureConversationLoaded,
   getConversationKey,
 } from "./chat";
+import { config } from "./constants";
 import { resolveContextSourceItemAsync } from "./contextResolution";
 import {
   decorateAssistantCitationLinks,
@@ -393,7 +394,7 @@ async function waitForStandaloneReady(): Promise<Document> {
   while (Date.now() - startedAt < 7000) {
     const win = getStandaloneWindowForTest();
     const doc = win?.document;
-    const root = doc?.getElementById("llmforzotero-standalone-chat-root");
+    const root = doc?.getElementById(`${config.addonRef}-standalone-chat-root`);
     const paperTab = doc?.querySelector(
       ".llm-standalone-tab[data-tab='paper']",
     );

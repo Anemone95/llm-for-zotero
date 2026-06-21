@@ -105,7 +105,7 @@ Personal thoughts, critiques, open questions, and connections to other work.
 
 ---
 
-Written by LLM-for-Zotero.
+Written by zotero-codex-claude.
 ```
 
 ### Template for general notes
@@ -125,7 +125,7 @@ tags: [zotero]
 
 ---
 
-Written by LLM-for-Zotero.
+Written by zotero-codex-claude.
 ```
 
 ### How to apply the template
@@ -139,7 +139,7 @@ Written by LLM-for-Zotero.
 - **Look-up fields**: `citekey`, `doi`, `journal`, `year`. If a value is genuinely missing in Zotero metadata, use an empty string (e.g., `doi: ""`) rather than omitting the key — keep the frontmatter shape consistent.
 - For **non-paper notes**: use the general template. Do not add paper-specific metadata fields (doi, journal, citekey, year).
 - **References section is mandatory for paper notes.** Replace `{{fullCitation}}` with a full human-readable citation for the paper the note is about — format: `Authors (Year). *Title*. Journal, Volume(Issue), Pages. DOI.` — using whatever subset of fields Zotero actually has. If a field is unknown, mark it in brackets (e.g., `[volume unknown]`) rather than omitting silently. When the note cites additional papers beyond the active one, list each as a separate bullet under `## References`.
-- **Footer is mandatory on every note** (paper or general, Zotero or file-based). End the note with a horizontal rule followed by `Written by LLM-for-Zotero.` on its own line, exactly as shown in the templates. For HTML Zotero notes, use `<hr/><p>Written by LLM-for-Zotero.</p>`.
+- **Footer is mandatory on every note** (paper or general, Zotero or file-based). End the note with a horizontal rule followed by `Written by zotero-codex-claude.` on its own line, exactly as shown in the templates. For HTML Zotero notes, use `<hr/><p>Written by zotero-codex-claude.</p>`.
 
 **Checklist before writing the note — verify each item:**
 
@@ -150,7 +150,7 @@ Written by LLM-for-Zotero.
 5. `tags:` is present.
 6. You identified the `{notetitle}` subtopic (figure label, section name, topic) separately — it goes into the filename in Step 4b, never into `title:`.
 7. `## References` is populated with a full human-readable citation for the paper (or the first cited paper). No bare `[@]`, no empty brackets, no placeholder text.
-8. The note ends with the footer `---` then a blank line then `Written by LLM-for-Zotero.` (or the HTML equivalent for Zotero HTML notes).
+8. The note ends with the footer `---` then a blank line then `Written by zotero-codex-claude.` (or the HTML equivalent for Zotero HTML notes).
 
 ### Step 3 — Include figures
 
@@ -290,7 +290,7 @@ Any placeholder the user writes (`{citekey}`, `{firstauthor}`, `{year}`, `{doi}`
 - **Never** output the full note text in chat. Always use `note_write` or `file_io`.
 - Use the note template above — frontmatter is locked to the 7 fields shown; do not add or remove fields.
 - Use `[@citekey]` Pandoc syntax inline **only when `citekey` is non-empty**. When `citekey` is missing/empty, reference in prose (`First-Author et al. (Year)`) and rely on the full citation in `## References`. **Never emit `[@]`.** Adapt citation syntax to the target format (e.g., `[cite:@citekey]` for Org-mode) when citekey exists.
-- **Every note ends with the footer** `---\n\nWritten by LLM-for-Zotero.` — no exceptions, no omissions, regardless of destination or format.
+- **Every note ends with the footer** `---\n\nWritten by zotero-codex-claude.` — no exceptions, no omissions, regardless of destination or format.
 - Use the native path separator provided in the runtime platform section. Never mix separators.
 - If the user has replaced this skill's managed block with their own customization (either by editing the block directly or by writing their own template outside the MANAGED markers), follow their customization instead of the defaults above.
 

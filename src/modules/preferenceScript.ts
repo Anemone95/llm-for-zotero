@@ -1806,7 +1806,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       );
       push(
         d.getElementById(
-          "llmforzotero-standalone-chat-root",
+          `${config.addonRef}-standalone-chat-root`,
         ) as HTMLElement | null,
       );
     }
@@ -1817,7 +1817,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         .forEach((n: Element) => push(n as HTMLElement));
       push(
         standaloneWin.document.getElementById(
-          "llmforzotero-standalone-chat-root",
+          `${config.addonRef}-standalone-chat-root`,
         ) as HTMLElement | null,
       );
     }

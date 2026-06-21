@@ -1,6 +1,7 @@
 import { createElement } from "../../utils/domHelpers";
 import { t } from "../../utils/i18n";
 import {
+  config,
   PREFERENCES_PANE_ID,
   getSelectTextExpandedLabel,
   getScreenshotExpandedLabel,
@@ -127,7 +128,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   // });
   const title = createElement(doc, "div", "llm-title", {
     id: "llm-title-static",
-    textContent: t("LLM-for-Zotero"),
+    textContent: t(config.addonName),
   });
   if (hasItem) {
     title.style.display = "none";

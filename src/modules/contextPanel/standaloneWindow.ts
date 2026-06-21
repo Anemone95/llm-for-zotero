@@ -579,7 +579,7 @@ export function openStandaloneChat(options?: {
 
   const newWin = mainWin.openDialog(
     `chrome://${config.addonRef}/content/standaloneChat.xhtml`,
-    "llmforzotero-standalone-chat",
+    `${config.addonRef}-standalone-chat`,
     STANDALONE_WINDOW_FEATURES,
   ) as Window | null;
   if (!newWin) {
@@ -765,7 +765,7 @@ export function openStandaloneChat(options?: {
 
       // Mount into the root div
       const root = doc.getElementById(
-        "llmforzotero-standalone-chat-root",
+        `${config.addonRef}-standalone-chat-root`,
       ) as HTMLElement | null;
       if (!root) return;
 
@@ -3648,7 +3648,7 @@ export function openStandaloneChat(options?: {
       // Show a visible error so the window isn't silently blank
       try {
         const root = newWin.document?.getElementById(
-          "llmforzotero-standalone-chat-root",
+          `${config.addonRef}-standalone-chat-root`,
         );
         const target = root || newWin.document?.body;
         if (target) {
@@ -3691,7 +3691,7 @@ export function openStandaloneChat(options?: {
     setStandalonePending(false);
     // Remove the standalone window's content area from panel tracking
     const root = newWin.document?.getElementById(
-      "llmforzotero-standalone-chat-root",
+      `${config.addonRef}-standalone-chat-root`,
     );
     const contentArea = root?.querySelector(".llm-standalone-content");
     if (contentArea) {

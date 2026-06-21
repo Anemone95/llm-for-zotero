@@ -1,13 +1,13 @@
 {
-  "name": "llm-for-zotero",
+  "name": "zotero-codex-claude",
   "type": "module",
   "version": "3.8.21",
   "description": "AI research agent rooted in your Zotero library",
   "config": {
-    "addonName": "llm-for-zotero",
-    "addonID": "zotero-llm@github.com.yilewang",
-    "addonRef": "llmforzotero",
-    "addonInstance": "LLMForZotero",
+    "addonName": "zotero-codex-claude",
+    "addonID": "zotero-codex-claude@github.com.Anemone95",
+    "addonRef": "zoterocodexclaude",
+    "addonInstance": "ZoteroCodexClaude",
     "prefsPrefix": "extensions.zotero.llmforzotero"
   },
   "repository": {

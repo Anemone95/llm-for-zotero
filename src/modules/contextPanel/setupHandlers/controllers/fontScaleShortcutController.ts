@@ -1,4 +1,5 @@
 import {
+  config,
   FONT_SCALE_DEFAULT_PERCENT,
   FONT_SCALE_MAX_PERCENT,
   FONT_SCALE_MIN_PERCENT,
@@ -20,7 +21,7 @@ export function attachFontScaleShortcutController(panelDoc: Document): void {
     const panel = panelDoc.querySelector("#llm-main") as HTMLElement | null;
     if (!panel) return null;
     const standaloneRoot = panelDoc.getElementById(
-      "llmforzotero-standalone-chat-root",
+      `${config.addonRef}-standalone-chat-root`,
     ) as HTMLElement | null;
     if (standaloneRoot) return panel;
     const target = event.target as Node | null;
@@ -53,7 +54,7 @@ export function attachFontScaleShortcutController(panelDoc: Document): void {
     event.stopPropagation();
     applyPanelFontScale(panel);
     const standaloneRoot = panelDoc.getElementById(
-      "llmforzotero-standalone-chat-root",
+      `${config.addonRef}-standalone-chat-root`,
     ) as HTMLElement | null;
     if (standaloneRoot) applyPanelFontScale(standaloneRoot);
   };

@@ -744,7 +744,7 @@
 /* Font-scale vars on standalone root so sidebar/tabs share the same scale
    as the embedded chat panel (whose .llm-panel defines the same vars).
    applyPanelFontScale() sets --llm-font-scale on both .llm-panel and this root. */
-#llmforzotero-standalone-chat-root {
+#zoterocodexclaude-standalone-chat-root {
   --llm-font-scale: 1;
   --llm-fs-10: calc(10px * var(--llm-font-scale));
   --llm-fs-11: calc(11px * var(--llm-font-scale));
@@ -773,9 +773,9 @@
   --llm-history-orphan-chip-bg: rgba(239, 68, 68, 0.12);
 }
 
-.window-is-dark #llmforzotero-standalone-chat-root,
-:root[lwtheme-brighttext] #llmforzotero-standalone-chat-root,
-:root[sizemode][lwtheme-brighttext] #llmforzotero-standalone-chat-root {
+.window-is-dark #zoterocodexclaude-standalone-chat-root,
+:root[lwtheme-brighttext] #zoterocodexclaude-standalone-chat-root,
+:root[sizemode][lwtheme-brighttext] #zoterocodexclaude-standalone-chat-root {
   --llm-popup-surface-bg: color-mix(
     in srgb,
     var(--material-sidepane, var(--material-background, #202020)) 92%,
